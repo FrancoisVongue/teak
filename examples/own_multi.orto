@@ -1,0 +1,11 @@
+// Multiple Own variables, each gets auto-dropped at end of its scope.
+// Compute (5 + 10) * 2 = 30, but using heap-allocated intermediates.
+
+fn main() -> int {
+    let a = own(5);
+    let b = own(10);
+    let sum = unwrap(a) + unwrap(b);
+    let factor = own(2);
+    let result = sum * unwrap(factor);
+    result   // 30
+}

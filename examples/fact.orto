@@ -1,0 +1,11 @@
+fn fact(n: int) -> int {
+    if n <= 1 {
+        1
+    } else {
+        n * fact(n - 1)
+    }
+}
+
+fn main() -> int {
+    fact(7)   // 5040; exit code 5040 mod 256 = 176
+}

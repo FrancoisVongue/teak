@@ -1,0 +1,23 @@
+// Higher-order with user-defined wrappers. Operators are no longer
+// callable by name (no `add` function exists), so to pass `+` as a
+// value you define a small wrapper. This is explicit and obvious.
+
+fn plus(a: int, b: int) -> int { a + b }
+fn times(a: int, b: int) -> int { a * b }
+
+fn apply2(f: fn(int, int) -> int, a: int, b: int) -> int {
+    f(a, b)
+}
+
+fn fold3(f: fn(int, int) -> int, x: int, y: int, z: int) -> int {
+    f(f(x, y), z)
+}
+
+fn main() -> int {
+    let a = apply2(plus,  10, 32);   // 42
+    let b = apply2(times, 6, 7);     // 42
+    let c = fold3(plus, 1, 2, 3);    // 6
+    let d = 5 + 5;                   // 10
+
+    a + b + c + d                    // 100
+}

@@ -1,0 +1,35 @@
+// Linked list. Cons holds the tail behind a Ref, so the type is
+// finite-sized despite being recursive.
+
+enum List[T] {
+    Nil,
+    Cons(T, Ref[List[T]]),
+}
+
+fn length(xs: List[int]) -> int {
+    match xs {
+        Nil          => 0,
+        Cons(_, rest) => 1 + length(deref(rest) ?? Nil),
+    }
+}
+
+fn sum(xs: List[int]) -> int {
+    match xs {
+        Nil          => 0,
+        Cons(h, rest) => h + sum(deref(rest) ?? Nil),
+    }
+}
+
+fn main() -> int {
+    // Build [1, 2, 3, 4] from the back, returning a List value.
+    let tail0 = ref(Nil);
+    let l1: List[int] = Cons(4, tail0);
+    let tail1 = ref(l1);
+    let l2: List[int] = Cons(3, tail1);
+    let tail2 = ref(l2);
+    let l3: List[int] = Cons(2, tail2);
+    let tail3 = ref(l3);
+    let xs: List[int] = Cons(1, tail3);
+
+    length(xs) + sum(xs)   // 4 + 10 = 14
+}

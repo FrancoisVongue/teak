@@ -1,0 +1,29 @@
+// Function-typed fields inside an ADT. After mono each instantiation
+// gets its own struct with the right callback signature.
+
+enum Handler[T] {
+    Constant(T),
+    Compute(fn(int) -> T),
+}
+
+fn run[T](h: Handler[T], input: int) -> T {
+    match h {
+        Constant(v) => v,
+        Compute(f)  => f(input),
+    }
+}
+
+fn square(x: int) -> int { x * x }
+fn always_true(x: int) -> bool { x == x }
+
+fn main() -> int {
+    let h1 : Handler[int]  = Constant(42);
+    let h2 : Handler[int]  = Compute(square);
+    let h3 : Handler[bool] = Compute(always_true);
+
+    let a = run(h1, 0);                       // 42
+    let b = run(h2, 7);                       // 49
+    let c = if run(h3, 99) { 10 } else { 0 }; // 10
+
+    a + b + c   // 42 + 49 + 10 = 101
+}

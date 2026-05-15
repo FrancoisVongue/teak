@@ -1,0 +1,10 @@
+// own in conditional. Both branches must work.
+fn main() -> int {
+    let x = own(7);
+    let result = if unwrap(x) > 5 {
+        100
+    } else {
+        200
+    };
+    result   // 100, but x must still be freed in main
+}

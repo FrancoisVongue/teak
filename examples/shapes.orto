@@ -1,0 +1,50 @@
+enum Shape {
+    Circle(int),
+    Rect(int, int),
+    Square(int),
+}
+
+enum Sign {
+    Positive,
+    Zero,
+    Negative,
+}
+
+fn area(s: Shape) -> int {
+    match s {
+        Circle(r)  => 3 * r * r,
+        Rect(w, h) => w * h,
+        Square(s)  => s * s,
+    }
+}
+
+fn sign_of(n: int) -> Sign {
+    if n > 0 {
+        Positive
+    } else {
+        if n == 0 {
+            Zero
+        } else {
+            Negative
+        }
+    }
+}
+
+fn main() -> int {
+    let s1 = Circle(3);
+    let s2 = Rect(4, 5);
+    let s3 = Square(6);
+
+    let a = area(s1);  // 27
+    let b = area(s2);  // 20
+    let c = area(s3);  // 36
+
+    let sign = sign_of(0 - 7);
+    let d = match sign {
+        Positive => 100,
+        Zero     => 200,
+        Negative => 40,
+    };
+
+    a + b + c + d   // 27 + 20 + 36 + 40 = 123
+}

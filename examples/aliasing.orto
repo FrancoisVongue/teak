@@ -1,0 +1,10 @@
+// Two refs pointing to the same cell observe each other's writes.
+
+fn main() -> int {
+    let a = ref(10);
+    let b = a;                   // copy of {ptr, expected_gen} — same cell!
+
+    let _ = b := 99;             // write through b
+
+    deref(a) ?? panic()          // should see 99 through a
+}

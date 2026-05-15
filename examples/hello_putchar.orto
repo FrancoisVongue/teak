@@ -1,0 +1,32 @@
+// First program that produces visible output.
+// putchar comes from libc — declared via `extern fn`, linker finds it.
+
+extern fn putchar(c: int) -> int
+
+fn print_digit(d: int) -> int {
+    putchar(d + 48)   // ASCII '0' = 48
+}
+
+// Recursive decimal print: head-first, then tail.
+fn print_int(n: int) -> int {
+    if n < 10 {
+        print_digit(n)
+    } else {
+        print_int(n / 10);
+        print_digit(n % 10)
+    }
+}
+
+fn print_newline() -> int {
+    putchar(10)
+}
+
+fn fact(n: int) -> int {
+    if n <= 1 { 1 } else { n * fact(n - 1) }
+}
+
+fn main() -> int {
+    print_int(fact(7));   // prints 5040
+    print_newline();
+    0
+}

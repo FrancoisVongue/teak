@@ -1,0 +1,36 @@
+// Function types: higher-order functions, function values, indirect calls.
+
+fn inc(x: int) -> int { x + 1 }
+fn dbl(x: int) -> int { x * 2 }
+
+// Higher-order: takes a function, applies it twice.
+fn twice(f: fn(int) -> int, x: int) -> int {
+    f(f(x))
+}
+
+// Polymorphic higher-order: works for any T.
+fn apply[T, U](f: fn(T) -> U, x: T) -> U {
+    f(x)
+}
+
+fn add5(x: int) -> int { x + 5 }
+fn is_even(x: int) -> bool { x % 2 == 0 }
+
+fn main() -> int {
+    // Direct higher-order: pass inc.
+    let a = twice(inc, 10);              // 12
+    let b = twice(dbl, 3);            // 12 (3 -> 6 -> 12)
+
+    // Polymorphic higher-order int->int.
+    let c = apply(add5, 20);             // 25
+
+    // Polymorphic higher-order int->bool.
+    let d_bool = apply(is_even, 6);
+    let d = if d_bool { 100 } else { 0 };
+
+    // Bind a function to a local, then call indirectly.
+    let f = inc;
+    let e = f(f(f(5)));                  // 8
+
+    a + b + c + d + e   // 12 + 12 + 25 + 100 + 8 = 157
+}

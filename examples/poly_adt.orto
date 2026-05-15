@@ -1,0 +1,38 @@
+// Polymorphic Pair plus built-in Option exercises mono on parameterized
+// types. Different instantiations -> different C structs after mono.
+
+enum Pair[A, B] {
+    MkPair(A, B),
+}
+
+fn or_default[T](o: Option[T], def: T) -> T {
+    match o {
+        None    => def,
+        Some(x) => x,
+    }
+}
+
+fn fst[A, B](p: Pair[A, B]) -> A {
+    match p {
+        MkPair(a, _) => a,
+    }
+}
+
+fn snd[A, B](p: Pair[A, B]) -> B {
+    match p {
+        MkPair(_, b) => b,
+    }
+}
+
+fn main() -> int {
+    let a : Option[int] = Some(7);
+    let b : Option[int] = None;
+    let p : Pair[int, bool] = MkPair(110, true);
+
+    let v1 = or_default(a, 0);   // 7
+    let v2 = or_default(b, 0);   // 0
+    let v3 = fst(p);              // 110
+    let v4 = if snd(p) { 0 } else { 99 };  // 0
+
+    v1 + v2 + v3 + v4             // 7 + 0 + 110 + 0 = 117
+}

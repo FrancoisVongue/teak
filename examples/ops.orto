@@ -1,0 +1,20 @@
+// Operators: arithmetic, comparison, logical, unary, with precedence.
+// In this language operators are the ONLY way to do these operations —
+// there are no named `add`/`eq`/etc. functions.
+
+fn main() -> int {
+    let a = 2 + 3 * 4;          // 14 (precedence)
+    let b = (2 + 3) * 4;        // 20 (parens)
+    let c = 10 - 3 - 2;         // 5  (left-assoc)
+    let d = 17 % 5;             // 2
+    let e = 100 / 7;            // 14
+    let f = -8 + 10;            // 2  (unary minus)
+
+    let cond = a > 10 && b < 100 || c == 5;
+    let g = if cond { a + b } else { a - b };   // 34
+    let h = if !cond { 0 } else { 1 };          // 1
+    let k = if d != e { 1 } else { 0 };         // 1
+    let l = if e >= 14 { 7 } else { 0 };        // 7
+
+    a + b + c + d + e + f + g + h + k + l       // 100
+}

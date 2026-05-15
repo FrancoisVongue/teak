@@ -1,0 +1,62 @@
+// Stack-based calculator. 3-slot stack as a record, operations as an ADT.
+// Compute  (3 + 4) * 6  =  42.
+
+extern fn putchar(c: int) -> int
+
+struct Stack {
+    top:   int,
+    mid:   int,
+    bot:   int,
+    depth: int,
+}
+
+enum Op {
+    Push(int),
+    Add,
+    Mul,
+    Neg,
+}
+
+fn empty() -> Stack {
+    Stack { top: 0, mid: 0, bot: 0, depth: 0 }
+}
+
+fn push(s: Stack, v: int) -> Stack {
+    Stack { ..s, top: v, mid: s.top, bot: s.mid, depth: s.depth + 1 }
+}
+
+fn binop(s: Stack, result: int) -> Stack {
+    Stack { ..s, top: result, mid: s.bot, bot: 0, depth: s.depth - 1 }
+}
+
+fn apply(s: Stack, op: Op) -> Stack {
+    match op {
+        Push(v) => push(s, v),
+        Add     => binop(s, s.top + s.mid),
+        Mul     => binop(s, s.top * s.mid),
+        Neg     => Stack { ..s, top: 0 - s.top },
+    }
+}
+
+fn print_digit(d: int) -> int { putchar(d + 48) }
+
+fn print_int(n: int) -> int {
+    if n < 10 {
+        print_digit(n)
+    } else {
+        print_int(n / 10);
+        print_digit(n % 10)
+    }
+}
+
+fn main() -> int {
+    let s = empty();
+    let s = apply(s, Push(3));
+    let s = apply(s, Push(4));
+    let s = apply(s, Add);
+    let s = apply(s, Push(6));
+    let s = apply(s, Mul);
+    print_int(s.top);
+    putchar(10);
+    s.top
+}

@@ -1,0 +1,46 @@
+// Built-in Option[T]: Some(T) | None. User defines Result.
+
+enum ResultInt {
+    Ok(int),
+    Err(int),
+}
+
+fn safe_div(a: int, b: int) -> ResultInt {
+    if b == 0 {
+        Err(1)
+    } else {
+        Ok(a / b)
+    }
+}
+
+fn or_zero(o: Option[int]) -> int {
+    match o {
+        None    => 0,
+        Some(x) => x,
+    }
+}
+
+fn first_positive(a: int, b: int) -> Option[int] {
+    if a > 0 {
+        Some(a)
+    } else {
+        if b > 0 {
+            Some(b)
+        } else {
+            None
+        }
+    }
+}
+
+fn main() -> int {
+    let r = safe_div(10, 2);
+    let v = match r {
+        Ok(q)  => q,
+        Err(_) => 0,
+    };
+
+    let o = first_positive(0 - 1, 7);
+    let w = or_zero(o);
+
+    v - w + 13  // 5 - 7 + 13 = 11
+}

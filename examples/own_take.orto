@@ -1,0 +1,7 @@
+// take is semantic — pass-through at runtime. Should give same as unwrap directly.
+
+fn main() -> int {
+    let x = own(42);
+    let y = take(x);
+    unwrap(y)
+}

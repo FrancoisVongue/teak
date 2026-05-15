@@ -1,0 +1,16 @@
+// Polymorphic identity. Same source function, different instantiations
+// at each call site. After mono, C output has `id_int`, `id_bool`.
+
+fn id[T](x: T) -> T {
+    x
+}
+
+fn main() -> int {
+    let a = id(7);
+    let b = id(true);
+    if b {
+        a + 35
+    } else {
+        0
+    }
+}

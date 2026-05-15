@@ -1,0 +1,24 @@
+fn square(x: int) -> int {
+    x * x
+}
+
+fn classify(n: int) -> int {
+    if n < 0 {
+        -1
+    } else {
+        if n == 0 {
+            0
+        } else {
+            1
+        }
+    }
+}
+
+fn main() -> int {
+    let a = square(5);          // 25
+    let b = square(square(2));  // 16
+    let c = classify(a);        // 1
+    let d = classify(-7);       // -1
+    let total = a + b + c + d;  // 25 + 16 + 1 + (-1) = 41
+    total
+}
