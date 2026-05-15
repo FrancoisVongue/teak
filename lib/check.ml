@@ -508,87 +508,6 @@ let check_match_arms_structure
            (String.concat ", " missing)))
   end
 
-(* ---------- consume analysis for Own ---------- *)
-
-(* Determines whether a name `x` is "consumed" — i.e. ownership flows
-   out of the current scope through x. Two ways this can happen in this
-   sub-stage:
-
-   1. `take(x)` is invoked somewhere in the expression tree.
-   2. `x` appears in *tail position* — i.e. as the final result of some
-      branch of computation, meaning ownership flows out of the let
-      that bound it.
-
-   Plain reads of x (like `unwrap(x)`, `deref(x)`, passing as argument
-   anywhere) are NOT consumes. Only the two explicit cases above.
-
-   Tail position analysis: an expression is in tail position when its
-   value becomes the value of the surrounding scope. Examples:
-   - The body of a function (last expression returned).
-   - The body of a TELet (after the value is bound).
-   - Both branches of TEIf.
-   - All arms of TEMatch.
-
-   Important: we don't currently distinguish "function return" from
-   "let body". For our minimal analysis, anywhere a TEVar x appears
-   in tail position counts as a consume. *)
-
-(* takes_consume: does the expression contain `take(x)` directly? *)
-let rec takes_consume (x : string) (e : T.expr) : bool =
-  match e with
-  | T.TEInt _ | T.TEBool _ | T.TEVar _ | T.TEFnRef _ -> false
-  | T.TECall (callee, args, _) ->
-      takes_consume x callee || List.exists (takes_consume x) args
-  | T.TEBinop (_, a, b, _) -> takes_consume x a || takes_consume x b
-  | T.TEUnop (_, a, _) -> takes_consume x a
-  | T.TECtor (_, _, args, _) -> List.exists (takes_consume x) args
-  | T.TERecord (_, _, fields, _) ->
-      List.exists (fun (_, e) -> takes_consume x e) fields
-  | T.TEField (e, _, _) -> takes_consume x e
-  | T.TEIf (c, t, el, _) ->
-      takes_consume x c || takes_consume x t || takes_consume x el
-  | T.TELet (y, _, v, b, _, _) ->
-      takes_consume x v
-      || (y <> x && takes_consume x b)
-  | T.TEMatch (s, _, arms, _) ->
-      takes_consume x s
-      || List.exists (fun (p, body) ->
-        let shadowed = match p with
-          | PWild -> false
-          | PCtor (_, names) -> List.mem x names
-        in
-        not shadowed && takes_consume x body) arms
-  | T.TERef (e, _) -> takes_consume x e
-  | T.TEDeref (e, _) -> takes_consume x e
-  | T.TEAssign (r, v, _) -> takes_consume x r || takes_consume x v
-  | T.TEPanic _ -> false
-  | T.TEOwn (e, _) -> takes_consume x e
-  | T.TETake (arg, _) ->
-      (match arg with
-       | T.TEVar (y, _) when y = x -> true
-       | _ -> takes_consume x arg)
-  | T.TEUnwrap (e, _) -> takes_consume x e
-  | T.TELook (e, _) -> takes_consume x e
-
-(* tail_consume: does x reach the tail position of the expression? *)
-let rec tail_consume (x : string) (e : T.expr) : bool =
-  match e with
-  | T.TEVar (y, _) -> y = x
-  | T.TELet (y, _, _, body, _, _) ->
-      y <> x && tail_consume x body
-  | T.TEIf (_, t, el, _) -> tail_consume x t || tail_consume x el
-  | T.TEMatch (_, _, arms, _) ->
-      List.exists (fun (p, body) ->
-        let shadowed = match p with
-          | PWild -> false
-          | PCtor (_, names) -> List.mem x names
-        in
-        not shadowed && tail_consume x body) arms
-  | _ -> false   (* any other terminal: int, ctor, call result, ... — not x *)
-
-let is_consumed (x : string) (e : T.expr) : bool =
-  takes_consume x e || tail_consume x e
-
 (* ---------- copyability ----------
 
    A type is copyable iff `let y = x` makes semantic sense for it —
@@ -623,6 +542,98 @@ let rec is_copyable (env : env) (t : ty) : bool =
             v.arg_tys)
         td.variants
   | TyApp _ -> true   (* unknown name — should not occur after validate_ty *)
+
+(* ---------- consume analysis for Own ---------- *)
+
+(* Determines whether a name `x` is "consumed" — i.e. ownership flows
+   out of the current scope through x. Three ways this can happen:
+
+   1. `take(x)` is invoked somewhere in the expression tree.
+   2. `x` is passed (as a bare EVar) into a position that requires
+      moving — a function argument, a constructor argument, or a
+      record field value — when the type at that position is
+      non-copyable. The "position is non-copyable" test uses the
+      type of x itself (which after unification must match the
+      formal type), so this naturally subsumes both `Own[T]` and
+      any struct/ADT containing Own.
+   3. `x` appears in *tail position* — as the final result of some
+      branch of computation, meaning ownership flows out of the let
+      that bound it.
+
+   Reads that do not move ownership are NOT consumes: `unwrap(x)`,
+   `deref(x)`, `look(x)`, `x.field`. `ref(x)` is the legacy alloc
+   form; in the new model it would be a borrow that doesn't consume,
+   so we deliberately don't count it here. *)
+
+(* Used by takes_consume to recognise a bare consume in arg position. *)
+let consumed_in_arg (env : env) (x : string) (a : T.expr) : bool =
+  match a with
+  | T.TEVar (y, t) when y = x -> not (is_copyable env t)
+  | _ -> false
+
+(* takes_consume: does the expression contain a direct consume of `x`? *)
+let rec takes_consume (env : env) (x : string) (e : T.expr) : bool =
+  match e with
+  | T.TEInt _ | T.TEBool _ | T.TEVar _ | T.TEFnRef _ -> false
+  | T.TECall (callee, args, _) ->
+      takes_consume env x callee
+      || List.exists (takes_consume env x) args
+      || List.exists (consumed_in_arg env x) args
+  | T.TEBinop (_, a, b, _) ->
+      takes_consume env x a || takes_consume env x b
+  | T.TEUnop (_, a, _) -> takes_consume env x a
+  | T.TECtor (_, _, args, _) ->
+      List.exists (takes_consume env x) args
+      || List.exists (consumed_in_arg env x) args
+  | T.TERecord (_, _, fields, _) ->
+      List.exists (fun (_, e) -> takes_consume env x e) fields
+      || List.exists (fun (_, e) -> consumed_in_arg env x e) fields
+  | T.TEField (e, _, _) -> takes_consume env x e
+  | T.TEIf (c, t, el, _) ->
+      takes_consume env x c
+      || takes_consume env x t
+      || takes_consume env x el
+  | T.TELet (y, _, v, b, _, _) ->
+      takes_consume env x v
+      || (y <> x && takes_consume env x b)
+  | T.TEMatch (s, _, arms, _) ->
+      takes_consume env x s
+      || List.exists (fun (p, body) ->
+        let shadowed = match p with
+          | PWild -> false
+          | PCtor (_, names) -> List.mem x names
+        in
+        not shadowed && takes_consume env x body) arms
+  | T.TERef (e, _) -> takes_consume env x e
+  | T.TEDeref (e, _) -> takes_consume env x e
+  | T.TEAssign (r, v, _) -> takes_consume env x r || takes_consume env x v
+  | T.TEPanic _ -> false
+  | T.TEOwn (e, _) -> takes_consume env x e
+  | T.TETake (arg, _) ->
+      (match arg with
+       | T.TEVar (y, _) when y = x -> true
+       | _ -> takes_consume env x arg)
+  | T.TEUnwrap (e, _) -> takes_consume env x e
+  | T.TELook (e, _) -> takes_consume env x e
+
+(* tail_consume: does x reach the tail position of the expression? *)
+let rec tail_consume (x : string) (e : T.expr) : bool =
+  match e with
+  | T.TEVar (y, _) -> y = x
+  | T.TELet (y, _, _, body, _, _) ->
+      y <> x && tail_consume x body
+  | T.TEIf (_, t, el, _) -> tail_consume x t || tail_consume x el
+  | T.TEMatch (_, _, arms, _) ->
+      List.exists (fun (p, body) ->
+        let shadowed = match p with
+          | PWild -> false
+          | PCtor (_, names) -> List.mem x names
+        in
+        not shadowed && tail_consume x body) arms
+  | _ -> false   (* any other terminal: int, ctor, call result, ... — not x *)
+
+let is_consumed (env : env) (x : string) (e : T.expr) : bool =
+  takes_consume env x e || tail_consume x e
 
 let rec infer (env : env) (tparams : string list)
   (vars : (string * ty) list) (e : expr)
@@ -867,7 +878,7 @@ let rec infer (env : env) (tparams : string list)
         if x = "_" then false
         else
           (match prune tv_ty with
-           | TyApp ("Own", _) -> not (is_consumed x tb)
+           | TyApp ("Own", _) -> not (is_consumed env x tb)
            | _ -> false)
       in
       (T.TELet (x, tv_ty, tv, tb, tb_ty, auto_drop), tb_ty)
@@ -1194,12 +1205,42 @@ let check_func (env : env) (f : func) : T.func =
           "function %S: body has type %s, declared return type is %s"
           f.name (show_ty (zonk tbody_ty)) (show_ty (zonk ret_ty)))));
   let tbody = zonk_expr tbody in
+  (* A parameter of type Own[T] has its scope = the whole body. If the
+     body doesn't move ownership out (take, tail return, or pass to
+     another consuming position), the cell must be freed before the
+     function returns. We express this by wrapping the body in a chain
+     of `let p = p; body` bindings — the outer TELet's auto_drop flag
+     reuses the same drop machinery as ordinary let-bindings. Done
+     fold_right so the first parameter ends up outermost, giving LIFO
+     drop order relative to the parameter list. Alpha-rename later
+     gives the inner `p` a fresh name to avoid C variable collisions. *)
+  (* A parameter of type Own[T] has its scope = the whole body. If the
+     body doesn't move ownership out (take, tail return, or pass to
+     another consuming position), the cell must be freed before the
+     function returns. We express this by wrapping the body in a chain
+     of `let p = p; body` bindings — the outer TELet's auto_drop flag
+     reuses the same drop machinery as ordinary let-bindings. Done
+     fold_right so the first parameter ends up outermost, giving LIFO
+     drop order relative to the parameter list. Alpha-rename later
+     gives the inner `p` a fresh name to avoid C variable collisions. *)
+  let tbody_ty = zonk tbody_ty in
+  let param_tys = List.map zonk param_tys in
+  let body_with_drops =
+    List.fold_right (fun (pname, pty) acc ->
+      match prune pty with
+      | TyApp ("Own", _) when not (is_consumed env pname acc) ->
+          T.TELet (pname, pty, T.TEVar (pname, pty),
+                   acc, tbody_ty, true)
+      | _ -> acc)
+      (List.combine (List.map fst f.params) param_tys)
+      tbody
+  in
   { T.name = f.name;
     T.type_params = f.type_params;
     T.params = List.combine
       (List.map fst f.params) param_tys;
     T.return_ty = ret_ty;
-    T.body = tbody }
+    T.body = body_with_drops }
 
 (* ---------- top-level entry ---------- *)
 
