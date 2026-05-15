@@ -589,6 +589,41 @@ let rec tail_consume (x : string) (e : T.expr) : bool =
 let is_consumed (x : string) (e : T.expr) : bool =
   takes_consume x e || tail_consume x e
 
+(* ---------- copyability ----------
+
+   A type is copyable iff `let y = x` makes semantic sense for it —
+   i.e. the value can be duplicated without violating ownership.
+   Currently the only non-copyable primitive is Own[_]; structural
+   types inherit non-copyability transitively from their fields/variants.
+   Ref[_] is copyable (it's just pointer + generation tag).
+   Type variables are assumed copyable for now — generics carry no
+   bounds yet, and Own-typed arguments can't reach a generic position
+   without an explicit move. *)
+let rec is_copyable (env : env) (t : ty) : bool =
+  match prune t with
+  | TyInt | TyBool -> true
+  | TyVar _        -> true
+  | TyFun _        -> true
+  | TyMeta _       -> true
+  | TyApp ("Own", _) -> false
+  | TyApp ("Ref", _) -> true
+  | TyApp (n, args) when List.mem_assoc n env.records ->
+      let rd = List.assoc n env.records in
+      let subst = List.combine rd.rec_type_params args in
+      List.for_all
+        (fun (_, fty) -> is_copyable env (subst_ty subst fty))
+        rd.rec_fields
+  | TyApp (n, args) when List.mem_assoc n env.types ->
+      let td = List.assoc n env.types in
+      let subst = List.combine td.type_params args in
+      List.for_all
+        (fun v ->
+          List.for_all
+            (fun aty -> is_copyable env (subst_ty subst aty))
+            v.arg_tys)
+        td.variants
+  | TyApp _ -> true   (* unknown name — should not occur after validate_ty *)
+
 let rec infer (env : env) (tparams : string list)
   (vars : (string * ty) list) (e : expr)
   : T.expr * ty =
@@ -801,6 +836,21 @@ let rec infer (env : env) (tparams : string list)
 
   | ELet (x, ascription, value, body) ->
       if x <> "_" then check_not_c_reserved "let-binding" x;
+      (* Non-copyable bindings cannot be aliased through `let y = x`.
+         The legal moves are explicit: `take(x)` to transfer ownership,
+         `ref(x)` to borrow. Detect the bare-EVar form here, before
+         inference, so the error names the source identifier. *)
+      (match value with
+       | EVar y ->
+           (match List.assoc_opt y vars with
+            | Some yty when not (is_copyable env yty) ->
+                raise (Type_error
+                  (Printf.sprintf
+                     "cannot copy %S: type %s is not copyable; \
+                      use take(%s) to move ownership or ref(%s) to borrow"
+                     y (show_ty (zonk yty)) y y))
+            | _ -> ())
+       | _ -> ());
       let (tv, tv_ty) = infer env tparams vars value in
       (match ascription with
        | None -> ()
