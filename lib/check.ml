@@ -634,7 +634,9 @@ let rec takes_consume (env : env) (x : string) (e : T.expr) : bool =
       || takes_consume env x t
       || takes_consume env x el
   | T.TELet (y, _, v, b, _, _) ->
+      (* `let y = x` where x is non-copyable consumes x (move into y). *)
       takes_consume env x v
+      || consumed_in_arg env x v
       || (y <> x && takes_consume env x b)
   | T.TEMatch (s, _, arms, _) ->
       takes_consume env x s
@@ -891,21 +893,6 @@ let rec infer (env : env) (tparams : string list)
 
   | ELet (x, ascription, value, body) ->
       if x <> "_" then check_not_c_reserved "let-binding" x;
-      (* Non-copyable bindings cannot be aliased through `let y = x`.
-         The legal moves are explicit: `take(x)` to transfer ownership,
-         `ref(x)` to borrow. Detect the bare-EVar form here, before
-         inference, so the error names the source identifier. *)
-      (match value with
-       | EVar y ->
-           (match List.assoc_opt y vars with
-            | Some yty when not (is_copyable env yty) ->
-                raise (Type_error
-                  (Printf.sprintf
-                     "cannot copy %S: type %s is not copyable; \
-                      use take(%s) to move ownership or ref(%s) to borrow"
-                     y (show_ty (zonk yty)) y y))
-            | _ -> ())
-       | _ -> ());
       let (tv, tv_ty) = infer env tparams vars value in
       (match ascription with
        | None -> ()
@@ -1250,6 +1237,119 @@ and zonk_expect (t : ty) : ty =
          (show_ty t)))
   else t
 
+(* ---------- move check ----------
+
+   Walks the typed AST tracking which names are still live (not yet
+   moved). A bare-EVar use of a non-copyable name in a move-position
+   (let RHS, fn arg, ctor arg, record field value, unwrap/take arg)
+   removes that name from the live set. Subsequent use of a dead name
+   is a compile error. Branches of if/match must end with the same
+   live set — divergence means the program would leak in one path or
+   double-free in another, so we reject it and require the user to
+   write symmetric branches. *)
+
+module SS = Set.Make (String)
+
+let rec check_moves_expr (env : env) (live : SS.t) (e : T.expr) : SS.t =
+  match e with
+  | T.TEInt _ | T.TEBool _ | T.TEFnRef _ | T.TEPanic _ -> live
+
+  | T.TEVar (x, _) ->
+      if not (SS.mem x live) then
+        raise (Type_error
+          (Printf.sprintf
+             "use of moved name %S — its ownership was transferred earlier"
+             x));
+      live
+
+  | T.TEField (e, _, _) -> check_moves_expr env live e
+
+  | T.TEBinop (_, a, b, _) ->
+      let live = check_moves_expr env live a in
+      check_moves_expr env live b
+
+  | T.TEUnop (_, e, _) -> check_moves_expr env live e
+
+  | T.TECall (callee, args, _) ->
+      let live = check_moves_expr env live callee in
+      List.fold_left (consume_arg env) live args
+
+  | T.TECtor (_, _, args, _) ->
+      List.fold_left (consume_arg env) live args
+
+  | T.TERecord (_, _, fields, _) ->
+      List.fold_left (fun live (_, e) -> consume_arg env live e)
+        live fields
+
+  | T.TEIf (cond, t, el, _) ->
+      let live = check_moves_expr env live cond in
+      let live_t = check_moves_expr env live t in
+      let live_e = check_moves_expr env live el in
+      if not (SS.equal live_t live_e) then
+        raise (Type_error
+          (Printf.sprintf
+             "if branches diverge in ownership: \
+              then leaves [%s] live, else leaves [%s] live — \
+              both branches must move the same names"
+             (String.concat ", " (SS.elements live_t))
+             (String.concat ", " (SS.elements live_e))));
+      live_t
+
+  | T.TELet (x, _, v, b, _, _) ->
+      let live = consume_arg env live v in
+      if x = "_" then check_moves_expr env live b
+      else
+        (* Save the outer status of x in case the let shadows it. After
+           the body, restore that status — the inner binding's life or
+           death doesn't bleed into the outer scope. *)
+        let outer_had = SS.mem x live in
+        let live_inner = SS.add x live in
+        let live_after = check_moves_expr env live_inner b in
+        if outer_had then SS.add x live_after else SS.remove x live_after
+
+  | T.TEMatch (scrut, _, arms, _) ->
+      let live = check_moves_expr env live scrut in
+      let arm_lives = List.map (fun (pat, body) ->
+        let names = match pat with
+          | PWild -> []
+          | PCtor (_, vs) -> List.filter (fun v -> v <> "_") vs
+        in
+        (* Same shadowing handling as TELet. *)
+        let outer_had = List.map (fun v -> (v, SS.mem v live)) names in
+        let live_arm =
+          List.fold_left (fun l v -> SS.add v l) live names
+        in
+        let live_after = check_moves_expr env live_arm body in
+        List.fold_left (fun l (v, was) ->
+          if was then SS.add v l else SS.remove v l)
+          live_after outer_had) arms
+      in
+      (match arm_lives with
+       | [] -> live
+       | first :: rest ->
+           if List.for_all (SS.equal first) rest then first
+           else raise (Type_error
+             "match arms diverge in ownership — all arms must move the same names"))
+
+  | T.TERef (e, _) -> check_moves_expr env live e
+  | T.TEDeref (e, _) -> check_moves_expr env live e
+  | T.TEAssign (r, v, _) ->
+      let live = check_moves_expr env live r in
+      check_moves_expr env live v
+  | T.TEOwn (e, _) -> consume_arg env live e
+  | T.TETake (e, _) -> consume_arg env live e
+  | T.TEUnwrap (e, _) -> consume_arg env live e
+  | T.TELook (e, _) -> check_moves_expr env live e
+
+(* Evaluate an expression in argument position (let RHS, fn arg, ctor
+   arg, record field, unwrap arg, take arg). If it's a bare EVar of a
+   non-copyable type, the name is moved out and becomes dead. *)
+and consume_arg (env : env) (live : SS.t) (e : T.expr) : SS.t =
+  let live = check_moves_expr env live e in
+  match e with
+  | T.TEVar (x, t) when not (is_copyable env t) -> SS.remove x live
+  | _ -> live
+
 (* ---------- check a function ---------- *)
 
 let check_func (env : env) (f : func) : T.func =
@@ -1265,23 +1365,12 @@ let check_func (env : env) (f : func) : T.func =
           f.name (show_ty (zonk tbody_ty)) (show_ty (zonk ret_ty)))));
   let tbody = zonk_expr tbody in
   (* A parameter of type Own[T] has its scope = the whole body. If the
-     body doesn't move ownership out (take, tail return, or pass to
-     another consuming position), the cell must be freed before the
-     function returns. We express this by wrapping the body in a chain
-     of `let p = p; body` bindings — the outer TELet's auto_drop flag
-     reuses the same drop machinery as ordinary let-bindings. Done
-     fold_right so the first parameter ends up outermost, giving LIFO
-     drop order relative to the parameter list. Alpha-rename later
-     gives the inner `p` a fresh name to avoid C variable collisions. *)
-  (* A parameter of type Own[T] has its scope = the whole body. If the
-     body doesn't move ownership out (take, tail return, or pass to
-     another consuming position), the cell must be freed before the
-     function returns. We express this by wrapping the body in a chain
-     of `let p = p; body` bindings — the outer TELet's auto_drop flag
-     reuses the same drop machinery as ordinary let-bindings. Done
-     fold_right so the first parameter ends up outermost, giving LIFO
-     drop order relative to the parameter list. Alpha-rename later
-     gives the inner `p` a fresh name to avoid C variable collisions. *)
+     body doesn't move ownership out, the cell must be freed before
+     the function returns. We express this by wrapping the body in a
+     `let p = p; body` for each such parameter — the outer TELet's
+     auto_drop flag reuses the ordinary let-binding drop machinery.
+     fold_right keeps the first parameter outermost, giving LIFO drop
+     order. Alpha-rename later gives the inner p a fresh C name. *)
   let tbody_ty = zonk tbody_ty in
   let param_tys = List.map zonk param_tys in
   let body_with_drops =
@@ -1294,6 +1383,10 @@ let check_func (env : env) (f : func) : T.func =
       (List.combine (List.map fst f.params) param_tys)
       tbody
   in
+  let initial_live =
+    List.fold_left (fun s (p, _) -> SS.add p s) SS.empty f.params
+  in
+  let _final_live = check_moves_expr env initial_live body_with_drops in
   { T.name = f.name;
     T.type_params = f.type_params;
     T.params = List.combine
