@@ -33,6 +33,8 @@ type token =
   | TDeref
   | TPanic
   | TOwn          (* own — heap allocation, exclusive ownership *)
+  | TArray        (* array — heap-allocated sized buffer *)
+  | TLen          (* len — array length *)
   | TTake         (* take — explicit consume of an Own *)
   | TUnwrap       (* unwrap — copy value out of Own (only for copyable T) *)
   | TLook         (* look — read through Ref, returns Option (only for copyable T) *)
@@ -92,6 +94,8 @@ let show = function
   | TDeref        -> "DEREF"
   | TPanic        -> "PANIC"
   | TOwn          -> "OWN"
+  | TArray        -> "ARRAY"
+  | TLen          -> "LEN"
   | TTake         -> "TAKE"
   | TUnwrap       -> "UNWRAP"
   | TLook         -> "LOOK"

@@ -34,6 +34,8 @@ let lower_ident_or_keyword s =
   | "deref" -> TDeref
   | "panic" -> TPanic
   | "own"   -> TOwn
+  | "array" -> TArray
+  | "len"   -> TLen
   | "take"  -> TTake
   | "unwrap" -> TUnwrap
   | "look"  -> TLook

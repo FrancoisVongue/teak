@@ -51,11 +51,19 @@ let ref_types_order : (string * ty) list ref = ref []
 let own_types_seen : (string, unit) Hashtbl.t = Hashtbl.create 8
 let own_types_order : (string * ty) list ref = ref []
 
+(* Array[T] instantiations. Wrapper is {ptr, gen, len} (24 bytes); cell
+   is {gen, T buffer[]} with a C99 flexible array member. *)
+let array_types_seen : (string, unit) Hashtbl.t = Hashtbl.create 8
+let array_types_order : (string * ty) list ref = ref []
+
 let mangle_ref_name (inner : ty) : string =
   "Ref_" ^ Mono.mangle_ty inner
 
 let mangle_own_name (inner : ty) : string =
   "Own_" ^ Mono.mangle_ty inner
+
+let mangle_array_name (inner : ty) : string =
+  "Array_" ^ Mono.mangle_ty inner
 
 let rec collect_ty (t : ty) : unit =
   match t with
@@ -80,6 +88,15 @@ let rec collect_ty (t : ty) : unit =
       end
   | TyApp ("Own", _) ->
       failwith "emit collect_ty: Own with wrong arity"
+  | TyApp ("Array", [inner]) ->
+      collect_ty inner;
+      let m = mangle_array_name inner in
+      if not (Hashtbl.mem array_types_seen m) then begin
+        Hashtbl.add array_types_seen m ();
+        array_types_order := (m, inner) :: !array_types_order
+      end
+  | TyApp ("Array", _) ->
+      failwith "emit collect_ty: Array with wrong arity"
   | TyApp (_, []) -> ()
   | TyApp (n, _) ->
       failwith (Printf.sprintf "emit collect_ty: %S still has args" n)
@@ -130,6 +147,13 @@ let rec collect_expr (e : Check.T.expr) : unit =
   | Check.T.TETake (e, t) -> collect_expr e; collect_ty t
   | Check.T.TEUnwrap (e, t) -> collect_expr e; collect_ty t
   | Check.T.TELook (e, t) -> collect_expr e; collect_ty t
+  | Check.T.TEArray (n, v, t) ->
+      collect_expr n; collect_expr v; collect_ty t
+  | Check.T.TEIndex (a, i, t) ->
+      collect_expr a; collect_expr i; collect_ty t
+  | Check.T.TEAssignIdx (a, i, v, t) ->
+      collect_expr a; collect_expr i; collect_expr v; collect_ty t
+  | Check.T.TELen (e, t) -> collect_expr e; collect_ty t
 
 let collect_program (prog : Check.T.program) : unit =
   Hashtbl.clear fn_types_seen;
@@ -138,6 +162,8 @@ let collect_program (prog : Check.T.program) : unit =
   ref_types_order := [];
   Hashtbl.clear own_types_seen;
   own_types_order := [];
+  Hashtbl.clear array_types_seen;
+  array_types_order := [];
   List.iter (fun td ->
     List.iter (fun v ->
       List.iter collect_ty v.arg_tys) td.variants) prog.types;
@@ -157,8 +183,11 @@ let c_type (t : ty) : string =
   match t with
   | TyInt -> "int"
   | TyBool -> "int"
+  | TyApp ("Ref", [TyApp ("Array", [inner])]) -> mangle_array_name inner
+                              (* Ref[Array[T]] shares the wrapper shape *)
   | TyApp ("Ref", [inner]) -> mangle_ref_name inner
   | TyApp ("Own", [inner]) -> mangle_own_name inner
+  | TyApp ("Array", [inner]) -> mangle_array_name inner
   | TyApp (n, []) -> n
   | TyFun _ -> Mono.mangle_ty t   (* refers to the typedef name *)
   | TyApp (n, _) ->
@@ -221,6 +250,24 @@ let emit_own_cells () : string list =
     Printf.sprintf "struct %s_cell { int gen; %s value; };"
       mangled (c_type inner))
     !own_types_order
+
+(* Array_T wrapper is {ptr, gen, len}; cell uses a C99 flexible array
+   member so the buffer lives in the same allocation as the gen field. *)
+let emit_array_forwards () : string list =
+  List.rev_map (fun (mangled, _inner) ->
+    [
+      Printf.sprintf "struct %s_cell;" mangled;
+      Printf.sprintf
+        "typedef struct { struct %s_cell* ptr; int expected_gen; int len; } %s;"
+        mangled mangled;
+    ]) !array_types_order
+  |> List.concat
+
+let emit_array_cells () : string list =
+  List.rev_map (fun (mangled, inner) ->
+    Printf.sprintf "struct %s_cell { int gen; %s buffer[]; };"
+      mangled (c_type inner))
+    !array_types_order
 
 (* ---------- operator C-strings ---------- *)
 
@@ -304,6 +351,11 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
     | TETake (e, t) -> TETake (rn env e, t)
     | TEUnwrap (e, t) -> TEUnwrap (rn env e, t)
     | TELook (e, t) -> TELook (rn env e, t)
+    | TEArray (n, v, t) -> TEArray (rn env n, rn env v, t)
+    | TEIndex (a, i, t) -> TEIndex (rn env a, rn env i, t)
+    | TEAssignIdx (a, i, v, t) ->
+        TEAssignIdx (rn env a, rn env i, rn env v, t)
+    | TELen (e, t) -> TELen (rn env e, t)
   in
   let initial_env = List.map (fun (p, _) -> (p, p)) f.params in
   { f with body = rn initial_env f.body }
@@ -431,6 +483,10 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TETake (_, t) -> t
   | Check.T.TEUnwrap (_, t) -> t
   | Check.T.TELook (_, t) -> t
+  | Check.T.TEArray (_, _, t) -> t
+  | Check.T.TEIndex (_, _, t) -> t
+  | Check.T.TEAssignIdx (_, _, _, t) -> t
+  | Check.T.TELen (_, t) -> t
 
 let rec emit_expr
   (ctor_map : (string, type_decl * variant * int) Hashtbl.t)
@@ -776,6 +832,79 @@ let rec emit_expr
       ] in
       { stmts; value = result_var }
 
+  | Check.T.TEArray (size_e, init_e, result_ty) ->
+      (* Allocate header + N * sizeof(T) in one malloc using FAM.
+         Initialize gen=1, fill every slot with init via a runtime loop. *)
+      let cn = emit_expr ctor_map size_e in
+      let cv = emit_expr ctor_map init_e in
+      let n_var = fresh "_n" in
+      let cell_var = fresh "_cell" in
+      let arr_var = fresh "_arr" in
+      let i_var = fresh "_i" in
+      let arr_c = c_type result_ty in
+      let elem_c = c_type (ty_of_expr init_e) in
+      let stmts = cn.stmts @ cv.stmts @ [
+        Printf.sprintf "int %s = %s;" n_var cn.value;
+        Printf.sprintf
+          "struct %s_cell* %s = malloc(sizeof(struct %s_cell) + (size_t)%s * sizeof(%s));"
+          arr_c cell_var arr_c n_var elem_c;
+        Printf.sprintf "if (!%s) abort();" cell_var;
+        Printf.sprintf "%s->gen = 1;" cell_var;
+        Printf.sprintf "for (int %s = 0; %s < %s; %s++) %s->buffer[%s] = %s;"
+          i_var i_var n_var i_var cell_var i_var cv.value;
+        Printf.sprintf
+          "%s %s = ((%s){ .ptr = %s, .expected_gen = 1, .len = %s });"
+          arr_c arr_var arr_c cell_var n_var;
+      ] in
+      { stmts; value = arr_var }
+
+  | Check.T.TEIndex (arr_e, idx_e, elem_ty) ->
+      let ca = emit_expr ctor_map arr_e in
+      let ci = emit_expr ctor_map idx_e in
+      let a_var = fresh "_a" in
+      let i_var = fresh "_i" in
+      let result_var = fresh "_idx" in
+      let arr_c = c_type (ty_of_expr arr_e) in
+      let elem_c = c_type elem_ty in
+      let stmts = ca.stmts @ ci.stmts @ [
+        Printf.sprintf "%s %s = %s;" arr_c a_var ca.value;
+        Printf.sprintf "int %s = %s;" i_var ci.value;
+        Printf.sprintf "if (%s.ptr->gen != %s.expected_gen) abort();"
+          a_var a_var;
+        Printf.sprintf "if (%s < 0 || %s >= %s.len) abort();"
+          i_var i_var a_var;
+        Printf.sprintf "%s %s = %s.ptr->buffer[%s];"
+          elem_c result_var a_var i_var;
+      ] in
+      { stmts; value = result_var }
+
+  | Check.T.TEAssignIdx (arr_e, idx_e, val_e, _) ->
+      let ca = emit_expr ctor_map arr_e in
+      let ci = emit_expr ctor_map idx_e in
+      let cv = emit_expr ctor_map val_e in
+      let a_var = fresh "_a" in
+      let i_var = fresh "_i" in
+      let arr_c = c_type (ty_of_expr arr_e) in
+      let stmts = ca.stmts @ ci.stmts @ cv.stmts @ [
+        Printf.sprintf "%s %s = %s;" arr_c a_var ca.value;
+        Printf.sprintf "int %s = %s;" i_var ci.value;
+        Printf.sprintf "if (%s.ptr->gen != %s.expected_gen) abort();"
+          a_var a_var;
+        Printf.sprintf "if (%s < 0 || %s >= %s.len) abort();"
+          i_var i_var a_var;
+        Printf.sprintf "%s.ptr->buffer[%s] = %s;" a_var i_var cv.value;
+      ] in
+      { stmts; value = "0" }
+
+  | Check.T.TELen (arr_e, _) ->
+      let ca = emit_expr ctor_map arr_e in
+      let value = match arr_e with
+        | Check.T.TEVar _ | Check.T.TEFnRef _ ->
+            Printf.sprintf "%s.len" ca.value
+        | _ -> Printf.sprintf "(%s).len" ca.value
+      in
+      { stmts = ca.stmts; value }
+
 (* ---------- function emission ---------- *)
 
 let emit_extern_decl (e : Check.T.extern) : string =
@@ -828,6 +957,7 @@ let emit (prog : Check.T.program) : string =
   let rec_forwards = List.map emit_record_forward prog.records in
   let ref_forwards = emit_ref_forwards () in
   let own_forwards = emit_own_forwards () in
+  let array_forwards = emit_array_forwards () in
   let fn_typedefs  = emit_fn_typedefs () in
   let ordered_structs = topo_sort_structs prog.types prog.records in
   let struct_defs = List.map (function
@@ -835,6 +965,7 @@ let emit (prog : Check.T.program) : string =
     | DRec rd -> emit_record_definition rd) ordered_structs in
   let ref_cells = emit_ref_cells () in
   let own_cells = emit_own_cells () in
+  let array_cells = emit_array_cells () in
   let extern_decls = List.map emit_extern_decl prog.externs in
   let decls        = List.map emit_func_decl prog.funcs in
   let defs         = List.map (emit_func_def ctor_map) prog.funcs in
@@ -845,10 +976,12 @@ let emit (prog : Check.T.program) : string =
      @ rec_forwards
      @ ref_forwards
      @ own_forwards
+     @ array_forwards
      @ fn_typedefs
      @ struct_defs
      @ ref_cells
      @ own_cells
+     @ array_cells
      @ extern_decls
      @ decls
      @ defs)

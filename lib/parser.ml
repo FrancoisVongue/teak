@@ -123,7 +123,9 @@ and parse_assign st =
   if peek st = TColonEq then begin
     advance st;
     let rhs = parse_assign st in
-    EAssign (lhs, rhs)
+    match lhs with
+    | EIndex (arr, idx) -> EAssignIdx (arr, idx, rhs)
+    | _                 -> EAssign (lhs, rhs)
   end else lhs
 
 (* `??` is right-associative: `a ?? b ?? c` parses as `a ?? (b ?? c)`.
@@ -190,6 +192,11 @@ and parse_postfix_chain st head =
              (Token.show t)))
       in
       parse_postfix_chain st (EField (head, field))
+  | TLBracket ->
+      advance st;
+      let idx = parse_expr st in
+      expect st TRBracket;
+      parse_postfix_chain st (EIndex (head, idx))
   | _ -> head
 
 and parse_record_init_elems st =
@@ -240,7 +247,8 @@ and parse_atom st =
   | TIdent _ | TCtorIdent _
   | TIf | TMatch
   | TRef | TDeref | TPanic
-  | TOwn | TTake | TUnwrap | TLook -> parse_atom_consume st
+  | TOwn | TTake | TUnwrap | TLook
+  | TArray | TLen -> parse_atom_consume st
   | t -> raise (Parse_error
     (Printf.sprintf "expected expression, got %s" (Token.show t)))
 
@@ -303,6 +311,18 @@ and parse_atom_consume st =
       let e = parse_expr st in
       expect st TRParen;
       ELook e
+  | TArray ->
+      expect st TLParen;
+      let n = parse_expr st in
+      expect st TComma;
+      let v = parse_expr st in
+      expect st TRParen;
+      EArray (n, v)
+  | TLen ->
+      expect st TLParen;
+      let e = parse_expr st in
+      expect st TRParen;
+      ELen e
   | _ -> assert false
 
 and parse_if_after_kw st =

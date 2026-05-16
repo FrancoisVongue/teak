@@ -1,0 +1,12 @@
+// Basic Array: create, write each slot, read sum.
+// Array[T] is itself a linear (move-only) type — the heap-allocated
+// buffer is freed when the binding leaves scope. One malloc, one free.
+fn main() -> int {
+    let a = array(4, 0);
+    let _ = a[0] := 1;
+    let _ = a[1] := 2;
+    let _ = a[2] := 3;
+    let _ = a[3] := 4;
+    a[0] + a[1] + a[2] + a[3] + len(a)
+    // 1 + 2 + 3 + 4 + 4 = 14
+}

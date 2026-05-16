@@ -100,6 +100,12 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         TyApp ("Own", [rewrite_ty subst inner])
     | TyApp ("Own", _) ->
         failwith "mono rewrite_ty: Own with wrong arity (should be unary)"
+    | TyApp ("Array", [inner]) ->
+        (* Array is also structural — emit emits one cell+wrapper pair
+           per distinct element type. *)
+        TyApp ("Array", [rewrite_ty subst inner])
+    | TyApp ("Array", _) ->
+        failwith "mono rewrite_ty: Array with wrong arity (should be unary)"
     | TyApp (n, args) ->
         let args = List.map (rewrite_ty subst) args in
         if is_record_name n then request_rec n args
@@ -191,6 +197,16 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         Check.T.TEUnwrap (rewrite_expr subst e, rt t)
     | Check.T.TELook (e, t) ->
         Check.T.TELook (rewrite_expr subst e, rt t)
+    | Check.T.TEArray (n, v, t) ->
+        Check.T.TEArray (rewrite_expr subst n, rewrite_expr subst v, rt t)
+    | Check.T.TEIndex (a, i, t) ->
+        Check.T.TEIndex (rewrite_expr subst a, rewrite_expr subst i, rt t)
+    | Check.T.TEAssignIdx (a, i, v, t) ->
+        Check.T.TEAssignIdx (rewrite_expr subst a,
+                             rewrite_expr subst i,
+                             rewrite_expr subst v, rt t)
+    | Check.T.TELen (e, t) ->
+        Check.T.TELen (rewrite_expr subst e, rt t)
   in
 
   request_fn "main" [];
