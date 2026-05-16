@@ -36,7 +36,7 @@ module T = struct
                   (* name, var_ty, value, body, body_ty, auto_drop.
                      auto_drop=true means: when control leaves this Let,
                      emit a runtime drop of the bound variable. Used for
-                     Own[T] bindings that are not consumed. *)
+                     Region bindings that are not consumed. *)
     | TEMatch  of expr * ty * (pat * expr) list * ty
     | TEArray  of expr * expr * expr * ty
                   (* array(r, N, init) — allocate in region r, result is Array[T] *)
@@ -59,6 +59,9 @@ module T = struct
     name        : string;
     type_params : string list;
     params      : (string * ty) list;
+    param_drops : string list;
+                  (* Param names whose linear values are not consumed
+                     in the body. Emit frees them before return. *)
     return_ty   : ty;
     body        : expr;
   }
@@ -224,15 +227,14 @@ let split_program (prog : program)
 
 (* ---------- type validation ---------- *)
 
-(* Tests whether a type contains a linear (non-copyable) builtin —
-   Own[_] or Region — anywhere except behind a function arrow. Linear
-   types can only live as the top-level type of a name; they are
-   forbidden as record fields, ADT variant args, or type args.
-   Array[_] is copyable now — its memory lives in a Region. *)
-let rec ty_contains_own (t : ty) : bool =
+(* Tests whether a type contains a linear (non-copyable) builtin anywhere
+   except behind a function arrow. Currently only Region is linear.
+   Linear types are forbidden as record fields, ADT variant args, or
+   type args — they can only live as the top-level type of a name. *)
+let rec ty_contains_linear (t : ty) : bool =
   match t with
   | TyApp ("Region", _) -> true
-  | TyApp (_, args) -> List.exists ty_contains_own args
+  | TyApp (_, args) -> List.exists ty_contains_linear args
   | TyFun _ -> false
   | TyInt | TyBool | TyVar _ | TyMeta _ -> false
 
@@ -247,19 +249,19 @@ let rec validate_ty
   | TyMeta _ -> t
   | TyApp (n, args) ->
       let args = List.map (validate_ty type_env record_env in_scope) args in
-      (* Own[_] cannot appear in data position — only as the immediate
-         top-level type of a name (variable, parameter, function return).
-         We enforce this by forbidding Own in any type argument of any
-         TyApp, including inside Own itself (no Own[Own[T]]). The check
-         on field types and variant arg types happens separately after
-         build_env. Function types are not "data position" — they hide
-         their contents, so fn(...) -> Own[T] stays legal. *)
+      (* A linear type cannot appear in data position — only as the
+         immediate top-level type of a name (variable, parameter,
+         function return). We enforce this by forbidding linear types
+         in any type argument of any TyApp. The check on field types
+         and variant arg types happens separately after build_env.
+         Function types are not "data position" — they hide their
+         contents, so fn(...) -> Region stays legal. *)
       List.iter (fun arg ->
-        if ty_contains_own arg then
+        if ty_contains_linear arg then
           raise (Type_error
             (Printf.sprintf
-               "Own[_] is not allowed as a type argument of %S — \
-                Own must be a top-level type of a name, not nested in data"
+               "A linear type is not allowed as a type argument of %S — \
+                linear types must be a top-level type of a name, not nested in data"
                n))) args;
       if List.mem n in_scope then begin
         if args <> [] then
@@ -380,7 +382,7 @@ let build_env
             List.map (validate_ty type_env record_env in_scope) v.arg_tys
           in
           List.iter (fun aty ->
-            if ty_contains_own aty then
+            if ty_contains_linear aty then
               raise (Type_error
                 (Printf.sprintf
                    "constructor %S of %S: a linear type (Own/Array) cannot \
@@ -398,7 +400,7 @@ let build_env
       let fields =
         List.map (fun (fname, fty) ->
           let fty = validate_ty type_env record_env in_scope fty in
-          if ty_contains_own fty then
+          if ty_contains_linear fty then
             raise (Type_error
               (Printf.sprintf
                  "field %S of record %S: a linear type (Own/Array) cannot \
@@ -567,7 +569,7 @@ let check_match_arms_structure
 
    A type is copyable iff `let y = x` makes semantic sense for it —
    i.e. the value can be duplicated without violating ownership.
-   Currently the only non-copyable primitive is Own[_]; structural
+   Currently the only non-copyable primitive is Region; structural
    types inherit non-copyability transitively from their fields/variants.
    Ref[_] is copyable (it's just pointer + generation tag).
    Type variables are assumed copyable for now — generics carry no
@@ -1011,7 +1013,7 @@ let rec infer (env : env) (tparams : string list)
               "array(_, N, _) : size must be int, got %s"
               (show_ty (zonk tn_ty)))));
       let (tv, tv_ty) = infer env tparams vars init_e in
-      if ty_contains_own (zonk tv_ty) then
+      if ty_contains_linear (zonk tv_ty) then
         raise (Type_error
           (Printf.sprintf
              "array(_, _, v) : element type cannot contain a linear type (%s)"
@@ -1043,7 +1045,7 @@ let rec infer (env : env) (tparams : string list)
                 "array literal elements must all have the same type: \
                  expected %s, got %s"
                 (show_ty (zonk elem_ty)) (show_ty (zonk t)))))) typed_elems;
-      if ty_contains_own (zonk elem_ty) then
+      if ty_contains_linear (zonk elem_ty) then
         raise (Type_error
           (Printf.sprintf
              "array literal element type cannot contain a linear type (%s)"
@@ -1062,7 +1064,7 @@ let rec infer (env : env) (tparams : string list)
               "buf(N, _) : size must be int, got %s"
               (show_ty (zonk tn_ty)))));
       let (tv, tv_ty) = infer env tparams vars init_e in
-      if ty_contains_own (zonk tv_ty) then
+      if ty_contains_linear (zonk tv_ty) then
         raise (Type_error
           (Printf.sprintf
              "buf(_, v) : element type cannot contain a linear type (%s)"
@@ -1086,7 +1088,7 @@ let rec infer (env : env) (tparams : string list)
                 "array literal elements must all have the same type: \
                  expected %s, got %s"
                 (show_ty (zonk elem_ty)) (show_ty (zonk t)))))) typed_elems;
-      if ty_contains_own (zonk elem_ty) then
+      if ty_contains_linear (zonk elem_ty) then
         raise (Type_error
           (Printf.sprintf
              "array literal element type cannot contain a linear type (%s)"
@@ -1199,74 +1201,9 @@ and check_args env tparams vars callee_name param_tys args : T.expr list =
 
 and validate_ty_for_ascription
   (env : env) (tparams : string list) (t : ty) : ty =
-  match t with
-  | TyInt | TyBool -> t
-  | TyVar _ -> t
-  | TyMeta _ -> t
-  | TyApp (n, args) ->
-      let args = List.map (validate_ty_for_ascription env tparams) args in
-      List.iter (fun arg ->
-        if ty_contains_own arg then
-          raise (Type_error
-            (Printf.sprintf
-               "Own[_] is not allowed as a type argument of %S — \
-                Own must be a top-level type of a name, not nested in data"
-               n))) args;
-      if List.mem n tparams then begin
-        if args <> [] then
-          raise (Type_error
-            (Printf.sprintf
-               "type parameter %S cannot take type arguments" n));
-        TyVar n
-      end else if n = "Array" then begin
-        if List.length args <> 1 then
-          raise (Type_error
-            (Printf.sprintf
-               "Array expects exactly 1 type argument, got %d"
-               (List.length args)));
-        TyApp ("Array", args)
-      end else if n = "Buf" then begin
-        if List.length args <> 1 then
-          raise (Type_error
-            (Printf.sprintf
-               "Buf expects exactly 1 type argument, got %d"
-               (List.length args)));
-        TyApp ("Buf", args)
-      end else if n = "Region" then begin
-        if List.length args <> 0 then
-          raise (Type_error
-            (Printf.sprintf
-               "Region takes no type arguments, got %d"
-               (List.length args)));
-        TyApp ("Region", [])
-      end else
-        (match List.assoc_opt n env.types with
-         | Some td ->
-             let expected = List.length td.type_params in
-             let got = List.length args in
-             if expected <> got then
-               raise (Type_error
-                 (Printf.sprintf
-                    "type %S expects %d type argument(s), got %d"
-                    n expected got));
-             TyApp (n, args)
-         | None ->
-             (match List.assoc_opt n env.records with
-              | Some rd ->
-                  let expected = List.length rd.rec_type_params in
-                  let got = List.length args in
-                  if expected <> got then
-                    raise (Type_error
-                      (Printf.sprintf
-                         "type %S expects %d type argument(s), got %d"
-                         n expected got));
-                  TyApp (n, args)
-              | None ->
-                  raise (Type_error
-                    (Printf.sprintf "unknown type %S" n))))
-  | TyFun (args, ret) ->
-      TyFun (List.map (validate_ty_for_ascription env tparams) args,
-             validate_ty_for_ascription env tparams ret)
+  (* Same validation as during build_env, just routed through the env
+     record (which already holds type_env and record_env). *)
+  validate_ty env.types env.records tparams t
 
 (* ---------- zonk the typed AST ---------- *)
 
@@ -1561,37 +1498,31 @@ let check_func (env : env) (f : func) : T.func =
           "function %S: body has type %s, declared return type is %s"
           f.name (show_ty (zonk tbody_ty)) (show_ty (zonk ret_ty)))));
   let tbody = zonk_expr tbody in
-  (* A parameter of type Own[T] has its scope = the whole body. If the
-     body doesn't move ownership out, the cell must be freed before
-     the function returns. We express this by wrapping the body in a
-     `let p = p; body` for each such parameter — the outer TELet's
-     auto_drop flag reuses the ordinary let-binding drop machinery.
-     fold_right keeps the first parameter outermost, giving LIFO drop
-     order. Alpha-rename later gives the inner p a fresh C name. *)
-  let tbody_ty = zonk tbody_ty in
   let param_tys = List.map zonk param_tys in
-  let body_with_drops =
-    List.fold_right (fun (pname, pty) acc ->
+  (* A linear parameter (currently only Region) lives for the whole
+     body. If the body doesn't consume it, emit must free it before
+     return. We record those names in param_drops; emit handles the
+     actual free. *)
+  let param_drops =
+    List.filter_map (fun ((pname, _), pty) ->
       match prune pty with
-      | TyApp ("Region", _)
-        when not (is_consumed env pname acc) ->
-          T.TELet (pname, pty, T.TEVar (pname, pty),
-                   acc, tbody_ty, true)
-      | _ -> acc)
-      (List.combine (List.map fst f.params) param_tys)
-      tbody
+      | TyApp ("Region", _) when not (is_consumed env pname tbody) ->
+          Some pname
+      | _ -> None)
+      (List.combine f.params param_tys)
   in
   let initial_live =
     List.fold_left2 (fun m (p, _) t -> SM.add p t m)
       SM.empty f.params param_tys
   in
   let (body_with_moves, _final_live) =
-    check_moves_expr env initial_live true body_with_drops
+    check_moves_expr env initial_live true tbody
   in
   { T.name = f.name;
     T.type_params = f.type_params;
     T.params = List.combine
       (List.map fst f.params) param_tys;
+    T.param_drops;
     T.return_ty = ret_ty;
     T.body = body_with_moves }
 

@@ -41,19 +41,24 @@ let reset_counter () = counter := 0
 let fn_types_seen : (string, unit) Hashtbl.t = Hashtbl.create 16
 let fn_types_order : (string * ty) list ref = ref []
 
-(* Array[T] instantiations: emit one typedef per distinct element type. *)
-let array_types_seen : (string, unit) Hashtbl.t = Hashtbl.create 8
-let array_types_order : (string * ty) list ref = ref []
+(* Handle instantiations: Array[T] and Buf[T]. Each entry remembers its
+   kind so emit_handle_forwards can produce the right typedef shape. *)
+type handle_kind = HArray | HBuf
 
-(* Buf[T] instantiations — raw stack-array handles. *)
-let buf_types_seen : (string, unit) Hashtbl.t = Hashtbl.create 8
-let buf_types_order : (string * ty) list ref = ref []
+let handle_types_seen : (string, unit) Hashtbl.t = Hashtbl.create 8
+let handle_types_order : (handle_kind * string * ty) list ref = ref []
 
 let mangle_array_name (inner : ty) : string =
   "Array_" ^ Mono.mangle_ty inner
 
 let mangle_buf_name (inner : ty) : string =
   "Buf_" ^ Mono.mangle_ty inner
+
+let register_handle (k : handle_kind) (mangled : string) (inner : ty) =
+  if not (Hashtbl.mem handle_types_seen mangled) then begin
+    Hashtbl.add handle_types_seen mangled ();
+    handle_types_order := (k, mangled, inner) :: !handle_types_order
+  end
 
 let rec collect_ty (t : ty) : unit =
   match t with
@@ -62,20 +67,12 @@ let rec collect_ty (t : ty) : unit =
       failwith (Printf.sprintf "emit collect_ty: TyVar %S after mono" n)
   | TyApp ("Array", [inner]) ->
       collect_ty inner;
-      let m = mangle_array_name inner in
-      if not (Hashtbl.mem array_types_seen m) then begin
-        Hashtbl.add array_types_seen m ();
-        array_types_order := (m, inner) :: !array_types_order
-      end
+      register_handle HArray (mangle_array_name inner) inner
   | TyApp ("Array", _) ->
       failwith "emit collect_ty: Array with wrong arity"
   | TyApp ("Buf", [inner]) ->
       collect_ty inner;
-      let m = mangle_buf_name inner in
-      if not (Hashtbl.mem buf_types_seen m) then begin
-        Hashtbl.add buf_types_seen m ();
-        buf_types_order := (m, inner) :: !buf_types_order
-      end
+      register_handle HBuf (mangle_buf_name inner) inner
   | TyApp ("Buf", _) ->
       failwith "emit collect_ty: Buf with wrong arity"
   | TyApp ("Region", []) -> ()
@@ -140,11 +137,8 @@ let rec collect_expr (e : Check.T.expr) : unit =
 let collect_program (prog : Check.T.program) : unit =
   Hashtbl.clear fn_types_seen;
   fn_types_order := [];
-  Hashtbl.clear array_types_seen;
-  array_types_order := [];
-  Hashtbl.clear buf_types_seen;
-  buf_types_order := [];
-  array_types_order := [];
+  Hashtbl.clear handle_types_seen;
+  handle_types_order := [];
   List.iter (fun td ->
     List.iter (fun v ->
       List.iter collect_ty v.arg_tys) td.variants) prog.types;
@@ -189,24 +183,20 @@ let emit_fn_typedefs () : string list =
     | _ -> failwith "emit_fn_typedefs: non-fn type in list")
     !fn_types_order
 
-(* Array_T is a copyable handle into a Region's buffer: it carries the
-   region header pointer, the byte-offset of this array's slice in
-   that buffer, the length, and the expected region generation. *)
-let emit_array_forwards () : string list =
-  List.rev_map (fun (mangled, _inner) ->
-    Printf.sprintf
-      "typedef struct { struct Region_header* region; int offset; \
-       int len; int expected_gen; } %s;" mangled)
-    !array_types_order
-
-(* Buf_T is a raw stack-array handle: { T* ptr; int len }. No gen, no
-   region. The storage is a plain C array in the surrounding C function's
-   frame. *)
-let emit_buf_forwards () : string list =
-  List.rev_map (fun (mangled, inner) ->
-    Printf.sprintf "typedef struct { %s* ptr; int len; } %s;"
-      (c_type inner) mangled)
-    !buf_types_order
+(* Emit one typedef per collected handle. Array_T carries a region
+   pointer + offset + gen for safe access. Buf_T carries a raw pointer
+   + length for direct stack-array access. *)
+let emit_handle_forwards () : string list =
+  List.rev_map (fun (k, mangled, inner) ->
+    match k with
+    | HArray ->
+        Printf.sprintf
+          "typedef struct { struct Region_header* region; int offset; \
+           int len; int expected_gen; } %s;" mangled
+    | HBuf ->
+        Printf.sprintf "typedef struct { %s* ptr; int len; } %s;"
+          (c_type inner) mangled)
+    !handle_types_order
 
 (* ---------- operator C-strings ---------- *)
 
@@ -421,6 +411,16 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TEAssignIdx (_, _, _, t) -> t
   | Check.T.TELen (_, t) -> t
 
+(* Release a Region's buffer and bump its generation. Used for both
+   let-scope auto_drop and function-end param drops. *)
+let drop_region_stmt (name : string) : string =
+  Printf.sprintf
+    "if (%s.header->gen == %s.expected_gen) { \
+     free(%s.header->buffer); %s.header->buffer = NULL; \
+     %s.header->buffer_size = 0; %s.header->used = 0; \
+     %s.header->gen++; }"
+    name name name name name name name
+
 let rec emit_expr
   (ctor_map : (string, type_decl * variant * int) Hashtbl.t)
   (e : Check.T.expr) : c_code =
@@ -539,28 +539,16 @@ let rec emit_expr
           Printf.sprintf "%s %s = %s;" (c_type vt) x cv.value
       in
       if auto_drop then begin
-        (* Materialise the body result into a temp, then free x's cell,
-           then yield the temp. This way:
-             - body sees x alive while it's being evaluated
-             - the cell is released before we leave this let
-             - the result value (which is independent — it's a copy or
-               an Own from elsewhere) survives the release *)
+        (* Materialise the body result into a temp, then free x's
+           value, then yield the temp. The body sees x alive while
+           it's being evaluated; the value is released before control
+           leaves this let. *)
         let temp = fresh "_let_result" in
         let body_decl =
           Printf.sprintf "%s %s = %s;" (c_type body_ty) temp cb.value
         in
-        let free_stmt =
-          match vt with
-          | TyApp ("Region", _) ->
-              (* Free the region's buffer and bump its generation.
-                 The header itself stays alive — dangling Array
-                 handles use it for gen checks. *)
-              Printf.sprintf
-                "if (%s.header->gen == %s.expected_gen) { \
-                 free(%s.header->buffer); %s.header->buffer = NULL; \
-                 %s.header->buffer_size = 0; %s.header->used = 0; \
-                 %s.header->gen++; }"
-                x x x x x x x
+        let free_stmt = match vt with
+          | TyApp ("Region", _) -> drop_region_stmt x
           | _ -> failwith "emit: auto_drop on non-linear type"
         in
         let stmts =
@@ -785,69 +773,28 @@ let rec emit_expr
       { stmts; value = r_var }
 
   | Check.T.TEIndex (arr_e, idx_e, elem_ty) ->
-      let ca = emit_expr ctor_map arr_e in
-      let ci = emit_expr ctor_map idx_e in
-      let a_var = fresh "_a" in
-      let i_var = fresh "_i" in
+      let (ca, ci, a_var, i_var, arr_c, checks, slot_expr) =
+        index_setup ctor_map arr_e idx_e (c_type elem_ty)
+      in
       let result_var = fresh "_idx" in
-      let arr_c = c_type (ty_of_expr arr_e) in
-      let elem_c = c_type elem_ty in
-      let is_buf = match ty_of_expr arr_e with
-        | TyApp ("Buf", _) -> true | _ -> false in
-      let read_expr =
-        if is_buf then
-          (* Raw buf: no gen, no bounds check. Programmer's fault. *)
-          Printf.sprintf "%s.ptr[%s]" a_var i_var
-        else
-          Printf.sprintf "((%s*)(%s.region->buffer + %s.offset))[%s]"
-            elem_c a_var a_var i_var
-      in
-      let checks =
-        if is_buf then []
-        else [
-          Printf.sprintf "if (%s.region->gen != %s.expected_gen) abort();"
-            a_var a_var;
-          Printf.sprintf "if (%s < 0 || %s >= %s.len) abort();"
-            i_var i_var a_var;
-        ]
-      in
       let stmts = ca.stmts @ ci.stmts @ [
         Printf.sprintf "%s %s = %s;" arr_c a_var ca.value;
         Printf.sprintf "int %s = %s;" i_var ci.value;
       ] @ checks @ [
-        Printf.sprintf "%s %s = %s;" elem_c result_var read_expr;
+        Printf.sprintf "%s %s = %s;" (c_type elem_ty) result_var slot_expr;
       ] in
       { stmts; value = result_var }
 
   | Check.T.TEAssignIdx (arr_e, idx_e, val_e, _) ->
-      let ca = emit_expr ctor_map arr_e in
-      let ci = emit_expr ctor_map idx_e in
+      let (ca, ci, a_var, i_var, arr_c, checks, slot_expr) =
+        index_setup ctor_map arr_e idx_e (c_type (ty_of_expr val_e))
+      in
       let cv = emit_expr ctor_map val_e in
-      let a_var = fresh "_a" in
-      let i_var = fresh "_i" in
-      let arr_c = c_type (ty_of_expr arr_e) in
-      let elem_c = c_type (ty_of_expr val_e) in
-      let is_buf = match ty_of_expr arr_e with
-        | TyApp ("Buf", _) -> true | _ -> false in
-      let write_lhs =
-        if is_buf then Printf.sprintf "%s.ptr[%s]" a_var i_var
-        else Printf.sprintf "((%s*)(%s.region->buffer + %s.offset))[%s]"
-               elem_c a_var a_var i_var
-      in
-      let checks =
-        if is_buf then []
-        else [
-          Printf.sprintf "if (%s.region->gen != %s.expected_gen) abort();"
-            a_var a_var;
-          Printf.sprintf "if (%s < 0 || %s >= %s.len) abort();"
-            i_var i_var a_var;
-        ]
-      in
       let stmts = ca.stmts @ ci.stmts @ cv.stmts @ [
         Printf.sprintf "%s %s = %s;" arr_c a_var ca.value;
         Printf.sprintf "int %s = %s;" i_var ci.value;
       ] @ checks @ [
-        Printf.sprintf "%s = %s;" write_lhs cv.value;
+        Printf.sprintf "%s = %s;" slot_expr cv.value;
       ] in
       { stmts; value = "0" }
 
@@ -859,6 +806,36 @@ let rec emit_expr
         | _ -> Printf.sprintf "(%s).len" ca.value
       in
       { stmts = ca.stmts; value }
+
+(* Shared setup for a[i] and a[i] := v. Returns the array/index codes,
+   fresh names, the array's C type, the abort-checks (empty for Buf),
+   and the C expression for the slot at index. *)
+and index_setup ctor_map arr_e idx_e elem_c =
+  let ca = emit_expr ctor_map arr_e in
+  let ci = emit_expr ctor_map idx_e in
+  let a_var = fresh "_a" in
+  let i_var = fresh "_i" in
+  let arr_c = c_type (ty_of_expr arr_e) in
+  match ty_of_expr arr_e with
+  | TyApp ("Buf", _) ->
+      (* Raw buf — no gen check, no bounds check. *)
+      let slot = Printf.sprintf "%s.ptr[%s]" a_var i_var in
+      (ca, ci, a_var, i_var, arr_c, [], slot)
+  | TyApp ("Array", _) ->
+      let checks = [
+        Printf.sprintf "if (%s.region->gen != %s.expected_gen) abort();"
+          a_var a_var;
+        Printf.sprintf "if (%s < 0 || %s >= %s.len) abort();"
+          i_var i_var a_var;
+      ] in
+      let slot =
+        Printf.sprintf "((%s*)(%s.region->buffer + %s.offset))[%s]"
+          elem_c a_var a_var i_var
+      in
+      (ca, ci, a_var, i_var, arr_c, checks, slot)
+  | t ->
+      failwith (Printf.sprintf
+        "emit: indexing on non-indexable type %s" (Ast.show_ty t))
 
 (* ---------- function emission ---------- *)
 
@@ -893,7 +870,17 @@ let emit_func_def ctor_map (f : Check.T.func) : string =
   in
   let cb = emit_expr ctor_map f.body in
   let body_lines =
-    cb.stmts @ [Printf.sprintf "return %s;" cb.value]
+    if f.param_drops = [] then
+      cb.stmts @ [Printf.sprintf "return %s;" cb.value]
+    else
+      (* Materialise the body result first, then free each linear param
+         that the body didn't consume, then return the saved result. *)
+      let ret_var = "_ret" in
+      cb.stmts
+      @ [Printf.sprintf "%s %s = %s;"
+           (c_type f.return_ty) ret_var cb.value]
+      @ List.map drop_region_stmt f.param_drops
+      @ [Printf.sprintf "return %s;" ret_var]
   in
   let indented = List.map (fun s -> "    " ^ s) body_lines in
   Printf.sprintf "%s %s(%s) {\n%s\n}"
@@ -910,8 +897,7 @@ let emit (prog : Check.T.program) : string =
   let ctor_map = build_ctor_map prog.types in
   let adt_forwards = List.map emit_adt_forward prog.types in
   let rec_forwards = List.map emit_record_forward prog.records in
-  let array_forwards = emit_array_forwards () in
-  let buf_forwards = emit_buf_forwards () in
+  let handle_forwards = emit_handle_forwards () in
   let fn_typedefs  = emit_fn_typedefs () in
   let ordered_structs = topo_sort_structs prog.types prog.records in
   let struct_defs = List.map (function
@@ -933,8 +919,7 @@ let emit (prog : Check.T.program) : string =
     ([header]
      @ adt_forwards
      @ rec_forwards
-     @ array_forwards
-     @ buf_forwards
+     @ handle_forwards
      @ fn_typedefs
      @ struct_defs
      @ extern_decls
