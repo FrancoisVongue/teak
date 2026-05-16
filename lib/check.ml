@@ -1389,149 +1389,224 @@ and zonk_expect (t : ty) : ty =
    double-free in another, so we reject it and require the user to
    write symmetric branches. *)
 
-module SS = Set.Make (String)
+(* Tracks live names with their types. Type is needed because when we
+   auto-insert a drop in a diverging branch, the inserted TELet needs
+   to know what to drop's type. *)
+module SM = Map.Make (String)
 
-let rec check_moves_expr (env : env) (live : SS.t) (e : T.expr) : SS.t =
+(* Wrap an expression in a chain of `let name = name; expr` bindings
+   with auto_drop=true, one per name in [drops]. Each wrap turns into
+   a `free(name.ptr)` after the inner expression in emit. *)
+let wrap_with_drops (drops : (string * ty) list) (body_ty : ty) (e : T.expr) : T.expr =
+  List.fold_left (fun expr (name, ty) ->
+    T.TELet (name, ty, T.TEVar (name, ty), expr, body_ty, true))
+    e drops
+
+let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.expr)
+  : T.expr * ty SM.t =
   match e with
-  | T.TEInt _ | T.TEBool _ | T.TEFnRef _ | T.TEPanic _ -> live
+  | T.TEInt _ | T.TEBool _ | T.TEFnRef _ | T.TEPanic _ -> (e, live)
 
-  | T.TEVar (x, _) ->
-      if not (SS.mem x live) then
+  | T.TEVar (x, t) ->
+      if not (SM.mem x live) then
         raise (Type_error
           (Printf.sprintf
              "use of moved name %S — its ownership was transferred earlier"
              x));
-      live
+      let live' =
+        if in_tail && not (is_copyable env t) then SM.remove x live
+        else live
+      in
+      (e, live')
 
-  | T.TEField (e, _, _) -> check_moves_expr env live e
+  | T.TEField (sub, fname, ty) ->
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TEField (sub', fname, ty), live)
 
-  | T.TEBinop (op, a, b, _) ->
-      let live = check_moves_expr env live a in
+  | T.TEBinop (op, a, b, ty) ->
+      let (a', live) = check_moves_expr env live false a in
       (match op with
        | OpAnd | OpOr ->
-           (* Short-circuit: right operand runs conditionally, same as
-              an if-branch. It may not consume any outer name. *)
-           let live_b = check_moves_expr env live b in
-           if not (SS.equal live_b live) then
+           let (b', live_b) = check_moves_expr env live false b in
+           if not (SM.equal (fun _ _ -> true) live_b live) then
              raise (Type_error
                (Printf.sprintf
-                  "right operand of %s may not consume outer name(s) [%s] — \
-                   it runs conditionally"
-                  (show_binop op)
-                  (String.concat ", " (SS.elements (SS.diff live live_b)))));
-           live
+                  "right operand of %s diverges in ownership" (show_binop op)));
+           (T.TEBinop (op, a', b', ty), live)
        | _ ->
-           check_moves_expr env live b)
+           let (b', live) = check_moves_expr env live false b in
+           (T.TEBinop (op, a', b', ty), live))
 
-  | T.TEUnop (_, e, _) -> check_moves_expr env live e
+  | T.TEUnop (op, sub, ty) ->
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TEUnop (op, sub', ty), live)
 
-  | T.TECall (callee, args, _) ->
-      let live = check_moves_expr env live callee in
-      List.fold_left (consume_arg env) live args
-
-  | T.TECtor (_, _, args, _) ->
-      List.fold_left (consume_arg env) live args
-
-  | T.TERecord (_, _, fields, _) ->
-      List.fold_left (fun live (_, e) -> consume_arg env live e)
-        live fields
-
-  | T.TEIf (cond, t, el, _) ->
-      let live = check_moves_expr env live cond in
-      let live_t = check_moves_expr env live t in
-      let live_e = check_moves_expr env live el in
-      (* Each branch runs conditionally. It must not consume any outer
-         name — that would leak in the other path or double-free across
-         paths. Move/consume of outer names belongs above the if. *)
-      if not (SS.equal live_t live) then
-        raise (Type_error
-          (Printf.sprintf
-             "then-branch consumes outer name(s) [%s] — \
-              conditional consume is not allowed; move it above the if"
-             (String.concat ", " (SS.elements (SS.diff live live_t)))));
-      if not (SS.equal live_e live) then
-        raise (Type_error
-          (Printf.sprintf
-             "else-branch consumes outer name(s) [%s] — \
-              conditional consume is not allowed; move it above the if"
-             (String.concat ", " (SS.elements (SS.diff live live_e)))));
-      live
-
-  | T.TELet (x, _, v, b, _, _) ->
-      let live = consume_arg env live v in
-      if x = "_" then check_moves_expr env live b
-      else
-        (* Save the outer status of x in case the let shadows it. After
-           the body, restore that status — the inner binding's life or
-           death doesn't bleed into the outer scope. *)
-        let outer_had = SS.mem x live in
-        let live_inner = SS.add x live in
-        let live_after = check_moves_expr env live_inner b in
-        if outer_had then SS.add x live_after else SS.remove x live_after
-
-  | T.TEMatch (scrut, _, arms, _) ->
-      let live = check_moves_expr env live scrut in
-      let arm_lives = List.map (fun (pat, body) ->
-        let names = match pat with
-          | PWild -> []
-          | PCtor (_, vs) -> List.filter (fun v -> v <> "_") vs
-        in
-        (* Same shadowing handling as TELet. *)
-        let outer_had = List.map (fun v -> (v, SS.mem v live)) names in
-        let live_arm =
-          List.fold_left (fun l v -> SS.add v l) live names
-        in
-        let live_after = check_moves_expr env live_arm body in
-        List.fold_left (fun l (v, was) ->
-          if was then SS.add v l else SS.remove v l)
-          live_after outer_had) arms
+  | T.TECall (callee, args, ty) ->
+      let (callee', live) = check_moves_expr env live false callee in
+      let (args_rev, live) = List.fold_left (fun (acc, live) a ->
+        let (a', live) = consume_arg env live a in
+        (a' :: acc, live)) ([], live) args
       in
-      (* Same rule as if-branches: every arm runs conditionally, so
-         no arm may consume an outer name. *)
-      List.iteri (fun i live_arm ->
-        if not (SS.equal live_arm live) then
-          raise (Type_error
-            (Printf.sprintf
-               "match arm #%d consumes outer name(s) [%s] — \
-                conditional consume is not allowed; move it above the match"
-               (i + 1)
-               (String.concat ", " (SS.elements (SS.diff live live_arm))))))
-        arm_lives;
-      live
+      (T.TECall (callee', List.rev args_rev, ty), live)
 
-  | T.TERef (e, _) -> check_moves_expr env live e
-  | T.TEDeref (e, _) -> check_moves_expr env live e
-  | T.TEAssign (r, v, _) ->
-      let live = check_moves_expr env live r in
-      check_moves_expr env live v
-  | T.TEOwn (e, _) -> consume_arg env live e
-  | T.TETake (e, _) -> consume_arg env live e
-  | T.TEUnwrap (e, _) -> consume_arg env live e
-  | T.TELook (e, _) -> check_moves_expr env live e
+  | T.TECtor (c, ts, args, ty) ->
+      let (args_rev, live) = List.fold_left (fun (acc, live) a ->
+        let (a', live) = consume_arg env live a in
+        (a' :: acc, live)) ([], live) args
+      in
+      (T.TECtor (c, ts, List.rev args_rev, ty), live)
 
-  | T.TEArray (n, v, _) ->
-      let live = check_moves_expr env live n in
-      consume_arg env live v   (* init value is moved into the array *)
+  | T.TERecord (n, ts, fields, ty) ->
+      let (fields_rev, live) = List.fold_left (fun (acc, live) (f, e) ->
+        let (e', live) = consume_arg env live e in
+        ((f, e') :: acc, live)) ([], live) fields
+      in
+      (T.TERecord (n, ts, List.rev fields_rev, ty), live)
 
-  | T.TEIndex (a, i, _) ->
-      let live = check_moves_expr env live a in
-      check_moves_expr env live i
+  | T.TEIf (cond, t, el, ty) ->
+      let (cond', live) = check_moves_expr env live false cond in
+      let (t', live_t) = check_moves_expr env live in_tail t in
+      let (el', live_e) = check_moves_expr env live in_tail el in
+      (* Final live set after the if is the intersection — names live
+         in both. For each branch, names alive in it but not in the
+         intersection must be dropped at the branch's tail. The
+         compiler inserts those drops as TELet wraps. *)
+      let final = SM.merge (fun _ a b ->
+        match a, b with
+        | Some t1, Some _ -> Some t1
+        | _ -> None) live_t live_e
+      in
+      let drops_of branch_live =
+        SM.fold (fun k v acc ->
+          if SM.mem k final then acc else (k, v) :: acc) branch_live []
+      in
+      let drops_t = drops_of live_t in
+      let drops_e = drops_of live_e in
+      let t'' = wrap_with_drops drops_t ty t' in
+      let el'' = wrap_with_drops drops_e ty el' in
+      (T.TEIf (cond', t'', el'', ty), final)
 
-  | T.TEAssignIdx (a, i, v, _) ->
-      let live = check_moves_expr env live a in
-      let live = check_moves_expr env live i in
-      consume_arg env live v   (* new value is moved into the slot *)
+  | T.TELet (x, vt, v, b, bt, ad) ->
+      let (v', live) = consume_arg env live v in
+      if x = "_" then
+        let (b', live) = check_moves_expr env live in_tail b in
+        (T.TELet ("_", vt, v', b', bt, ad), live)
+      else
+        let outer_had = SM.find_opt x live in
+        let live_inner = SM.add x vt live in
+        let (b', live_after) = check_moves_expr env live_inner in_tail b in
+        let live_final = match outer_had with
+          | Some t -> SM.add x t live_after
+          | None -> SM.remove x live_after
+        in
+        (T.TELet (x, vt, v', b', bt, ad), live_final)
 
-  | T.TELen (e, _) -> check_moves_expr env live e
+  | T.TEMatch (scrut, scrut_ty, arms, ty) ->
+      let (scrut', live) = check_moves_expr env live false scrut in
+      (* Compute binding types for each pattern by substituting the
+         scrutinee's concrete type arguments into the ctor's arg types. *)
+      let arm_data = List.map (fun (pat, body) ->
+        let names_tys = match pat with
+          | PWild -> []
+          | PCtor (c, vs) ->
+              let info = List.assoc c env.ctors in
+              let scrut_now = prune scrut_ty in
+              let subst = match scrut_now with
+                | TyApp (_, args) ->
+                    List.combine info.ctor_owner_params args
+                | _ -> []
+              in
+              let arg_tys =
+                List.map (subst_ty subst) info.ctor_args
+              in
+              List.filter (fun (v, _) -> v <> "_")
+                (List.combine vs arg_tys)
+        in
+        let outer_had =
+          List.map (fun (v, _) -> (v, SM.find_opt v live)) names_tys
+        in
+        let live_arm =
+          List.fold_left (fun l (v, t) -> SM.add v t l) live names_tys
+        in
+        let (body', live_after) =
+          check_moves_expr env live_arm in_tail body
+        in
+        let live_after_restore = List.fold_left (fun l (v, prev) ->
+          match prev with
+          | Some t -> SM.add v t l
+          | None -> SM.remove v l) live_after outer_had
+        in
+        (pat, body', live_after_restore)
+      ) arms in
+      (match arm_data with
+       | [] -> (T.TEMatch (scrut', scrut_ty, [], ty), live)
+       | _ :: _ ->
+           let final = List.fold_left (fun acc (_, _, l) ->
+             SM.merge (fun _ a b ->
+               match a, b with
+               | Some t, Some _ -> Some t
+               | _ -> None) acc l)
+             (let (_, _, l) = List.hd arm_data in l)
+             (List.tl arm_data)
+           in
+           let arms' = List.map (fun (pat, body, live_after) ->
+             let drops = SM.fold (fun k v acc ->
+               if SM.mem k final then acc else (k, v) :: acc)
+               live_after []
+             in
+             (pat, wrap_with_drops drops ty body)) arm_data
+           in
+           (T.TEMatch (scrut', scrut_ty, arms', ty), final))
 
-(* Evaluate an expression in argument position (let RHS, fn arg, ctor
-   arg, record field, unwrap arg, take arg). If it's a bare EVar of a
-   non-copyable type, the name is moved out and becomes dead. *)
-and consume_arg (env : env) (live : SS.t) (e : T.expr) : SS.t =
-  let live = check_moves_expr env live e in
-  match e with
-  | T.TEVar (x, t) when not (is_copyable env t) -> SS.remove x live
-  | _ -> live
+  | T.TERef (sub, ty) ->
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TERef (sub', ty), live)
+  | T.TEDeref (sub, ty) ->
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TEDeref (sub', ty), live)
+  | T.TEAssign (r, v, ty) ->
+      let (r', live) = check_moves_expr env live false r in
+      let (v', live) = check_moves_expr env live false v in
+      (T.TEAssign (r', v', ty), live)
+  | T.TEOwn (sub, ty) ->
+      let (sub', live) = consume_arg env live sub in
+      (T.TEOwn (sub', ty), live)
+  | T.TETake (sub, ty) ->
+      let (sub', live) = consume_arg env live sub in
+      (T.TETake (sub', ty), live)
+  | T.TEUnwrap (sub, ty) ->
+      let (sub', live) = consume_arg env live sub in
+      (T.TEUnwrap (sub', ty), live)
+  | T.TELook (sub, ty) ->
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TELook (sub', ty), live)
+
+  | T.TEArray (n, v, ty) ->
+      let (n', live) = check_moves_expr env live false n in
+      let (v', live) = consume_arg env live v in
+      (T.TEArray (n', v', ty), live)
+
+  | T.TEIndex (a, i, ty) ->
+      let (a', live) = check_moves_expr env live false a in
+      let (i', live) = check_moves_expr env live false i in
+      (T.TEIndex (a', i', ty), live)
+
+  | T.TEAssignIdx (a, i, v, ty) ->
+      let (a', live) = check_moves_expr env live false a in
+      let (i', live) = check_moves_expr env live false i in
+      let (v', live) = consume_arg env live v in
+      (T.TEAssignIdx (a', i', v', ty), live)
+
+  | T.TELen (sub, ty) ->
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TELen (sub', ty), live)
+
+and consume_arg (env : env) (live : ty SM.t) (e : T.expr)
+  : T.expr * ty SM.t =
+  let (e', live) = check_moves_expr env live false e in
+  match e' with
+  | T.TEVar (x, t) when not (is_copyable env t) -> (e', SM.remove x live)
+  | _ -> (e', live)
 
 (* ---------- check a function ---------- *)
 
@@ -1568,15 +1643,18 @@ let check_func (env : env) (f : func) : T.func =
       tbody
   in
   let initial_live =
-    List.fold_left (fun s (p, _) -> SS.add p s) SS.empty f.params
+    List.fold_left2 (fun m (p, _) t -> SM.add p t m)
+      SM.empty f.params param_tys
   in
-  let _final_live = check_moves_expr env initial_live body_with_drops in
+  let (body_with_moves, _final_live) =
+    check_moves_expr env initial_live true body_with_drops
+  in
   { T.name = f.name;
     T.type_params = f.type_params;
     T.params = List.combine
       (List.map fst f.params) param_tys;
     T.return_ty = ret_ty;
-    T.body = body_with_drops }
+    T.body = body_with_moves }
 
 (* ---------- top-level entry ---------- *)
 
