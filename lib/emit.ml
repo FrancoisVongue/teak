@@ -109,6 +109,8 @@ let rec collect_expr (e : Check.T.expr) : unit =
       collect_ty rt
   | Check.T.TEArray (r, n, v, t) ->
       collect_expr r; collect_expr n; collect_expr v; collect_ty t
+  | Check.T.TEArrayLit (r, elems, t) ->
+      collect_expr r; List.iter collect_expr elems; collect_ty t
   | Check.T.TERegion (n, t) -> collect_expr n; collect_ty t
   | Check.T.TEIndex (a, i, t) ->
       collect_expr a; collect_expr i; collect_ty t
@@ -250,6 +252,8 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
         TEMatch (s', st, arms', rt)
     | TEArray (r, n, v, t) ->
         TEArray (rn env r, rn env n, rn env v, t)
+    | TEArrayLit (r, elems, t) ->
+        TEArrayLit (rn env r, List.map (rn env) elems, t)
     | TERegion (n, t) -> TERegion (rn env n, t)
     | TEIndex (a, i, t) -> TEIndex (rn env a, rn env i, t)
     | TEAssignIdx (a, i, v, t) ->
@@ -375,6 +379,7 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TELet (_, _, _, _, t, _) -> t
   | Check.T.TEMatch (_, _, _, t) -> t
   | Check.T.TEArray (_, _, _, t) -> t
+  | Check.T.TEArrayLit (_, _, t) -> t
   | Check.T.TERegion (_, t) -> t
   | Check.T.TEIndex (_, _, t) -> t
   | Check.T.TEAssignIdx (_, _, _, t) -> t
@@ -630,6 +635,48 @@ let rec emit_expr
           "%s %s = ((%s){ .region = %s.header, .offset = %s, .len = %s, .expected_gen = %s.expected_gen });"
           arr_c arr_var arr_c r_var off_var n_var r_var;
       ] in
+      { stmts; value = arr_var }
+
+  | Check.T.TEArrayLit (region_e, elems, result_ty) ->
+      (* array(r, [v0..vN-1]): bump-allocate N slots in r, store the
+         literal values in order. Same shape as TEArray but each slot
+         gets its own value instead of a single fill. *)
+      let cr = emit_expr ctor_map region_e in
+      let elem_codes = List.map (emit_expr ctor_map) elems in
+      let r_var = fresh "_r" in
+      let off_var = fresh "_off" in
+      let slots_var = fresh "_slots" in
+      let arr_var = fresh "_arr" in
+      let arr_c = c_type result_ty in
+      let elem_ty = match result_ty with
+        | TyApp ("Array", [inner]) -> inner
+        | _ -> failwith "emit TEArrayLit: result not Array[_]"
+      in
+      let elem_c = c_type elem_ty in
+      let n = List.length elems in
+      let init_stmts = List.mapi (fun i c ->
+        Printf.sprintf "%s[%d] = %s;" slots_var i c.value) elem_codes
+      in
+      let stmts = cr.stmts
+        @ List.concat_map (fun c -> c.stmts) elem_codes
+        @ [
+          Printf.sprintf "Region %s = %s;" r_var cr.value;
+          Printf.sprintf "if (%s.header->gen != %s.expected_gen) abort();"
+            r_var r_var;
+          Printf.sprintf
+            "if (%s.header->used + (size_t)%d * sizeof(%s) > %s.header->buffer_size) abort();"
+            r_var n elem_c r_var;
+          Printf.sprintf "int %s = (int)%s.header->used;" off_var r_var;
+          Printf.sprintf "%s.header->used += (size_t)%d * sizeof(%s);"
+            r_var n elem_c;
+          Printf.sprintf "%s* %s = (%s*)(%s.header->buffer + %s);"
+            elem_c slots_var elem_c r_var off_var;
+        ] @ init_stmts @ [
+          Printf.sprintf
+            "%s %s = ((%s){ .region = %s.header, .offset = %s, .len = %d, .expected_gen = %s.expected_gen });"
+            arr_c arr_var arr_c r_var off_var n r_var;
+        ]
+      in
       { stmts; value = arr_var }
 
   | Check.T.TERegion (size_e, _) ->

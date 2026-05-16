@@ -40,6 +40,8 @@ module T = struct
     | TEMatch  of expr * ty * (pat * expr) list * ty
     | TEArray  of expr * expr * expr * ty
                   (* array(r, N, init) — allocate in region r, result is Array[T] *)
+    | TEArrayLit of expr * expr list * ty
+                  (* array(r, [v0..vN]) — allocate in r, init each slot *)
     | TERegion of expr * ty
                   (* region(N) — result is Region *)
     | TEIndex  of expr * expr * ty
@@ -647,6 +649,9 @@ let rec takes_consume (env : env) (x : string) (e : T.expr) : bool =
         not shadowed && takes_consume env x body) arms
   | T.TEArray (r, n, v, _) ->
       takes_consume env x r || takes_consume env x n || takes_consume env x v
+  | T.TEArrayLit (r, elems, _) ->
+      takes_consume env x r
+      || List.exists (takes_consume env x) elems
   | T.TERegion (n, _) -> takes_consume env x n
   | T.TEIndex (a, i, _) ->
       takes_consume env x a || takes_consume env x i
@@ -995,6 +1000,38 @@ let rec infer (env : env) (tparams : string list)
       let result_ty = TyApp ("Array", [tv_ty]) in
       (T.TEArray (tr, tn, tv, result_ty), result_ty)
 
+  | EArrayLit (region_e, elems) ->
+      (* array(r, [v0, ..., vN-1]) : Region, expr list → Array[T].
+         All values must share one element type; result length = list length. *)
+      if elems = [] then
+        raise (Type_error
+          "array(r, []) requires at least one element to infer type — \
+           use array(r, 0, default) for an empty array");
+      let (tr, tr_ty) = infer env tparams vars region_e in
+      (try unify tr_ty (TyApp ("Region", []))
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "array(r, [..]) : first argument must be Region, got %s"
+              (show_ty (zonk tr_ty)))));
+      let typed_elems = List.map (infer env tparams vars) elems in
+      let elem_ty = snd (List.hd typed_elems) in
+      List.iter (fun (_, t) ->
+        (try unify elem_ty t
+         with Type_error _ ->
+           raise (Type_error
+             (Printf.sprintf
+                "array literal elements must all have the same type: \
+                 expected %s, got %s"
+                (show_ty (zonk elem_ty)) (show_ty (zonk t)))))) typed_elems;
+      if ty_contains_own (zonk elem_ty) then
+        raise (Type_error
+          (Printf.sprintf
+             "array literal element type cannot contain a linear type (%s)"
+             (show_ty (zonk elem_ty))));
+      let result_ty = TyApp ("Array", [elem_ty]) in
+      (T.TEArrayLit (tr, List.map fst typed_elems, result_ty), result_ty)
+
   | ERegion size_e ->
       (* region(N) : int → Region. Owned arena of N bytes. Linear. *)
       let (tn, tn_ty) = infer env tparams vars size_e in
@@ -1182,6 +1219,8 @@ let rec zonk_expr (e : T.expr) : T.expr =
       T.TEMatch (zonk_expr s, zonk_expect st, arms, zonk_expect rt)
   | T.TEArray (r, n, v, t) ->
       T.TEArray (zonk_expr r, zonk_expr n, zonk_expr v, zonk_expect t)
+  | T.TEArrayLit (r, elems, t) ->
+      T.TEArrayLit (zonk_expr r, List.map zonk_expr elems, zonk_expect t)
   | T.TERegion (n, t) -> T.TERegion (zonk_expr n, zonk_expect t)
   | T.TEIndex (a, i, t) ->
       T.TEIndex (zonk_expr a, zonk_expr i, zonk_expect t)
@@ -1374,6 +1413,14 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       let (n', live) = check_moves_expr env live false n in
       let (v', live) = check_moves_expr env live false v in
       (T.TEArray (r', n', v', ty), live)
+
+  | T.TEArrayLit (r, elems, ty) ->
+      let (r', live) = check_moves_expr env live false r in
+      let (elems_rev, live) = List.fold_left (fun (acc, l) e ->
+        let (e', l) = check_moves_expr env l false e in
+        (e' :: acc, l)) ([], live) elems
+      in
+      (T.TEArrayLit (r', List.rev elems_rev, ty), live)
 
   | T.TERegion (n, ty) ->
       let (n', live) = check_moves_expr env live false n in

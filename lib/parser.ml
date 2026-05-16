@@ -268,11 +268,31 @@ and parse_atom_consume st =
       expect st TLParen;
       let r = parse_expr st in
       expect st TComma;
-      let n = parse_expr st in
-      expect st TComma;
-      let v = parse_expr st in
-      expect st TRParen;
-      EArray (r, n, v)
+      (match peek st with
+       | TLBracket ->
+           (* array(r, [v0, v1, ..., vN]) — initialize from literal. *)
+           advance st;
+           let elems =
+             if peek st = TRBracket then []
+             else
+               let rec collect () =
+                 let e = parse_expr st in
+                 if peek st = TComma then begin
+                   advance st;
+                   if peek st = TRBracket then [e] else e :: collect ()
+                 end else [e]
+               in
+               collect ()
+           in
+           expect st TRBracket;
+           expect st TRParen;
+           EArrayLit (r, elems)
+       | _ ->
+           let n = parse_expr st in
+           expect st TComma;
+           let v = parse_expr st in
+           expect st TRParen;
+           EArray (r, n, v))
   | TRegion ->
       expect st TLParen;
       let n = parse_expr st in

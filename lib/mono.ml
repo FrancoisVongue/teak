@@ -176,6 +176,10 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         Check.T.TEArray (rewrite_expr subst r,
                          rewrite_expr subst n,
                          rewrite_expr subst v, rt t)
+    | Check.T.TEArrayLit (r, elems, t) ->
+        Check.T.TEArrayLit (rewrite_expr subst r,
+                            List.map (rewrite_expr subst) elems,
+                            rt t)
     | Check.T.TERegion (n, t) ->
         Check.T.TERegion (rewrite_expr subst n, rt t)
     | Check.T.TEIndex (a, i, t) ->

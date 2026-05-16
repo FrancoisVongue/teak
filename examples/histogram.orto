@@ -2,40 +2,24 @@
 //
 // Под капотом:
 //   - region(N) — один malloc на header + один malloc на N байт буфера.
-//     Внутри функции живёт линейная Region (move-only).
-//   - array(r, N, init) — bump-allocate в r->buffer. Возвращает Array[T]
-//     (handle: 24 байта = ptr на header + offset + len + expected_gen).
-//     Array копируемая — можно передавать в функции, копировать в let,
-//     возвращать. Это просто числа.
+//   - array(r, [...]) — bump-allocate N слотов в r->buffer и заполнить
+//     значениями из литерала. Длина выводится из числа элементов.
+//   - array(r, N, init) — bump-allocate N слотов, все заполнить одним init.
 //   - На scope-exit региона: free(r->buffer), gen++. Все Array-handles
-//     становятся dangling — следующий доступ через gen-check abort'нет.
+//     становятся dangling, gen-check abort'нет.
 
 fn main() -> int {
-    // Одна арена на всё. 4 KB достаточно для двух массивов.
     let r = region(4096);
 
     // Восемь значений: 4, 1, 4, 2, 4, 1, 3, 2. Максимум = 4.
-    let values = array(r, 8, 0);
-    values[0] := 4;
-    values[1] := 1;
-    values[2] := 4;
-    values[3] := 2;
-    values[4] := 4;
-    values[5] := 1;
-    values[6] := 3;
-    values[7] := 2;
+    let values = array(r, [4, 1, 4, 2, 4, 1, 3, 2]);
 
-    // Счётчики для значений 0..4.
+    // Счётчики для значений 0..4. Все стартуют с нуля.
     let counters = array(r, 5, 0);
 
-    // build_histogram читает values и инкрементит counters. Оба handle
-    // копируемые — функции передаются по value, изменения через
-    // указатель внутри handle (в буфер региона) видны всем.
     build_histogram(values, counters, 0);
-
-    // find_max просто читает counters.
     find_max(counters, 0, 0)
-    // scope-exit r — один free(r->buffer). Всё что в нём — мертво.
+    // scope-exit r — один free(r->buffer).
 }
 
 fn build_histogram(values: Array[int], counters: Array[int], i: int) -> int {
