@@ -88,18 +88,21 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
          with Not_found ->
            failwith (Printf.sprintf
              "mono rewrite_ty: free type variable %S" n))
-    | TyApp ("Ref", [inner]) ->
-        (* Ref is structural — no body to specialize. Just rewrite its
-           inner type. Emit will collect Ref instantiations and produce
-           one typedef per distinct one. *)
-        TyApp ("Ref", [rewrite_ty subst inner])
-    | TyApp ("Ref", _) ->
-        failwith "mono rewrite_ty: Ref with wrong arity (should be unary)"
-    | TyApp ("Own", [inner]) ->
-        (* Own is structural like Ref. *)
-        TyApp ("Own", [rewrite_ty subst inner])
-    | TyApp ("Own", _) ->
-        failwith "mono rewrite_ty: Own with wrong arity (should be unary)"
+    | TyApp ("Buf", [inner]) ->
+        TyApp ("Buf", [rewrite_ty subst inner])
+    | TyApp ("Buf", _) ->
+        failwith "mono rewrite_ty: Buf with wrong arity (should be unary)"
+    | TyApp ("Array", [inner]) ->
+        (* Array is structural — emit emits one wrapper+cell pair per
+           distinct element type. *)
+        TyApp ("Array", [rewrite_ty subst inner])
+    | TyApp ("Array", _) ->
+        failwith "mono rewrite_ty: Array with wrong arity (should be unary)"
+    | TyApp ("Region", []) ->
+        (* Region is a structural nullary builtin — emit just typedefs it. *)
+        TyApp ("Region", [])
+    | TyApp ("Region", _) ->
+        failwith "mono rewrite_ty: Region takes no type arguments"
     | TyApp (n, args) ->
         let args = List.map (rewrite_ty subst) args in
         if is_record_name n then request_rec n args
@@ -173,24 +176,28 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
           (p, rewrite_expr subst b)) arms in
         Check.T.TEMatch (rewrite_expr subst s, rt st, arms, rt rty)
 
-    | Check.T.TERef (e, t) ->
-        Check.T.TERef (rewrite_expr subst e, rt t)
-    | Check.T.TEDeref (e, t) ->
-        Check.T.TEDeref (rewrite_expr subst e, rt t)
-    | Check.T.TEAssign (r, v, t) ->
-        Check.T.TEAssign (rewrite_expr subst r,
-                          rewrite_expr subst v, rt t)
-    | Check.T.TEPanic t ->
-        Check.T.TEPanic (rt t)
-
-    | Check.T.TEOwn (e, t) ->
-        Check.T.TEOwn (rewrite_expr subst e, rt t)
-    | Check.T.TETake (e, t) ->
-        Check.T.TETake (rewrite_expr subst e, rt t)
-    | Check.T.TEUnwrap (e, t) ->
-        Check.T.TEUnwrap (rewrite_expr subst e, rt t)
-    | Check.T.TELook (e, t) ->
-        Check.T.TELook (rewrite_expr subst e, rt t)
+    | Check.T.TEArray (r, n, v, t) ->
+        Check.T.TEArray (rewrite_expr subst r,
+                         rewrite_expr subst n,
+                         rewrite_expr subst v, rt t)
+    | Check.T.TEArrayLit (r, elems, t) ->
+        Check.T.TEArrayLit (rewrite_expr subst r,
+                            List.map (rewrite_expr subst) elems,
+                            rt t)
+    | Check.T.TEBuf (n, v, t) ->
+        Check.T.TEBuf (rewrite_expr subst n, rewrite_expr subst v, rt t)
+    | Check.T.TEBufLit (elems, t) ->
+        Check.T.TEBufLit (List.map (rewrite_expr subst) elems, rt t)
+    | Check.T.TERegion (n, t) ->
+        Check.T.TERegion (rewrite_expr subst n, rt t)
+    | Check.T.TEIndex (a, i, t) ->
+        Check.T.TEIndex (rewrite_expr subst a, rewrite_expr subst i, rt t)
+    | Check.T.TEAssignIdx (a, i, v, t) ->
+        Check.T.TEAssignIdx (rewrite_expr subst a,
+                             rewrite_expr subst i,
+                             rewrite_expr subst v, rt t)
+    | Check.T.TELen (e, t) ->
+        Check.T.TELen (rewrite_expr subst e, rt t)
   in
 
   request_fn "main" [];

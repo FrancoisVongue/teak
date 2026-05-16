@@ -1,14 +1,4 @@
-(* Tokens for stage B.
-
-   New since stage 0:
-   - TCtorIdent: identifier starting with uppercase. Used for both
-     type names (`Shape`) and constructor names (`Circle`). Lexer
-     decides by the first character, parser uses position to decide
-     which it is.
-   - TType, TMatch, TUnderscore: new keywords / token.
-   - TFatArrow (=>): only used in match arms.
-
-   No precedence levels and no operator tokens. *)
+(* Tokens. *)
 
 type token =
   (* literals *)
@@ -29,13 +19,10 @@ type token =
   | TExtern
   | TStruct
   | TEnum
-  | TRef
-  | TDeref
-  | TPanic
-  | TOwn          (* own — heap allocation, exclusive ownership *)
-  | TTake         (* take — explicit consume of an Own *)
-  | TUnwrap       (* unwrap — copy value out of Own (only for copyable T) *)
-  | TLook         (* look — read through Ref, returns Option (only for copyable T) *)
+  | TArray        (* array — sized buffer allocated in a region *)
+  | TBuf          (* buf — raw stack-allocated array, compile-time size *)
+  | TLen          (* len — array length *)
+  | TRegion       (* region — owned arena, frees its buffer at scope-exit *)
   | TUnderscore   (* `_` as a standalone token (wildcard pattern) *)
   (* punctuation *)
   | TLParen
@@ -67,8 +54,7 @@ type token =
   | TBang         (* !  *)
   | TDot          (* .  *)
   | TDotDot       (* .. *)
-  | TColonEq      (* := *)
-  | TQQ           (* ?? *)
+  | TColonEq      (* := — only for array index assignment a[i] := v *)
   | TEOF
 
 let show = function
@@ -88,13 +74,10 @@ let show = function
   | TExtern       -> "EXTERN"
   | TStruct       -> "STRUCT"
   | TEnum         -> "ENUM"
-  | TRef          -> "REF"
-  | TDeref        -> "DEREF"
-  | TPanic        -> "PANIC"
-  | TOwn          -> "OWN"
-  | TTake         -> "TAKE"
-  | TUnwrap       -> "UNWRAP"
-  | TLook         -> "LOOK"
+  | TArray        -> "ARRAY"
+  | TBuf          -> "BUF"
+  | TLen          -> "LEN"
+  | TRegion       -> "REGION"
   | TUnderscore   -> "_"
   | TLParen       -> "("
   | TRParen       -> ")"
@@ -126,5 +109,4 @@ let show = function
   | TDot          -> "."
   | TDotDot       -> ".."
   | TColonEq      -> ":="
-  | TQQ           -> "??"
   | TEOF          -> "EOF"

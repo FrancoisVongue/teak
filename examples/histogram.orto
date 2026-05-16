@@ -1,0 +1,43 @@
+// Histogram + peak — пример "среднего уровня" на orto.
+//
+// Под капотом:
+//   - region(N) — один malloc на header + один malloc на N байт буфера.
+//   - array(r, [...]) — bump-allocate N слотов в r->buffer и заполнить
+//     значениями из литерала. Длина выводится из числа элементов.
+//   - array(r, N, init) — bump-allocate N слотов, все заполнить одним init.
+//   - На scope-exit региона: free(r->buffer), gen++. Все Array-handles
+//     становятся dangling, gen-check abort'нет.
+
+fn main() -> int {
+    let r = region(4096);
+
+    // Восемь значений: 4, 1, 4, 2, 4, 1, 3, 2. Максимум = 4.
+    let values = array(r, [4, 1, 4, 2, 4, 1, 3, 2]);
+
+    // Счётчики для значений 0..4. Все стартуют с нуля.
+    let counters = array(r, 5, 0);
+
+    build_histogram(values, counters, 0);
+    find_max(counters, 0, 0)
+    // scope-exit r — один free(r->buffer).
+}
+
+fn build_histogram(values: Array[int], counters: Array[int], i: int) -> int {
+    if i < len(values) {
+        let v = values[i];
+        counters[v] := counters[v] + 1;
+        build_histogram(values, counters, i + 1)
+    } else {
+        0
+    }
+}
+
+fn find_max(counters: Array[int], i: int, best: int) -> int {
+    if i < len(counters) {
+        let v = counters[i];
+        let new_best = if v > best { v } else { best };
+        find_max(counters, i + 1, new_best)
+    } else {
+        best
+    }
+}

@@ -115,25 +115,16 @@ let parse_binop_chain st (ops : (token * binop) list) lower =
 
 let rec parse_expr st = parse_assign st
 
-(* `:=` is right-associative: `a := b := c` parses as `a := (b := c)`.
-   Returns Option[T] — but that's purely a type-system fact handled in
-   the checker. Lowest precedence. *)
+(* `:=` is only valid for array index assignment: `a[i] := v`. *)
 and parse_assign st =
-  let lhs = parse_orelse st in
+  let lhs = parse_or st in
   if peek st = TColonEq then begin
     advance st;
     let rhs = parse_assign st in
-    EAssign (lhs, rhs)
-  end else lhs
-
-(* `??` is right-associative: `a ?? b ?? c` parses as `a ?? (b ?? c)`.
-   That's the useful form: cascade of defaults. *)
-and parse_orelse st =
-  let lhs = parse_or st in
-  if peek st = TQQ then begin
-    advance st;
-    let rhs = parse_orelse st in
-    EOrElse (lhs, rhs)
+    match lhs with
+    | EIndex (arr, idx) -> EAssignIdx (arr, idx, rhs)
+    | _ -> raise (Parse_error
+        "`:=` is only allowed on array indexing: a[i] := v")
   end else lhs
 
 and parse_or st =
@@ -190,6 +181,11 @@ and parse_postfix_chain st head =
              (Token.show t)))
       in
       parse_postfix_chain st (EField (head, field))
+  | TLBracket ->
+      advance st;
+      let idx = parse_expr st in
+      expect st TRBracket;
+      parse_postfix_chain st (EIndex (head, idx))
   | _ -> head
 
 and parse_record_init_elems st =
@@ -239,8 +235,8 @@ and parse_atom st =
   | TInt _ | TTrue | TFalse | TLParen
   | TIdent _ | TCtorIdent _
   | TIf | TMatch
-  | TRef | TDeref | TPanic
-  | TOwn | TTake | TUnwrap | TLook -> parse_atom_consume st
+  | TArray | TBuf | TLen | TRegion
+  | TLBracket -> parse_atom_consume st
   | t -> raise (Parse_error
     (Printf.sprintf "expected expression, got %s" (Token.show t)))
 
@@ -269,40 +265,73 @@ and parse_atom_consume st =
        | _ -> ECtor (name, []))
   | TIf -> parse_if_after_kw st
   | TMatch -> parse_match_after_kw st
-  | TRef ->
+  | TArray ->
+      expect st TLParen;
+      let r = parse_expr st in
+      expect st TComma;
+      (match peek st with
+       | TLBracket ->
+           (* array(r, [v0, v1, ..., vN]) — initialize from literal. *)
+           advance st;
+           let elems =
+             if peek st = TRBracket then []
+             else
+               let rec collect () =
+                 let e = parse_expr st in
+                 if peek st = TComma then begin
+                   advance st;
+                   if peek st = TRBracket then [e] else e :: collect ()
+                 end else [e]
+               in
+               collect ()
+           in
+           expect st TRBracket;
+           expect st TRParen;
+           EArrayLit (r, elems)
+       | _ ->
+           let n = parse_expr st in
+           expect st TComma;
+           let v = parse_expr st in
+           expect st TRParen;
+           EArray (r, n, v))
+  | TRegion ->
+      expect st TLParen;
+      let n = parse_expr st in
+      expect st TRParen;
+      ERegion n
+  | TLen ->
       expect st TLParen;
       let e = parse_expr st in
       expect st TRParen;
-      ERef e
-  | TDeref ->
+      ELen e
+  | TBuf ->
+      (* buf(N, init) — stack array, N must be an int literal at parse time. *)
       expect st TLParen;
-      let e = parse_expr st in
+      let n = parse_expr st in
+      (match n with
+       | EInt _ -> ()
+       | _ -> raise (Parse_error
+           "buf(N, init): N must be an integer literal (compile-time size)"));
+      expect st TComma;
+      let v = parse_expr st in
       expect st TRParen;
-      EDeref e
-  | TPanic ->
-      expect st TLParen;
-      expect st TRParen;
-      EPanic
-  | TOwn ->
-      expect st TLParen;
-      let e = parse_expr st in
-      expect st TRParen;
-      EOwn e
-  | TTake ->
-      expect st TLParen;
-      let e = parse_expr st in
-      expect st TRParen;
-      ETake e
-  | TUnwrap ->
-      expect st TLParen;
-      let e = parse_expr st in
-      expect st TRParen;
-      EUnwrap e
-  | TLook ->
-      expect st TLParen;
-      let e = parse_expr st in
-      expect st TRParen;
-      ELook e
+      EBuf (n, v)
+  | TLBracket ->
+      (* `[v0, v1, ..., vN]` standalone — stack array literal. *)
+      let elems =
+        if peek st = TRBracket then []
+        else
+          let rec collect () =
+            let e = parse_expr st in
+            if peek st = TComma then begin
+              advance st;
+              if peek st = TRBracket then [e] else e :: collect ()
+            end else [e]
+          in
+          collect ()
+      in
+      expect st TRBracket;
+      EBufLit elems
   | _ -> assert false
 
 and parse_if_after_kw st =

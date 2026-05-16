@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>orto — карта понятий компилятора</title>
+<style>
+  :root {
+    --bg: #1e1e1e;
+    --fg: #d4d4d4;
+    --dim: #888;
+    --clean: #6abf69;      /* зелёный: ортогональное, простое */
+    --rough: #d4a020;      /* жёлтый: работает, но шероховато */
+    --hole:  #d05050;      /* красный: дыра / технический долг */
+    --link:  #58a6ff;
+    --rule:  #333;
+    --pill:  #2d2d2d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    margin: 0; padding: 24px 32px;
+  }
+  h1 { font-size: 22px; margin: 0 0 6px 0; }
+  h2 {
+    font-size: 16px; font-weight: 600; margin: 32px 0 10px;
+    border-bottom: 1px solid var(--rule); padding-bottom: 4px;
+  }
+  h3 { font-size: 14px; font-weight: 600; margin: 18px 0 6px; color: var(--fg); }
+  p.lead { color: var(--dim); margin: 0 0 18px; max-width: 80ch; }
+  ul { list-style: none; padding-left: 18px; margin: 4px 0; }
+  li {
+    padding: 2px 0; position: relative;
+  }
+  li::before {
+    content: "·"; color: var(--dim);
+    position: absolute; left: -12px; top: 1px;
+  }
+  .root > li::before { content: ""; }
+  .root > li { padding-left: 0; }
+  .pill {
+    display: inline-block;
+    padding: 1px 7px; border-radius: 10px;
+    background: var(--pill); color: var(--dim);
+    font-size: 11px; margin-left: 6px;
+    vertical-align: middle;
+  }
+  .pill.clean { background: rgba(106, 191, 105, 0.15); color: var(--clean); }
+  .pill.rough { background: rgba(212, 160, 32, 0.18); color: var(--rough); }
+  .pill.hole  { background: rgba(208, 80, 80, 0.18); color: var(--hole); }
+  code, .mono {
+    background: rgba(255,255,255,0.05);
+    padding: 1px 5px; border-radius: 3px;
+    color: #e6e6e6;
+  }
+  .meta { color: var(--dim); font-size: 12px; margin-left: 8px; }
+  .group {
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 14px 18px;
+    margin-bottom: 14px;
+    background: rgba(255,255,255,0.02);
+  }
+  .columns {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 18px;
+  }
+  @media (max-width: 900px) {
+    .columns { grid-template-columns: 1fr; }
+  }
+  .note {
+    font-size: 12px; color: var(--dim);
+    border-left: 2px solid var(--rule);
+    padding: 4px 0 4px 10px;
+    margin: 6px 0 4px 0;
+  }
+  .legend { display: flex; gap: 16px; margin: 10px 0 20px; font-size: 12px; }
+  .legend .pill { margin-left: 0; }
+  hr { border: 0; border-top: 1px solid var(--rule); margin: 28px 0; }
+</style>
+</head>
+<body>
+
+<h1>orto — карта понятий компилятора</h1>
+<p class="lead">
+  Что есть в языке и в компиляторе, как оно вложено, где красиво и где
+  пока шероховато. Чем больше зелёного — тем ортогональнее модель;
+  жёлтое / красное — кандидаты на чистку.
+</p>
+
+<div class="legend">
+  <span class="pill clean">чисто / ортогонально</span>
+  <span class="pill rough">работает, шероховато</span>
+  <span class="pill hole">дыра / долг</span>
+</div>
+
+<!-- =============================================================== -->
+<h2>1 · Слои компилятора</h2>
+<p class="lead">
+  Каждый слой — отдельный файл. AST/Typed AST — общие данные между.
+</p>
+<div class="group">
+  <ul class="root">
+    <li><span class="mono">lex</span> · <span class="meta">char → token</span> <span class="pill clean">~150 строк</span></li>
+    <li><span class="mono">parse</span> · <span class="meta">token → AST (expr/decl)</span> <span class="pill clean">~600 строк</span></li>
+    <li><span class="mono">check</span> · <span class="meta">AST → Typed AST + анализы</span> <span class="pill rough">~1660 строк, самый большой</span></li>
+    <li><span class="mono">mono</span> · <span class="meta">monomorphize generics → concrete</span> <span class="pill clean">~300 строк</span></li>
+    <li><span class="mono">emit</span> · <span class="meta">Typed AST → C99</span> <span class="pill rough">~940 строк, диспатчи по типам</span></li>
+  </ul>
+</div>
+
+<!-- =============================================================== -->
+<h2>2 · Типы значений</h2>
+
+<div class="columns">
+  <div class="group">
+    <h3>Копируемые (data)</h3>
+    <ul class="root">
+      <li>Примитивы <span class="pill clean">без вопросов</span>
+        <ul>
+          <li><code>int</code> · 32-bit signed</li>
+          <li><code>bool</code> · хранится как int</li>
+        </ul>
+      </li>
+      <li>Композитные <span class="pill clean">плоские данные</span>
+        <ul>
+          <li><code>struct Name { ... }</code> · record</li>
+          <li><code>enum Name { ... }</code> · ADT с конструкторами</li>
+          <li><span class="meta">+ <code>type_params [T, U, ...]</code> для дженериков</span></li>
+        </ul>
+      </li>
+      <li>Функциональные <span class="pill clean">указатели функций</span>
+        <ul>
+          <li><code>fn(args) -> ret</code></li>
+        </ul>
+      </li>
+      <li>Heap-handles (копируемые ручки в чужую память)
+        <ul>
+          <li><code>Array[T]</code> · region-backed
+            <span class="pill clean">gen-check + bounds</span>
+          </li>
+          <li><code>Buf[T]</code> · stack-backed
+            <span class="pill rough">никаких проверок, C-семантика</span>
+          </li>
+        </ul>
+      </li>
+      <li>Built-in
+        <ul>
+          <li><code>Option[T]</code> · <code>Some(T) | None</code>
+            <span class="pill rough">privileged: имена Some/None зарезервированы</span>
+          </li>
+        </ul>
+      </li>
+    </ul>
+  </div>
+
+  <div class="group">
+    <h3>Линейные (owning)</h3>
+    <ul class="root">
+      <li><code>Region</code> · arena с буфером и gen-таблицей
+        <span class="pill clean">единственный linear примитив</span>
+        <ul>
+          <li>Линейный · нельзя копировать, можно move (как файл)</li>
+          <li>Auto-drop на scope-exit · один <code>free(buffer)</code>, gen++</li>
+          <li>Header переживает buffer
+            <span class="pill rough">leaks 32 байта per region, v1</span>
+          </li>
+        </ul>
+      </li>
+    </ul>
+    <div class="note">
+      Право «иметь не более одного владельца» носит только Region.
+      Всё остальное копируемо — это просто данные.
+    </div>
+  </div>
+</div>
+
+<!-- =============================================================== -->
+<h2>3 · Где какие типы разрешены</h2>
+<div class="group">
+  <ul class="root">
+    <li>Top-level позиции <span class="pill clean">всё можно</span>
+      <ul>
+        <li>тип переменной (<code>let x: T = ...</code>)</li>
+        <li>тип параметра функции</li>
+        <li>тип возврата функции</li>
+      </ul>
+    </li>
+    <li>Data позиции <span class="pill clean">линейное запрещено</span>
+      <ul>
+        <li>поле <code>struct</code></li>
+        <li>аргумент конструктора <code>enum</code></li>
+        <li>type argument любого <code>TyApp</code></li>
+      </ul>
+      <div class="note">
+        Закон ловит <code>struct A { r: Region }</code>,
+        <code>Option[Region]</code>, <code>Array[Region]</code> — всё это compile error.
+      </div>
+    </li>
+    <li>Generic параметр (TyVar)
+      <span class="pill hole">предполагается копируемым</span>
+      <div class="note">
+        Сейчас <code>fn dup[T](x: T)</code> можно вызвать с <code>T = Region</code>,
+        и внутри функции компилятор не видит линейности. На практике
+        не возникает потому что Region обычно явно named, но это
+        теоретическая дыра.
+      </div>
+    </li>
+  </ul>
+</div>
+
+<!-- =============================================================== -->
+<h2>4 · Операции памяти</h2>
+
+<div class="columns">
+  <div class="group">
+    <h3>Создание</h3>
+    <ul class="root">
+      <li><code>region(N)</code> → <code>Region</code>
+        <span class="pill clean">N байт buffer</span>
+      </li>
+      <li><code>array(r, N, init)</code> → <code>Array[T]</code>
+        <span class="pill clean">fill mode</span>
+      </li>
+      <li><code>array(r, [v0, ..., vN])</code> → <code>Array[T]</code>
+        <span class="pill clean">literal mode</span>
+      </li>
+      <li><code>buf(N, init)</code> → <code>Buf[T]</code>
+        <span class="pill clean">N — литерал</span>
+      </li>
+      <li><code>[v0, ..., vN]</code> → <code>Buf[T]</code>
+        <span class="pill clean">stack literal</span>
+      </li>
+    </ul>
+  </div>
+
+  <div class="group">
+    <h3>Доступ</h3>
+    <ul class="root">
+      <li><code>a[i]</code> · read element
+        <span class="pill rough">emit диспатчит Array vs Buf</span>
+      </li>
+      <li><code>a[i] := v</code> · write element <span class="pill rough">тот же диспатч</span></li>
+      <li><code>len(a)</code> · возвращает int <span class="pill clean">общий .len</span></li>
+    </ul>
+    <div class="note">
+      Array проверяет gen + bounds, Buf — нет. Один синтаксис, два рантайма.
+      Это не плохо, но дубликат в emit — кандидат на объединение
+      через runtime tag или helper-функции.
+    </div>
+  </div>
+</div>
+
+<!-- =============================================================== -->
+<h2>5 · Управление потоком</h2>
+<div class="group">
+  <ul class="root">
+    <li><span class="pill clean">Всё — выражения, нет statements</span></li>
+    <li><code>if cond { ... } else { ... }</code> · ветки возвращают значение</li>
+    <li><code>match expr { Pat =&gt; body, ... }</code> · только ADT</li>
+    <li><code>let x [: T] = expr; body</code> · scope-bound binding</li>
+    <li><code>expr; body</code> · через парсер становится <code>let _ = expr; body</code></li>
+    <li><code>let _ = linear_value</code>
+      <span class="pill rough">переименовывается в <code>_drop_N</code> в check.ml</span>
+      <div class="note">
+        Это маленький хак чтобы binding получил auto_drop и было место
+        куда повесить free. Работает, но имя «<code>_drop_N</code>» —
+        это compiler-internal naming в исходнике, проникающее в C.
+      </div>
+    </li>
+  </ul>
+</div>
+
+<!-- =============================================================== -->
+<h2>6 · Анализы в check.ml</h2>
+<div class="group">
+  <ul class="root">
+    <li>Inference (Hindley-Milner light)
+      <ul>
+        <li><code>TyMeta</code> · unification variable</li>
+        <li><code>unify</code> · type matching</li>
+        <li><code>zonk</code> · resolve metas in tree
+          <span class="pill rough">типы и подвыражения зонкаются в разных местах</span>
+        </li>
+        <li><span class="meta">нет let-полиморфизма, monomorphization делает mono.ml</span></li>
+      </ul>
+    </li>
+    <li>Линейность
+      <ul>
+        <li><code>is_copyable</code> · по типу
+          <span class="pill clean">единая функция</span>
+        </li>
+        <li><code>ty_contains_own</code>
+          <span class="pill hole">имя устарело: проверяет linear, не Own</span>
+        </li>
+        <li>Запрет linear в data position</li>
+        <li>Param-wrap: <code>let p = p; body</code>
+          для Region-параметра, чтобы свернулся auto_drop
+          <span class="pill rough">трюк через TELet</span>
+        </li>
+      </ul>
+    </li>
+    <li>Move analysis (<code>check_moves</code>)
+      <ul>
+        <li><span class="mono">live</span> set: <code>name → ty</code></li>
+        <li><code>consume_arg</code> в move-позициях</li>
+        <li>Tail-position consume для bare TEVar non-copyable</li>
+        <li>Ветки <code>if</code>/<code>match</code> должны сходиться в одном live set</li>
+        <li><span class="meta">shadowing: outer состояние save/restore</span></li>
+        <li><span class="pill rough">divergence error: программист пишет
+          <code>let _ = x</code> вручную чтобы выровнять</span>
+        </li>
+      </ul>
+    </li>
+    <li>Auto-drop
+      <ul>
+        <li>Для Region: scope-exit emits free buffer + gen++</li>
+        <li>Для Array/Buf: ничего — это просто данные</li>
+        <li>Эмит <code>free(...)</code> зависит от типа binding'а
+          <span class="pill rough">if/else по конструктору TyApp</span>
+        </li>
+      </ul>
+    </li>
+  </ul>
+</div>
+
+<!-- =============================================================== -->
+<h2>7 · Мономорфизация и emit</h2>
+<div class="group">
+  <ul class="root">
+    <li><code>mono.ml</code>
+      <ul>
+        <li>Walk начиная с <code>main</code></li>
+        <li>На каждый use generic функции с конкретными <code>ty list</code>
+            создаётся специализированная копия
+        </li>
+        <li><code>mangle_ty</code> · <code>Option_int</code>,
+          <code>Array_bool</code>, <code>fn_int_to_int</code> и т.д.</li>
+        <li><span class="pill clean">структурно</span></li>
+      </ul>
+    </li>
+    <li><code>emit.ml</code>
+      <ul>
+        <li>Runtime structs:
+          <code>Region_header</code>, <code>Region</code>,
+          <code>Array_T</code>, <code>Buf_T</code>
+        </li>
+        <li>Forward decls → fn typedefs → struct defs → fn defs</li>
+        <li>Топологическая сортировка struct'ов для C
+          (поле by-value требует размер)</li>
+        <li>Alpha-rename let/match-arm bindings (shadowing → unique C name)</li>
+        <li><span class="pill rough">параллельные таблицы для Array и Buf instantiations</span></li>
+      </ul>
+    </li>
+  </ul>
+</div>
+
+<!-- =============================================================== -->
+<h2>8 · Дженерики</h2>
+<div class="group">
+  <ul class="root">
+    <li>Параметры типа на функциях и типах: <code>fn f[T](x: T)</code>, <code>struct Pair[A, B]</code></li>
+    <li>Параметрический полиморфизм, без классов типов</li>
+    <li>Никакой подтиповости</li>
+    <li>Monomorphization создаёт по копии на каждую инстанциацию</li>
+    <li><span class="pill clean">одна ось, никаких variance/bounds</span></li>
+  </ul>
+</div>
+
+<hr>
+
+<!-- =============================================================== -->
+<h2>⚠ Шероховатости (что в коде, но не блестит)</h2>
+
+<div class="group">
+  <ul class="root">
+    <li><span class="pill hole">Имя <code>ty_contains_own</code> устарело</span> · проверяет любой linear builtin (только Region теперь), а имя про Own. Переименовать → <code>ty_is_linear</code> или <code>ty_contains_linear</code>.</li>
+
+    <li><span class="pill rough">Дубликат <code>validate_ty</code> / <code>validate_ty_for_ascription</code></span> · TODO #1 в TODO.md. Два почти одинаковых обхода типов. Унификация через единый env-объект.</li>
+
+    <li><span class="pill rough">Параллельные таблицы в emit для Array и Buf</span> · <code>array_types_order</code>, <code>buf_types_order</code>, mangle-функции, forward-emit. Можно объединить через generic "boxed handle" список.</li>
+
+    <li><span class="pill rough">Auto-drop через <code>let p = p; body</code> wrap</span> · трюк для param-Region. Работает, но это «синтетический let» который через alpha-rename становится валидным C. Можно ввести отдельный <code>TEDrop</code> узел в Typed AST — чище.</li>
+
+    <li><span class="pill rough"><code>let _ = linear</code> → renamed <code>_drop_N</code></span> · аналогично — рабочий хак, но имя протекает в C-output.</li>
+
+    <li><span class="pill rough">Option как privileged ADT</span> · имена <code>Some</code>/<code>None</code> зарезервированы, тип <code>Option</code> инжектируется встроенным. Сейчас Option используется только внутренне (look на массиве не вернул — wait, look удалён!). На самом деле Option не используется compiler-операциями больше — это просто библиотечный тип, который можно дать пользователю определить самому или оставить встроенным.</li>
+
+    <li><span class="pill hole">Generic-T copyability дыра</span> · <code>is_copyable (TyVar _) = true</code>. Если кто-то проедет Region через generic функцию, внутри линейность не отслеживается. Лечится либо запретом Region в TyVar position, либо post-mono check.</li>
+
+    <li><span class="pill rough">Region_header утечка</span> · заголовки регионов накапливаются. Для long-running программ — рост. Лечится pool allocator для header'ов.</li>
+
+    <li><span class="pill rough">Двухуровневый диспатч <code>a[i]</code></span> · emit разбирает Array vs Buf через <code>match</code> по типу. Это случается в TEIndex, TEAssignIdx. Можно вынести в helper-функцию.</li>
+
+    <li><span class="pill rough">Pattern bindings не имеют типа в Typed AST</span> · check_moves считает типы заново через ctor info при анализе match. Если бы pattern несли типы — было бы чище.</li>
+
+    <li><span class="pill rough">Tail-position проверка через <code>in_tail</code> bool</span> · добавлен в check_moves. Маленький контекст-парам. Работает, но напоминание что move-семантика «зависит от того где ты в дереве».</li>
+  </ul>
+</div>
+
+<!-- =============================================================== -->
+<h2>📐 Что красивого получилось</h2>
+
+<div class="group">
+  <ul class="root">
+    <li><span class="pill clean">Одна ось линейности</span> — только Region. Всё остальное копируемо.</li>
+    <li><span class="pill clean">Один heap-примитив</span> — Region. Внутри bump-allocator.</li>
+    <li><span class="pill clean">Array и Buf — оба «handles»</span>. Различаются runtime и safety, но синтаксис общий.</li>
+    <li><span class="pill clean">Все expression</span> — нет statement/expression split. Match и if возвращают значения как любое выражение.</li>
+    <li><span class="pill clean">Запрет linear в data — один закон</span>, не каталог правил.</li>
+    <li><span class="pill clean">Generics параметрические, monomorphized</span>. Никаких variance, type classes, traits.</li>
+    <li><span class="pill clean">Никаких lifetimes, никакого borrow checker'а</span>. Безопасность через runtime gen (Array) или responsibility (Buf).</li>
+    <li><span class="pill clean">Видимая семантика</span>: каждый malloc/free в C можно проследить до конкретного выражения в orto.</li>
+  </ul>
+</div>
+
+<!-- =============================================================== -->
+<h2>Итог</h2>
+<div class="group">
+  <p>
+    <span class="pill clean">3968 строк OCaml</span>
+    <span class="pill clean">16 примеров</span>
+    <span class="pill clean">одна модель памяти</span>
+  </p>
+  <p style="color: var(--dim); margin-top: 10px;">
+    Шероховатости (жёлтое выше) — это не баги, а места где «оно работает,
+    но имя или дубликат можно почистить». Дыры (красное) — единственная
+    реальная: copyability через generic. Большинство практических программ
+    в неё не попадает.
+  </p>
+</div>
+
+</body>
+</html>
