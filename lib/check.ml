@@ -1264,9 +1264,23 @@ let rec check_moves_expr (env : env) (live : SS.t) (e : T.expr) : SS.t =
 
   | T.TEField (e, _, _) -> check_moves_expr env live e
 
-  | T.TEBinop (_, a, b, _) ->
+  | T.TEBinop (op, a, b, _) ->
       let live = check_moves_expr env live a in
-      check_moves_expr env live b
+      (match op with
+       | OpAnd | OpOr ->
+           (* Short-circuit: right operand runs conditionally, same as
+              an if-branch. It may not consume any outer name. *)
+           let live_b = check_moves_expr env live b in
+           if not (SS.equal live_b live) then
+             raise (Type_error
+               (Printf.sprintf
+                  "right operand of %s may not consume outer name(s) [%s] — \
+                   it runs conditionally"
+                  (show_binop op)
+                  (String.concat ", " (SS.elements (SS.diff live live_b)))));
+           live
+       | _ ->
+           check_moves_expr env live b)
 
   | T.TEUnop (_, e, _) -> check_moves_expr env live e
 
@@ -1285,15 +1299,22 @@ let rec check_moves_expr (env : env) (live : SS.t) (e : T.expr) : SS.t =
       let live = check_moves_expr env live cond in
       let live_t = check_moves_expr env live t in
       let live_e = check_moves_expr env live el in
-      if not (SS.equal live_t live_e) then
+      (* Each branch runs conditionally. It must not consume any outer
+         name — that would leak in the other path or double-free across
+         paths. Move/consume of outer names belongs above the if. *)
+      if not (SS.equal live_t live) then
         raise (Type_error
           (Printf.sprintf
-             "if branches diverge in ownership: \
-              then leaves [%s] live, else leaves [%s] live — \
-              both branches must move the same names"
-             (String.concat ", " (SS.elements live_t))
-             (String.concat ", " (SS.elements live_e))));
-      live_t
+             "then-branch consumes outer name(s) [%s] — \
+              conditional consume is not allowed; move it above the if"
+             (String.concat ", " (SS.elements (SS.diff live live_t)))));
+      if not (SS.equal live_e live) then
+        raise (Type_error
+          (Printf.sprintf
+             "else-branch consumes outer name(s) [%s] — \
+              conditional consume is not allowed; move it above the if"
+             (String.concat ", " (SS.elements (SS.diff live live_e)))));
+      live
 
   | T.TELet (x, _, v, b, _, _) ->
       let live = consume_arg env live v in
@@ -1324,12 +1345,18 @@ let rec check_moves_expr (env : env) (live : SS.t) (e : T.expr) : SS.t =
           if was then SS.add v l else SS.remove v l)
           live_after outer_had) arms
       in
-      (match arm_lives with
-       | [] -> live
-       | first :: rest ->
-           if List.for_all (SS.equal first) rest then first
-           else raise (Type_error
-             "match arms diverge in ownership — all arms must move the same names"))
+      (* Same rule as if-branches: every arm runs conditionally, so
+         no arm may consume an outer name. *)
+      List.iteri (fun i live_arm ->
+        if not (SS.equal live_arm live) then
+          raise (Type_error
+            (Printf.sprintf
+               "match arm #%d consumes outer name(s) [%s] — \
+                conditional consume is not allowed; move it above the match"
+               (i + 1)
+               (String.concat ", " (SS.elements (SS.diff live live_arm))))))
+        arm_lives;
+      live
 
   | T.TERef (e, _) -> check_moves_expr env live e
   | T.TEDeref (e, _) -> check_moves_expr env live e
