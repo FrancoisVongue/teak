@@ -224,6 +224,16 @@ let split_program (prog : program)
 
 (* ---------- type validation ---------- *)
 
+(* Tests whether a type contains Own[_] in data position (anywhere
+   except behind a function arrow). Used to forbid Own as a record
+   field, ADT variant argument, or type argument. *)
+let rec ty_contains_own (t : ty) : bool =
+  match t with
+  | TyApp ("Own", _) -> true
+  | TyApp (_, args) -> List.exists ty_contains_own args
+  | TyFun _ -> false
+  | TyInt | TyBool | TyVar _ | TyMeta _ -> false
+
 let rec validate_ty
   (type_env : (string * type_decl) list)
   (record_env : (string * record_decl) list)
@@ -235,6 +245,20 @@ let rec validate_ty
   | TyMeta _ -> t
   | TyApp (n, args) ->
       let args = List.map (validate_ty type_env record_env in_scope) args in
+      (* Own[_] cannot appear in data position — only as the immediate
+         top-level type of a name (variable, parameter, function return).
+         We enforce this by forbidding Own in any type argument of any
+         TyApp, including inside Own itself (no Own[Own[T]]). The check
+         on field types and variant arg types happens separately after
+         build_env. Function types are not "data position" — they hide
+         their contents, so fn(...) -> Own[T] stays legal. *)
+      List.iter (fun arg ->
+        if ty_contains_own arg then
+          raise (Type_error
+            (Printf.sprintf
+               "Own[_] is not allowed as a type argument of %S — \
+                Own must be a top-level type of a name, not nested in data"
+               n))) args;
       if List.mem n in_scope then begin
         if args <> [] then
           raise (Type_error
@@ -339,8 +363,17 @@ let build_env
       let in_scope = td.type_params in
       let variants =
         List.map (fun v ->
-          { v with arg_tys =
-              List.map (validate_ty type_env record_env in_scope) v.arg_tys })
+          let arg_tys =
+            List.map (validate_ty type_env record_env in_scope) v.arg_tys
+          in
+          List.iter (fun aty ->
+            if ty_contains_own aty then
+              raise (Type_error
+                (Printf.sprintf
+                   "constructor %S of %S: Own[_] cannot be a variant \
+                    argument — Own must be a top-level type of a name"
+                   v.ctor_name td.type_name))) arg_tys;
+          { v with arg_tys })
           td.variants
       in
       { td with variants }) types
@@ -350,7 +383,14 @@ let build_env
       let in_scope = rd.rec_type_params in
       let fields =
         List.map (fun (fname, fty) ->
-          (fname, validate_ty type_env record_env in_scope fty))
+          let fty = validate_ty type_env record_env in_scope fty in
+          if ty_contains_own fty then
+            raise (Type_error
+              (Printf.sprintf
+                 "field %S of record %S: Own[_] cannot be a record \
+                  field — Own must be a top-level type of a name"
+                 fname rd.rec_name));
+          (fname, fty))
           rd.rec_fields
       in
       { rd with rec_fields = fields }) records
@@ -1001,8 +1041,16 @@ let rec infer (env : env) (tparams : string list)
       (T.TEPanic result_ty, result_ty)
 
   | EOwn value ->
-      (* own(v) : T → Own[T] — allocate cell on heap, give exclusive ownership *)
+      (* own(v) : T → Own[T] — allocate cell on heap, give exclusive ownership.
+         The value being wrapped must not itself contain Own anywhere —
+         Own can only live as a top-level type of a name, never nested. *)
       let (tv, tv_ty) = infer env tparams vars value in
+      if ty_contains_own (zonk tv_ty) then
+        raise (Type_error
+          (Printf.sprintf
+             "own(...) cannot wrap a value whose type contains Own (%s) — \
+              Own must be a top-level type of a name, not nested"
+             (show_ty (zonk tv_ty))));
       let result_ty = TyApp ("Own", [tv_ty]) in
       (T.TEOwn (tv, result_ty), result_ty)
 
@@ -1076,6 +1124,13 @@ and validate_ty_for_ascription
   | TyMeta _ -> t
   | TyApp (n, args) ->
       let args = List.map (validate_ty_for_ascription env tparams) args in
+      List.iter (fun arg ->
+        if ty_contains_own arg then
+          raise (Type_error
+            (Printf.sprintf
+               "Own[_] is not allowed as a type argument of %S — \
+                Own must be a top-level type of a name, not nested in data"
+               n))) args;
       if List.mem n tparams then begin
         if args <> [] then
           raise (Type_error
