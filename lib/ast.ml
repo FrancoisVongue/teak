@@ -49,15 +49,6 @@ type expr =
   | EIf     of expr * expr * expr
   | ELet    of string * ty option * expr * expr
   | EMatch  of expr * (pat * expr) list
-  | ERef    of expr                       (* ref(value) *)
-  | EDeref  of expr                       (* deref(ref) -> Option[T] *)
-  | EAssign of expr * expr                (* ref := value -> Option[T] *)
-  | EOrElse of expr * expr                (* a ?? b — null-coalesce *)
-  | EPanic                                (* panic() — polymorphic divergent *)
-  | EOwn    of expr                       (* own(v) — heap alloc, exclusive ownership *)
-  | ETake   of expr                       (* take(o) — explicit consume of Own *)
-  | EUnwrap of expr                       (* unwrap(o) — copy out of Own; only copyable T *)
-  | ELook   of expr                       (* look(r) — read through Ref, returns Option *)
   | EArray  of expr * expr * expr         (* array(r, N, init) — allocate N slots in region r *)
   | ERegion of expr                       (* region(N) — owned arena of capacity N bytes *)
   | EIndex  of expr * expr                (* a[i] — read element *)
@@ -183,17 +174,6 @@ let rec show_expr = function
       in
       Printf.sprintf "match %s { %s }"
         (show_expr e) (String.concat ", " arm_strs)
-  | ERef e    -> Printf.sprintf "ref(%s)" (show_expr e)
-  | EDeref e  -> Printf.sprintf "deref(%s)" (show_expr e)
-  | EAssign (r, v) ->
-      Printf.sprintf "(%s := %s)" (show_expr r) (show_expr v)
-  | EOrElse (a, b) ->
-      Printf.sprintf "(%s ?? %s)" (show_expr a) (show_expr b)
-  | EPanic -> "panic()"
-  | EOwn e    -> Printf.sprintf "own(%s)" (show_expr e)
-  | ETake e   -> Printf.sprintf "take(%s)" (show_expr e)
-  | EUnwrap e -> Printf.sprintf "unwrap(%s)" (show_expr e)
-  | ELook e   -> Printf.sprintf "look(%s)" (show_expr e)
   | EArray (r, n, v) ->
       Printf.sprintf "array(%s, %s, %s)" (show_expr r) (show_expr n) (show_expr v)
   | ERegion n -> Printf.sprintf "region(%s)" (show_expr n)

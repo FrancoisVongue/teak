@@ -38,23 +38,6 @@ module T = struct
                      emit a runtime drop of the bound variable. Used for
                      Own[T] bindings that are not consumed. *)
     | TEMatch  of expr * ty * (pat * expr) list * ty
-    | TERef    of expr * ty
-                  (* ref(value) — result type is Ref[T] *)
-    | TEDeref  of expr * ty
-                  (* deref(ref) — result type is Option[T] *)
-    | TEAssign of expr * expr * ty
-                  (* (ref := value) — result type is Option[T] *)
-    | TEPanic  of ty
-                  (* panic() — type determined by usage; we record it
-                     so emit knows what to abort to (irrelevant value) *)
-    | TEOwn    of expr * ty
-                  (* own(v) — result is Own[T] *)
-    | TETake   of expr * ty
-                  (* take(o) — result is Own[T] (same type as input) *)
-    | TEUnwrap of expr * ty
-                  (* unwrap(o) — result is T (copy out of heap) *)
-    | TELook   of expr * ty
-                  (* look(r) — result is Option[T] *)
     | TEArray  of expr * expr * expr * ty
                   (* array(r, N, init) — allocate in region r, result is Array[T] *)
     | TERegion of expr * ty
@@ -242,7 +225,6 @@ let split_program (prog : program)
    Array[_] is copyable now — its memory lives in a Region. *)
 let rec ty_contains_own (t : ty) : bool =
   match t with
-  | TyApp ("Own", _) -> true
   | TyApp ("Region", _) -> true
   | TyApp (_, args) -> List.exists ty_contains_own args
   | TyFun _ -> false
@@ -279,22 +261,6 @@ let rec validate_ty
             (Printf.sprintf
                "type parameter %S cannot take type arguments" n));
         TyVar n
-      end else if n = "Ref" then begin
-        (* Ref is a built-in unary type constructor. *)
-        if List.length args <> 1 then
-          raise (Type_error
-            (Printf.sprintf
-               "Ref expects exactly 1 type argument, got %d"
-               (List.length args)));
-        TyApp ("Ref", args)
-      end else if n = "Own" then begin
-        (* Own is a built-in unary type constructor — exclusive ownership. *)
-        if List.length args <> 1 then
-          raise (Type_error
-            (Printf.sprintf
-               "Own expects exactly 1 type argument, got %d"
-               (List.length args)));
-        TyApp ("Own", args)
       end else if n = "Array" then begin
         (* Array[T] is a built-in unary type constructor — handle to a
            region-allocated buffer. The wrapper is copyable. *)
@@ -597,10 +563,8 @@ let rec is_copyable (env : env) (t : ty) : bool =
   | TyVar _        -> true
   | TyFun _        -> true
   | TyMeta _       -> true
-  | TyApp ("Own", _) -> false
   | TyApp ("Region", _) -> false
   | TyApp ("Array", _) -> true   (* region-backed, wrapper is just a handle *)
-  | TyApp ("Ref", _) -> true
   | TyApp (n, args) when List.mem_assoc n env.records ->
       let rd = List.assoc n env.records in
       let subst = List.combine rd.rec_type_params args in
@@ -681,21 +645,6 @@ let rec takes_consume (env : env) (x : string) (e : T.expr) : bool =
           | PCtor (_, names) -> List.mem x names
         in
         not shadowed && takes_consume env x body) arms
-  | T.TERef (e, _) -> takes_consume env x e
-  | T.TEDeref (e, _) -> takes_consume env x e
-  | T.TEAssign (r, v, _) -> takes_consume env x r || takes_consume env x v
-  | T.TEPanic _ -> false
-  | T.TEOwn (e, _) -> takes_consume env x e
-  | T.TETake (arg, _) ->
-      (match arg with
-       | T.TEVar (y, _) when y = x -> true
-       | _ -> takes_consume env x arg)
-  | T.TEUnwrap (arg, _) ->
-      (* unwrap reads the cell value and frees the cell — it consumes
-         its argument. A bare EVar argument is therefore a consume,
-         same shape as fn-arg/ctor-arg/record-field positions. *)
-      takes_consume env x arg || consumed_in_arg env x arg
-  | T.TELook (e, _) -> takes_consume env x e
   | T.TEArray (r, n, v, _) ->
       takes_consume env x r || takes_consume env x n || takes_consume env x v
   | T.TERegion (n, _) -> takes_consume env x n
@@ -949,7 +898,7 @@ let rec infer (env : env) (tparams : string list)
       let x_actual =
         if x = "_" then
           (match prune tv_ty with
-           | TyApp ("Own", _) | TyApp ("Region", _) ->
+           | TyApp ("Region", _) ->
                incr drop_name_counter;
                Printf.sprintf "_drop_%d" !drop_name_counter
            | _ -> x)
@@ -963,7 +912,7 @@ let rec infer (env : env) (tparams : string list)
         if x_actual = "_" then false
         else
           (match prune tv_ty with
-           | TyApp ("Own", _) | TyApp ("Region", _) ->
+           | TyApp ("Region", _) ->
                not (is_consumed env x_actual tb)
            | _ -> false)
       in
@@ -1019,138 +968,6 @@ let rec infer (env : env) (tparams : string list)
       let arms_out = List.map fst typed_arms in
       (T.TEMatch (tscrut, tscrut_ty, arms_out, first_ty), first_ty)
 
-  | ERef value ->
-      let (tv, tv_ty) = infer env tparams vars value in
-      if ty_contains_own (zonk tv_ty) then
-        raise (Type_error
-          (Printf.sprintf
-             "ref(...) does not yet support linear values (%s); \
-              this will become view(arr) once that operation is added"
-             (show_ty (zonk tv_ty))));
-      let result_ty = TyApp ("Ref", [tv_ty]) in
-      (T.TERef (tv, result_ty), result_ty)
-
-  | EDeref r ->
-      let (tr, tr_ty) = infer env tparams vars r in
-      let inner = TyMeta (fresh_meta ()) in
-      let ref_ty = TyApp ("Ref", [inner]) in
-      (try unify ref_ty tr_ty
-       with Type_error _ ->
-         raise (Type_error
-           (Printf.sprintf
-              "deref expects a Ref[T], got %s"
-              (show_ty (zonk tr_ty)))));
-      let result_ty = TyApp ("Option", [inner]) in
-      (T.TEDeref (tr, result_ty), result_ty)
-
-  | EAssign (r, v) ->
-      let (tr, tr_ty) = infer env tparams vars r in
-      let inner = TyMeta (fresh_meta ()) in
-      let ref_ty = TyApp ("Ref", [inner]) in
-      (try unify ref_ty tr_ty
-       with Type_error _ ->
-         raise (Type_error
-           (Printf.sprintf
-              "`:=` expects a Ref[T] on the left, got %s"
-              (show_ty (zonk tr_ty)))));
-      let (tv, tv_ty) = infer env tparams vars v in
-      (try unify inner tv_ty
-       with Type_error _ ->
-         raise (Type_error
-           (Printf.sprintf
-              "type mismatch in `:=`: ref holds %s, value is %s"
-              (show_ty (zonk inner)) (show_ty (zonk tv_ty)))));
-      let result_ty = TyApp ("Option", [inner]) in
-      (T.TEAssign (tr, tv, result_ty), result_ty)
-
-  | EOrElse (a, b) ->
-      (* Desugar `a ?? b` into `match a { Some(_qq_v) => _qq_v, None => b }`. *)
-      let inner = TyMeta (fresh_meta ()) in
-      let opt_ty = TyApp ("Option", [inner]) in
-      let (ta, ta_ty) = infer env tparams vars a in
-      (try unify opt_ty ta_ty
-       with Type_error _ ->
-         raise (Type_error
-           (Printf.sprintf
-              "left of `??` must be an Option[T], got %s"
-              (show_ty (zonk ta_ty)))));
-      let (tb, tb_ty) = infer env tparams vars b in
-      (try unify inner tb_ty
-       with Type_error _ ->
-         raise (Type_error
-           (Printf.sprintf
-              "right of `??` must be %s, got %s"
-              (show_ty (zonk inner)) (show_ty (zonk tb_ty)))));
-      let some_body = T.TEVar ("_qq_v", inner) in
-      let arms : (pat * T.expr) list = [
-        (PCtor ("Some", ["_qq_v"]), some_body);
-        (PCtor ("None", []), tb);
-      ] in
-      (T.TEMatch (ta, ta_ty, arms, inner), inner)
-
-  | EPanic ->
-      let result_ty = TyMeta (fresh_meta ()) in
-      (T.TEPanic result_ty, result_ty)
-
-  | EOwn value ->
-      (* own(v) : T → Own[T] — allocate cell on heap, give exclusive ownership.
-         The value being wrapped must not itself contain Own anywhere —
-         Own can only live as a top-level type of a name, never nested. *)
-      let (tv, tv_ty) = infer env tparams vars value in
-      if ty_contains_own (zonk tv_ty) then
-        raise (Type_error
-          (Printf.sprintf
-             "own(...) cannot wrap a value whose type contains Own (%s) — \
-              Own must be a top-level type of a name, not nested"
-             (show_ty (zonk tv_ty))));
-      let result_ty = TyApp ("Own", [tv_ty]) in
-      (T.TEOwn (tv, result_ty), result_ty)
-
-  | ETake o ->
-      (* take(o) : Own[T] → Own[T] — explicit consume. Type unchanged.
-         Consume tracking happens later (next sub-stage); for now we just
-         check the type is Own[T]. *)
-      let (to_e, to_ty) = infer env tparams vars o in
-      let inner = TyMeta (fresh_meta ()) in
-      let own_ty = TyApp ("Own", [inner]) in
-      (try unify own_ty to_ty
-       with Type_error _ ->
-         raise (Type_error
-           (Printf.sprintf
-              "take expects an Own[T], got %s"
-              (show_ty (zonk to_ty)))));
-      (T.TETake (to_e, own_ty), own_ty)
-
-  | EUnwrap o ->
-      (* unwrap(o) : Own[T] → T — copy value out of heap.
-         Restriction: T must be copyable. We don't enforce this in this
-         sub-stage yet — that's part of the copyability analysis to come. *)
-      let (to_e, to_ty) = infer env tparams vars o in
-      let inner = TyMeta (fresh_meta ()) in
-      let own_ty = TyApp ("Own", [inner]) in
-      (try unify own_ty to_ty
-       with Type_error _ ->
-         raise (Type_error
-           (Printf.sprintf
-              "unwrap expects an Own[T], got %s"
-              (show_ty (zonk to_ty)))));
-      (T.TEUnwrap (to_e, inner), inner)
-
-  | ELook r ->
-      (* look(r) : Ref[T] → Option[T] — read through observer, may fail.
-         Restriction: T must be copyable. Not enforced here yet. *)
-      let (tr, tr_ty) = infer env tparams vars r in
-      let inner = TyMeta (fresh_meta ()) in
-      let ref_ty = TyApp ("Ref", [inner]) in
-      (try unify ref_ty tr_ty
-       with Type_error _ ->
-         raise (Type_error
-           (Printf.sprintf
-              "look expects a Ref[T], got %s"
-              (show_ty (zonk tr_ty)))));
-      let result_ty = TyApp ("Option", [inner]) in
-      (T.TELook (tr, result_ty), result_ty)
-
   | EArray (region_e, size_e, init_e) ->
       (* array(r, N, v) : (Region, int, T) → Array[T].
          Bump-allocates N slots in region r, fills each with v.
@@ -1191,21 +1008,16 @@ let rec infer (env : env) (tparams : string list)
       (T.TERegion (tn, result_ty), result_ty)
 
   | EIndex (arr_e, idx_e) ->
-      (* a[i] : Array[T] or Ref[Array[T]], int → T.
-         Read element. Receiver is NOT consumed — indexing is a read. *)
+      (* a[i] : Array[T], int → T.
+         Read element. Array is copyable (just a handle), no consume. *)
       let (ta, ta_ty) = infer env tparams vars arr_e in
       let elem = TyMeta (fresh_meta ()) in
-      let ok =
-        try unify ta_ty (TyApp ("Array", [elem])); true
-        with Type_error _ ->
-          (try unify ta_ty (TyApp ("Ref", [TyApp ("Array", [elem])])); true
-           with Type_error _ -> false)
-      in
-      if not ok then
-        raise (Type_error
-          (Printf.sprintf
-             "indexing expects Array[T] or Ref[Array[T]], got %s"
-             (show_ty (zonk ta_ty))));
+      (try unify ta_ty (TyApp ("Array", [elem]))
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "indexing expects Array[T], got %s"
+              (show_ty (zonk ta_ty)))));
       let (ti, ti_ty) = infer env tparams vars idx_e in
       (try unify ti_ty TyInt
        with Type_error _ ->
@@ -1244,20 +1056,15 @@ let rec infer (env : env) (tparams : string list)
       (T.TEAssignIdx (ta, ti, tv, TyInt), TyInt)
 
   | ELen arr_e ->
-      (* len(a) : Array[T] or Ref[Array[T]] → int. *)
+      (* len(a) : Array[T] → int. *)
       let (ta, ta_ty) = infer env tparams vars arr_e in
       let elem = TyMeta (fresh_meta ()) in
-      let ok =
-        try unify ta_ty (TyApp ("Array", [elem])); true
-        with Type_error _ ->
-          (try unify ta_ty (TyApp ("Ref", [TyApp ("Array", [elem])])); true
-           with Type_error _ -> false)
-      in
-      if not ok then
-        raise (Type_error
-          (Printf.sprintf
-             "len expects Array[T] or Ref[Array[T]], got %s"
-             (show_ty (zonk ta_ty))));
+      (try unify ta_ty (TyApp ("Array", [elem]))
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "len expects Array[T], got %s"
+              (show_ty (zonk ta_ty)))));
       (T.TELen (ta, TyInt), TyInt)
 
 and check_args env tparams vars callee_name param_tys args : T.expr list =
@@ -1298,20 +1105,6 @@ and validate_ty_for_ascription
             (Printf.sprintf
                "type parameter %S cannot take type arguments" n));
         TyVar n
-      end else if n = "Ref" then begin
-        if List.length args <> 1 then
-          raise (Type_error
-            (Printf.sprintf
-               "Ref expects exactly 1 type argument, got %d"
-               (List.length args)));
-        TyApp ("Ref", args)
-      end else if n = "Own" then begin
-        if List.length args <> 1 then
-          raise (Type_error
-            (Printf.sprintf
-               "Own expects exactly 1 type argument, got %d"
-               (List.length args)));
-        TyApp ("Own", args)
       end else if n = "Array" then begin
         if List.length args <> 1 then
           raise (Type_error
@@ -1387,22 +1180,6 @@ let rec zonk_expr (e : T.expr) : T.expr =
   | T.TEMatch (s, st, arms, rt) ->
       let arms = List.map (fun (p, b) -> (p, zonk_expr b)) arms in
       T.TEMatch (zonk_expr s, zonk_expect st, arms, zonk_expect rt)
-  | T.TERef (e, t) ->
-      T.TERef (zonk_expr e, zonk_expect t)
-  | T.TEDeref (e, t) ->
-      T.TEDeref (zonk_expr e, zonk_expect t)
-  | T.TEAssign (r, v, t) ->
-      T.TEAssign (zonk_expr r, zonk_expr v, zonk_expect t)
-  | T.TEPanic t ->
-      T.TEPanic (zonk_expect t)
-  | T.TEOwn (e, t) ->
-      T.TEOwn (zonk_expr e, zonk_expect t)
-  | T.TETake (e, t) ->
-      T.TETake (zonk_expr e, zonk_expect t)
-  | T.TEUnwrap (e, t) ->
-      T.TEUnwrap (zonk_expr e, zonk_expect t)
-  | T.TELook (e, t) ->
-      T.TELook (zonk_expr e, zonk_expect t)
   | T.TEArray (r, n, v, t) ->
       T.TEArray (zonk_expr r, zonk_expr n, zonk_expr v, zonk_expect t)
   | T.TERegion (n, t) -> T.TERegion (zonk_expr n, zonk_expect t)
@@ -1449,7 +1226,7 @@ module SM = Map.Make (String)
 let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.expr)
   : T.expr * ty SM.t =
   match e with
-  | T.TEInt _ | T.TEBool _ | T.TEFnRef _ | T.TEPanic _ -> (e, live)
+  | T.TEInt _ | T.TEBool _ | T.TEFnRef _ -> (e, live)
 
   | T.TEVar (x, t) ->
       if not (SM.mem x live) then
@@ -1592,29 +1369,6 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
            let arms' = List.map (fun (p, b, _) -> (p, b)) arm_data in
            (T.TEMatch (scrut', scrut_ty, arms', ty), first_live))
 
-  | T.TERef (sub, ty) ->
-      let (sub', live) = check_moves_expr env live false sub in
-      (T.TERef (sub', ty), live)
-  | T.TEDeref (sub, ty) ->
-      let (sub', live) = check_moves_expr env live false sub in
-      (T.TEDeref (sub', ty), live)
-  | T.TEAssign (r, v, ty) ->
-      let (r', live) = check_moves_expr env live false r in
-      let (v', live) = check_moves_expr env live false v in
-      (T.TEAssign (r', v', ty), live)
-  | T.TEOwn (sub, ty) ->
-      let (sub', live) = consume_arg env live sub in
-      (T.TEOwn (sub', ty), live)
-  | T.TETake (sub, ty) ->
-      let (sub', live) = consume_arg env live sub in
-      (T.TETake (sub', ty), live)
-  | T.TEUnwrap (sub, ty) ->
-      let (sub', live) = consume_arg env live sub in
-      (T.TEUnwrap (sub', ty), live)
-  | T.TELook (sub, ty) ->
-      let (sub', live) = check_moves_expr env live false sub in
-      (T.TELook (sub', ty), live)
-
   | T.TEArray (r, n, v, ty) ->
       let (r', live) = check_moves_expr env live false r in
       let (n', live) = check_moves_expr env live false n in
@@ -1673,7 +1427,7 @@ let check_func (env : env) (f : func) : T.func =
   let body_with_drops =
     List.fold_right (fun (pname, pty) acc ->
       match prune pty with
-      | TyApp ("Own", _) | TyApp ("Region", _)
+      | TyApp ("Region", _)
         when not (is_consumed env pname acc) ->
           T.TELet (pname, pty, T.TEVar (pname, pty),
                    acc, tbody_ty, true)

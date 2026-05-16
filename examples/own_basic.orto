@@ -1,8 +1,0 @@
-// First test of new ownership: own creates exclusive ownership,
-// unwrap reads the value out as a copy (no Option needed — owner is alive).
-
-fn main() -> int {
-    let x = own(5);
-    let v = unwrap(x);
-    v   // 5
-}

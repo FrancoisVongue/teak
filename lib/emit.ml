@@ -41,26 +41,9 @@ let reset_counter () = counter := 0
 let fn_types_seen : (string, unit) Hashtbl.t = Hashtbl.create 16
 let fn_types_order : (string * ty) list ref = ref []
 
-(* Ref[T] instantiations encountered. We emit one cell+wrapper pair
-   per distinct inner type. Like fn types, children first, then parents.
-   Mangled name -> inner type. *)
-let ref_types_seen : (string, unit) Hashtbl.t = Hashtbl.create 8
-let ref_types_order : (string * ty) list ref = ref []
-
-(* Own[T] instantiations encountered, same scheme as Ref. *)
-let own_types_seen : (string, unit) Hashtbl.t = Hashtbl.create 8
-let own_types_order : (string * ty) list ref = ref []
-
-(* Array[T] instantiations. Wrapper is {ptr, gen, len} (24 bytes); cell
-   is {gen, T buffer[]} with a C99 flexible array member. *)
+(* Array[T] instantiations: emit one typedef per distinct element type. *)
 let array_types_seen : (string, unit) Hashtbl.t = Hashtbl.create 8
 let array_types_order : (string * ty) list ref = ref []
-
-let mangle_ref_name (inner : ty) : string =
-  "Ref_" ^ Mono.mangle_ty inner
-
-let mangle_own_name (inner : ty) : string =
-  "Own_" ^ Mono.mangle_ty inner
 
 let mangle_array_name (inner : ty) : string =
   "Array_" ^ Mono.mangle_ty inner
@@ -70,24 +53,6 @@ let rec collect_ty (t : ty) : unit =
   | TyInt | TyBool -> ()
   | TyVar n ->
       failwith (Printf.sprintf "emit collect_ty: TyVar %S after mono" n)
-  | TyApp ("Ref", [inner]) ->
-      collect_ty inner;
-      let m = mangle_ref_name inner in
-      if not (Hashtbl.mem ref_types_seen m) then begin
-        Hashtbl.add ref_types_seen m ();
-        ref_types_order := (m, inner) :: !ref_types_order
-      end
-  | TyApp ("Ref", _) ->
-      failwith "emit collect_ty: Ref with wrong arity"
-  | TyApp ("Own", [inner]) ->
-      collect_ty inner;
-      let m = mangle_own_name inner in
-      if not (Hashtbl.mem own_types_seen m) then begin
-        Hashtbl.add own_types_seen m ();
-        own_types_order := (m, inner) :: !own_types_order
-      end
-  | TyApp ("Own", _) ->
-      failwith "emit collect_ty: Own with wrong arity"
   | TyApp ("Array", [inner]) ->
       collect_ty inner;
       let m = mangle_array_name inner in
@@ -142,15 +107,6 @@ let rec collect_expr (e : Check.T.expr) : unit =
       collect_expr s; collect_ty st;
       List.iter (fun (_, body) -> collect_expr body) arms;
       collect_ty rt
-  | Check.T.TERef (e, t) -> collect_expr e; collect_ty t
-  | Check.T.TEDeref (e, t) -> collect_expr e; collect_ty t
-  | Check.T.TEAssign (r, v, t) ->
-      collect_expr r; collect_expr v; collect_ty t
-  | Check.T.TEPanic t -> collect_ty t
-  | Check.T.TEOwn (e, t) -> collect_expr e; collect_ty t
-  | Check.T.TETake (e, t) -> collect_expr e; collect_ty t
-  | Check.T.TEUnwrap (e, t) -> collect_expr e; collect_ty t
-  | Check.T.TELook (e, t) -> collect_expr e; collect_ty t
   | Check.T.TEArray (r, n, v, t) ->
       collect_expr r; collect_expr n; collect_expr v; collect_ty t
   | Check.T.TERegion (n, t) -> collect_expr n; collect_ty t
@@ -163,10 +119,6 @@ let rec collect_expr (e : Check.T.expr) : unit =
 let collect_program (prog : Check.T.program) : unit =
   Hashtbl.clear fn_types_seen;
   fn_types_order := [];
-  Hashtbl.clear ref_types_seen;
-  ref_types_order := [];
-  Hashtbl.clear own_types_seen;
-  own_types_order := [];
   Hashtbl.clear array_types_seen;
   array_types_order := [];
   List.iter (fun td ->
@@ -188,9 +140,6 @@ let c_type (t : ty) : string =
   match t with
   | TyInt -> "int"
   | TyBool -> "int"
-  | TyApp ("Ref", [TyApp ("Array", [inner])]) -> mangle_array_name inner
-  | TyApp ("Ref", [inner]) -> mangle_ref_name inner
-  | TyApp ("Own", [inner]) -> mangle_own_name inner
   | TyApp ("Array", [inner]) -> mangle_array_name inner
   | TyApp ("Region", []) -> "Region"
   | TyApp (n, []) -> n
@@ -215,47 +164,6 @@ let emit_fn_typedefs () : string list =
     | _ -> failwith "emit_fn_typedefs: non-fn type in list")
     !fn_types_order
 
-(* Forward declarations of Ref structs. These come BEFORE struct
-   definitions of ADTs/records (so those can mention Ref_T by name
-   as a fixed-size field) and BEFORE fn typedefs (so a function type
-   can take a Ref by value).
-
-   `Ref_T` is the wrapper: { Ref_T_cell* ptr; int expected_gen; }
-   `Ref_T_cell` is the heap cell: { int gen; T value; } — but this
-   we only forward-declare here. Full definition needs T fully defined,
-   so cells go in the topo-sorted struct section. *)
-let emit_ref_forwards () : string list =
-  List.rev_map (fun (mangled, _inner) ->
-    [
-      Printf.sprintf "struct %s_cell;" mangled;
-      Printf.sprintf "typedef struct { struct %s_cell* ptr; int expected_gen; } %s;"
-        mangled mangled;
-    ]) !ref_types_order
-  |> List.concat
-
-let emit_own_forwards () : string list =
-  List.rev_map (fun (mangled, _inner) ->
-    [
-      Printf.sprintf "struct %s_cell;" mangled;
-      Printf.sprintf "typedef struct { struct %s_cell* ptr; int expected_gen; } %s;"
-        mangled mangled;
-    ]) !own_types_order
-  |> List.concat
-
-(* Cell definitions for each Ref instantiation. Requires inner type
-   fully defined. Emitted AFTER ADT/record struct definitions. *)
-let emit_ref_cells () : string list =
-  List.rev_map (fun (mangled, inner) ->
-    Printf.sprintf "struct %s_cell { int gen; %s value; };"
-      mangled (c_type inner))
-    !ref_types_order
-
-let emit_own_cells () : string list =
-  List.rev_map (fun (mangled, inner) ->
-    Printf.sprintf "struct %s_cell { int gen; %s value; };"
-      mangled (c_type inner))
-    !own_types_order
-
 (* Array_T is a copyable handle into a Region's buffer: it carries the
    region header pointer, the byte-offset of this array's slice in
    that buffer, the length, and the expected region generation. *)
@@ -265,8 +173,6 @@ let emit_array_forwards () : string list =
       "typedef struct { struct Region_header* region; int offset; \
        int len; int expected_gen; } %s;" mangled)
     !array_types_order
-
-let emit_array_cells () : string list = []
 
 (* ---------- operator C-strings ---------- *)
 
@@ -342,14 +248,6 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
                 (PCtor (c, new_names), rn env' body)) arms
         in
         TEMatch (s', st, arms', rt)
-    | TERef (e, t) -> TERef (rn env e, t)
-    | TEDeref (e, t) -> TEDeref (rn env e, t)
-    | TEAssign (r, v, t) -> TEAssign (rn env r, rn env v, t)
-    | TEPanic _ -> e
-    | TEOwn (e, t) -> TEOwn (rn env e, t)
-    | TETake (e, t) -> TETake (rn env e, t)
-    | TEUnwrap (e, t) -> TEUnwrap (rn env e, t)
-    | TELook (e, t) -> TELook (rn env e, t)
     | TEArray (r, n, v, t) ->
         TEArray (rn env r, rn env n, rn env v, t)
     | TERegion (n, t) -> TERegion (rn env n, t)
@@ -476,14 +374,6 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TEIf (_, _, _, t) -> t
   | Check.T.TELet (_, _, _, _, t, _) -> t
   | Check.T.TEMatch (_, _, _, t) -> t
-  | Check.T.TERef (_, t) -> t
-  | Check.T.TEDeref (_, t) -> t
-  | Check.T.TEAssign (_, _, t) -> t
-  | Check.T.TEPanic t -> t
-  | Check.T.TEOwn (_, t) -> t
-  | Check.T.TETake (_, t) -> t
-  | Check.T.TEUnwrap (_, t) -> t
-  | Check.T.TELook (_, t) -> t
   | Check.T.TEArray (_, _, _, t) -> t
   | Check.T.TERegion (_, t) -> t
   | Check.T.TEIndex (_, _, t) -> t
@@ -620,7 +510,6 @@ let rec emit_expr
         in
         let free_stmt =
           match vt with
-          | TyApp ("Own", _) -> Printf.sprintf "free(%s.ptr);" x
           | TyApp ("Region", _) ->
               (* Free the region's buffer and bump its generation.
                  The header itself stays alive — dangling Array
@@ -704,146 +593,6 @@ let rec emit_expr
         @ [scrut_decl; result_decl]
         @ switch_lines
       in
-      { stmts; value = result_var }
-
-  | Check.T.TERef (value_e, result_ty) ->
-      (* Allocate a cell on the heap, fill { gen=1, value=v },
-         return a wrapper { ptr=cell, expected_gen=1 }. *)
-      let cv = emit_expr ctor_map value_e in
-      let ref_name = c_type result_ty in
-      let cell_var = fresh "_cell" in
-      let alloc_stmts = cv.stmts @ [
-        Printf.sprintf "struct %s_cell* %s = malloc(sizeof(struct %s_cell));"
-          ref_name cell_var ref_name;
-        Printf.sprintf "if (!%s) abort();" cell_var;
-        Printf.sprintf "%s->gen = 1;" cell_var;
-        Printf.sprintf "%s->value = %s;" cell_var cv.value;
-      ] in
-      let value =
-        Printf.sprintf "((%s){ .ptr = %s, .expected_gen = 1 })"
-          ref_name cell_var
-      in
-      { stmts = alloc_stmts; value }
-
-  | Check.T.TEDeref (r, opt_ty) ->
-      let cr = emit_expr ctor_map r in
-      let result_var = fresh "_deref" in
-      let opt_c = c_type opt_ty in
-      let r_var = fresh "_r" in
-      let ref_c = c_type (ty_of_expr r) in
-      let stmts = cr.stmts @ [
-        Printf.sprintf "%s %s = %s;" ref_c r_var cr.value;
-        Printf.sprintf "%s %s;" opt_c result_var;
-        Printf.sprintf "if (%s.ptr->gen == %s.expected_gen) {"
-          r_var r_var;
-        Printf.sprintf
-          "    %s = (%s){ .tag = 0, .as = { .Some = { .f0 = %s.ptr->value } } };"
-          result_var opt_c r_var;
-        Printf.sprintf "} else {";
-        Printf.sprintf "    %s = (%s){ .tag = 1 };" result_var opt_c;
-        Printf.sprintf "}";
-      ] in
-      { stmts; value = result_var }
-
-  | Check.T.TEAssign (r, v, opt_ty) ->
-      let cr = emit_expr ctor_map r in
-      let cv = emit_expr ctor_map v in
-      let result_var = fresh "_assign" in
-      let opt_c = c_type opt_ty in
-      let r_var = fresh "_r" in
-      let v_var = fresh "_v" in
-      let ref_c = c_type (ty_of_expr r) in
-      let v_c = c_type (ty_of_expr v) in
-      let stmts = cr.stmts @ cv.stmts @ [
-        Printf.sprintf "%s %s = %s;" ref_c r_var cr.value;
-        Printf.sprintf "%s %s = %s;" v_c v_var cv.value;
-        Printf.sprintf "%s %s;" opt_c result_var;
-        Printf.sprintf "if (%s.ptr->gen == %s.expected_gen) {"
-          r_var r_var;
-        Printf.sprintf "    %s.ptr->value = %s;" r_var v_var;
-        Printf.sprintf
-          "    %s = (%s){ .tag = 0, .as = { .Some = { .f0 = %s } } };"
-          result_var opt_c v_var;
-        Printf.sprintf "} else {";
-        Printf.sprintf "    %s = (%s){ .tag = 1 };" result_var opt_c;
-        Printf.sprintf "}";
-      ] in
-      { stmts; value = result_var }
-
-  | Check.T.TEPanic t ->
-      (* abort() never returns; but C requires we provide some value of
-         type t after it. We use an uninitialized declaration which the
-         optimizer will recognize as unreachable. *)
-      let result_var = fresh "_panic" in
-      let stmts = [
-        "abort();";
-        Printf.sprintf "%s %s = (%s){0};" (c_type t) result_var (c_type t);
-      ] in
-      { stmts; value = result_var }
-
-  | Check.T.TEOwn (value_e, result_ty) ->
-      (* Same shape as TERef for now: heap-alloc cell, store value, return
-         wrapper. The semantic difference (exclusive ownership) is enforced
-         by the type system, not the runtime. *)
-      let cv = emit_expr ctor_map value_e in
-      let own_name = c_type result_ty in
-      let cell_var = fresh "_cell" in
-      let stmts = cv.stmts @ [
-        Printf.sprintf "struct %s_cell* %s = malloc(sizeof(struct %s_cell));"
-          own_name cell_var own_name;
-        Printf.sprintf "if (!%s) abort();" cell_var;
-        Printf.sprintf "%s->gen = 1;" cell_var;
-        Printf.sprintf "%s->value = %s;" cell_var cv.value;
-      ] in
-      let value =
-        Printf.sprintf "((%s){ .ptr = %s, .expected_gen = 1 })"
-          own_name cell_var
-      in
-      { stmts; value }
-
-  | Check.T.TETake (o, _) ->
-      (* take is a pure semantic operation: it marks the source consumed
-         but does nothing at runtime. Just pass the wrapper through. *)
-      emit_expr ctor_map o
-
-  | Check.T.TEUnwrap (o, inner_ty) ->
-      (* unwrap is consuming: it reads the value from the cell and
-         frees the cell. The source Own name is dead afterwards (the
-         consume analysis prevents any other use), so freeing here is
-         the unique release point for this allocation. *)
-      let co = emit_expr ctor_map o in
-      let o_var = fresh "_o" in
-      let result_var = fresh "_unwrap" in
-      let own_c = c_type (ty_of_expr o) in
-      let inner_c = c_type inner_ty in
-      let stmts = co.stmts @ [
-        Printf.sprintf "%s %s = %s;" own_c o_var co.value;
-        Printf.sprintf "if (%s.ptr->gen != %s.expected_gen) abort();"
-          o_var o_var;
-        Printf.sprintf "%s %s = %s.ptr->value;" inner_c result_var o_var;
-        Printf.sprintf "free(%s.ptr);" o_var;
-      ] in
-      { stmts; value = result_var }
-
-  | Check.T.TELook (r, opt_ty) ->
-      (* Read through Ref — may return None if cell is dead. *)
-      let cr = emit_expr ctor_map r in
-      let r_var = fresh "_r" in
-      let result_var = fresh "_look" in
-      let ref_c = c_type (ty_of_expr r) in
-      let opt_c = c_type opt_ty in
-      let stmts = cr.stmts @ [
-        Printf.sprintf "%s %s = %s;" ref_c r_var cr.value;
-        Printf.sprintf "%s %s;" opt_c result_var;
-        Printf.sprintf "if (%s.ptr->gen == %s.expected_gen) {"
-          r_var r_var;
-        Printf.sprintf
-          "    %s = (%s){ .tag = 0, .as = { .Some = { .f0 = %s.ptr->value } } };"
-          result_var opt_c r_var;
-        Printf.sprintf "} else {";
-        Printf.sprintf "    %s = (%s){ .tag = 1 };" result_var opt_c;
-        Printf.sprintf "}";
-      ] in
       { stmts; value = result_var }
 
   | Check.T.TEArray (region_e, size_e, init_e, result_ty) ->
@@ -1010,17 +759,12 @@ let emit (prog : Check.T.program) : string =
   let ctor_map = build_ctor_map prog.types in
   let adt_forwards = List.map emit_adt_forward prog.types in
   let rec_forwards = List.map emit_record_forward prog.records in
-  let ref_forwards = emit_ref_forwards () in
-  let own_forwards = emit_own_forwards () in
   let array_forwards = emit_array_forwards () in
   let fn_typedefs  = emit_fn_typedefs () in
   let ordered_structs = topo_sort_structs prog.types prog.records in
   let struct_defs = List.map (function
     | DAdt td -> emit_adt_definition td
     | DRec rd -> emit_record_definition rd) ordered_structs in
-  let ref_cells = emit_ref_cells () in
-  let own_cells = emit_own_cells () in
-  let array_cells = emit_array_cells () in
   let extern_decls = List.map emit_extern_decl prog.externs in
   let decls        = List.map emit_func_decl prog.funcs in
   let defs         = List.map (emit_func_def ctor_map) prog.funcs in
@@ -1037,14 +781,9 @@ let emit (prog : Check.T.program) : string =
     ([header]
      @ adt_forwards
      @ rec_forwards
-     @ ref_forwards
-     @ own_forwards
      @ array_forwards
      @ fn_typedefs
      @ struct_defs
-     @ ref_cells
-     @ own_cells
-     @ array_cells
      @ extern_decls
      @ decls
      @ defs)

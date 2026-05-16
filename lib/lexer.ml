@@ -30,16 +30,9 @@ let lower_ident_or_keyword s =
   | "enum"  -> TEnum
   | "match" -> TMatch
   | "extern" -> TExtern
-  | "ref"   -> TRef
-  | "deref" -> TDeref
-  | "panic" -> TPanic
-  | "own"   -> TOwn
   | "array" -> TArray
   | "len"   -> TLen
   | "region" -> TRegion
-  | "take"  -> TTake
-  | "unwrap" -> TUnwrap
-  | "look"  -> TLook
   | "_"     -> TUnderscore
   | _       -> TIdent s
 
@@ -72,12 +65,6 @@ let lex (src : string) : token list =
         end else begin
           push TColon; incr i
         end
-    | '?' ->
-        if !i + 1 < n && src.[!i + 1] = '?' then begin
-          push TQQ; i := !i + 2
-        end else
-          raise (Lex_error
-            ("unexpected `?` (only `??` is recognized)", !i))
     | ';' -> push TSemi;     incr i
     | '=' ->
         if !i + 1 < n && src.[!i + 1] = '>' then begin

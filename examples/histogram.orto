@@ -1,16 +1,14 @@
 // Histogram + peak — пример "среднего уровня" на orto.
 //
 // Под капотом:
-//   - region(N) — это один malloc на header + один malloc на N байт buffer.
+//   - region(N) — один malloc на header + один malloc на N байт буфера.
 //     Внутри функции живёт линейная Region (move-only).
 //   - array(r, N, init) — bump-allocate в r->buffer. Возвращает Array[T]
-//     (handle: 16 байт = ptr на header + offset + len + expected_gen).
+//     (handle: 24 байта = ptr на header + offset + len + expected_gen).
 //     Array копируемая — можно передавать в функции, копировать в let,
 //     возвращать. Это просто числа.
 //   - На scope-exit региона: free(r->buffer), gen++. Все Array-handles
 //     становятся dangling — следующий доступ через gen-check abort'нет.
-//   - Region передан в функцию move'ом (линейный). Если функция консумит
-//     регион — caller теряет.
 
 fn main() -> int {
     // Одна арена на всё. 4 KB достаточно для двух массивов.
@@ -18,21 +16,21 @@ fn main() -> int {
 
     // Восемь значений: 4, 1, 4, 2, 4, 1, 3, 2. Максимум = 4.
     let values = array(r, 8, 0);
-    let _ = values[0] := 4;
-    let _ = values[1] := 1;
-    let _ = values[2] := 4;
-    let _ = values[3] := 2;
-    let _ = values[4] := 4;
-    let _ = values[5] := 1;
-    let _ = values[6] := 3;
-    let _ = values[7] := 2;
+    values[0] := 4;
+    values[1] := 1;
+    values[2] := 4;
+    values[3] := 2;
+    values[4] := 4;
+    values[5] := 1;
+    values[6] := 3;
+    values[7] := 2;
 
     // Счётчики для значений 0..4.
     let counters = array(r, 5, 0);
 
-    // build_histogram читает values и инкрементит counters. Оба
-    // handle копируемые — функции передаются по value, изменения через
-    // указатель внутри handle (в buffer региона) видны всем.
+    // build_histogram читает values и инкрементит counters. Оба handle
+    // копируемые — функции передаются по value, изменения через
+    // указатель внутри handle (в буфер региона) видны всем.
     build_histogram(values, counters, 0);
 
     // find_max просто читает counters.
@@ -40,14 +38,10 @@ fn main() -> int {
     // scope-exit r — один free(r->buffer). Всё что в нём — мертво.
 }
 
-// values и counters — копируемые Array. Передача по value, без move.
-// Внутри функции пишем в counters через буфер региона; изменения
-// разделяются с caller, потому что мы работаем с одним и тем же
-// слайсом памяти.
 fn build_histogram(values: Array[int], counters: Array[int], i: int) -> int {
     if i < len(values) {
         let v = values[i];
-        let _ = counters[v] := counters[v] + 1;
+        counters[v] := counters[v] + 1;
         build_histogram(values, counters, i + 1)
     } else {
         0

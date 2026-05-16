@@ -115,27 +115,16 @@ let parse_binop_chain st (ops : (token * binop) list) lower =
 
 let rec parse_expr st = parse_assign st
 
-(* `:=` is right-associative: `a := b := c` parses as `a := (b := c)`.
-   Returns Option[T] — but that's purely a type-system fact handled in
-   the checker. Lowest precedence. *)
+(* `:=` is only valid for array index assignment: `a[i] := v`. *)
 and parse_assign st =
-  let lhs = parse_orelse st in
+  let lhs = parse_or st in
   if peek st = TColonEq then begin
     advance st;
     let rhs = parse_assign st in
     match lhs with
     | EIndex (arr, idx) -> EAssignIdx (arr, idx, rhs)
-    | _                 -> EAssign (lhs, rhs)
-  end else lhs
-
-(* `??` is right-associative: `a ?? b ?? c` parses as `a ?? (b ?? c)`.
-   That's the useful form: cascade of defaults. *)
-and parse_orelse st =
-  let lhs = parse_or st in
-  if peek st = TQQ then begin
-    advance st;
-    let rhs = parse_orelse st in
-    EOrElse (lhs, rhs)
+    | _ -> raise (Parse_error
+        "`:=` is only allowed on array indexing: a[i] := v")
   end else lhs
 
 and parse_or st =
@@ -246,8 +235,6 @@ and parse_atom st =
   | TInt _ | TTrue | TFalse | TLParen
   | TIdent _ | TCtorIdent _
   | TIf | TMatch
-  | TRef | TDeref | TPanic
-  | TOwn | TTake | TUnwrap | TLook
   | TArray | TLen | TRegion -> parse_atom_consume st
   | t -> raise (Parse_error
     (Printf.sprintf "expected expression, got %s" (Token.show t)))
@@ -277,40 +264,6 @@ and parse_atom_consume st =
        | _ -> ECtor (name, []))
   | TIf -> parse_if_after_kw st
   | TMatch -> parse_match_after_kw st
-  | TRef ->
-      expect st TLParen;
-      let e = parse_expr st in
-      expect st TRParen;
-      ERef e
-  | TDeref ->
-      expect st TLParen;
-      let e = parse_expr st in
-      expect st TRParen;
-      EDeref e
-  | TPanic ->
-      expect st TLParen;
-      expect st TRParen;
-      EPanic
-  | TOwn ->
-      expect st TLParen;
-      let e = parse_expr st in
-      expect st TRParen;
-      EOwn e
-  | TTake ->
-      expect st TLParen;
-      let e = parse_expr st in
-      expect st TRParen;
-      ETake e
-  | TUnwrap ->
-      expect st TLParen;
-      let e = parse_expr st in
-      expect st TRParen;
-      EUnwrap e
-  | TLook ->
-      expect st TLParen;
-      let e = parse_expr st in
-      expect st TRParen;
-      ELook e
   | TArray ->
       expect st TLParen;
       let r = parse_expr st in

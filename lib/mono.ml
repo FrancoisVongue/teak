@@ -88,18 +88,6 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
          with Not_found ->
            failwith (Printf.sprintf
              "mono rewrite_ty: free type variable %S" n))
-    | TyApp ("Ref", [inner]) ->
-        (* Ref is structural — no body to specialize. Just rewrite its
-           inner type. Emit will collect Ref instantiations and produce
-           one typedef per distinct one. *)
-        TyApp ("Ref", [rewrite_ty subst inner])
-    | TyApp ("Ref", _) ->
-        failwith "mono rewrite_ty: Ref with wrong arity (should be unary)"
-    | TyApp ("Own", [inner]) ->
-        (* Own is structural like Ref. *)
-        TyApp ("Own", [rewrite_ty subst inner])
-    | TyApp ("Own", _) ->
-        failwith "mono rewrite_ty: Own with wrong arity (should be unary)"
     | TyApp ("Array", [inner]) ->
         (* Array is structural — emit emits one wrapper+cell pair per
            distinct element type. *)
@@ -184,24 +172,6 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
           (p, rewrite_expr subst b)) arms in
         Check.T.TEMatch (rewrite_expr subst s, rt st, arms, rt rty)
 
-    | Check.T.TERef (e, t) ->
-        Check.T.TERef (rewrite_expr subst e, rt t)
-    | Check.T.TEDeref (e, t) ->
-        Check.T.TEDeref (rewrite_expr subst e, rt t)
-    | Check.T.TEAssign (r, v, t) ->
-        Check.T.TEAssign (rewrite_expr subst r,
-                          rewrite_expr subst v, rt t)
-    | Check.T.TEPanic t ->
-        Check.T.TEPanic (rt t)
-
-    | Check.T.TEOwn (e, t) ->
-        Check.T.TEOwn (rewrite_expr subst e, rt t)
-    | Check.T.TETake (e, t) ->
-        Check.T.TETake (rewrite_expr subst e, rt t)
-    | Check.T.TEUnwrap (e, t) ->
-        Check.T.TEUnwrap (rewrite_expr subst e, rt t)
-    | Check.T.TELook (e, t) ->
-        Check.T.TELook (rewrite_expr subst e, rt t)
     | Check.T.TEArray (r, n, v, t) ->
         Check.T.TEArray (rewrite_expr subst r,
                          rewrite_expr subst n,
