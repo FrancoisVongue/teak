@@ -191,8 +191,8 @@ let emit_handle_forwards () : string list =
     match k with
     | HArray ->
         Printf.sprintf
-          "typedef struct { struct Region_header* region; int offset; \
-           int len; int expected_gen; } %s;" mangled
+          "typedef struct { int slot; int offset; int len; int expected_gen; } %s;"
+          mangled
     | HBuf ->
         Printf.sprintf "typedef struct { %s* ptr; int len; } %s;"
           (c_type inner) mangled)
@@ -411,15 +411,20 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TEAssignIdx (_, _, _, t) -> t
   | Check.T.TELen (_, t) -> t
 
-(* Release a Region's buffer and bump its generation. Used for both
-   let-scope auto_drop and function-end param drops. *)
+(* Release a Region's buffer, bump its generation, and push the slot
+   back onto the free list. Used by let-scope auto_drop and by
+   function-end param drops. *)
 let drop_region_stmt (name : string) : string =
   Printf.sprintf
-    "if (%s.header->gen == %s.expected_gen) { \
-     free(%s.header->buffer); %s.header->buffer = NULL; \
-     %s.header->buffer_size = 0; %s.header->used = 0; \
-     %s.header->gen++; }"
-    name name name name name name name
+    "if (ORTO_REGIONS[%s.slot].gen == %s.expected_gen) { \
+     free(ORTO_REGIONS[%s.slot].buffer); \
+     ORTO_REGIONS[%s.slot].buffer = NULL; \
+     ORTO_REGIONS[%s.slot].buffer_size = 0; \
+     ORTO_REGIONS[%s.slot].used = 0; \
+     ORTO_REGIONS[%s.slot].gen++; \
+     ORTO_REGIONS[%s.slot].next_free = ORTO_REGION_FREE_HEAD; \
+     ORTO_REGION_FREE_HEAD = %s.slot; }"
+    name name name name name name name name name
 
 let rec emit_expr
   (ctor_map : (string, type_decl * variant * int) Hashtbl.t)
@@ -641,22 +646,23 @@ let rec emit_expr
       let elem_c = c_type (ty_of_expr init_e) in
       let stmts = cr.stmts @ cn.stmts @ cv.stmts @ [
         Printf.sprintf "Region %s = %s;" r_var cr.value;
-        Printf.sprintf "if (%s.header->gen != %s.expected_gen) abort();"
+        Printf.sprintf "if (ORTO_REGIONS[%s.slot].gen != %s.expected_gen) abort();"
           r_var r_var;
         Printf.sprintf "int %s = %s;" n_var cn.value;
         Printf.sprintf "if (%s < 0) abort();" n_var;
         Printf.sprintf
-          "if (%s.header->used + (size_t)%s * sizeof(%s) > %s.header->buffer_size) abort();"
+          "if (ORTO_REGIONS[%s.slot].used + (size_t)%s * sizeof(%s) > ORTO_REGIONS[%s.slot].buffer_size) abort();"
           r_var n_var elem_c r_var;
-        Printf.sprintf "int %s = (int)%s.header->used;" off_var r_var;
-        Printf.sprintf "%s.header->used += (size_t)%s * sizeof(%s);"
+        Printf.sprintf "int %s = (int)ORTO_REGIONS[%s.slot].used;"
+          off_var r_var;
+        Printf.sprintf "ORTO_REGIONS[%s.slot].used += (size_t)%s * sizeof(%s);"
           r_var n_var elem_c;
-        Printf.sprintf "%s* %s = (%s*)(%s.header->buffer + %s);"
+        Printf.sprintf "%s* %s = (%s*)(ORTO_REGIONS[%s.slot].buffer + %s);"
           elem_c slots_var elem_c r_var off_var;
         Printf.sprintf "for (int %s = 0; %s < %s; %s++) %s[%s] = %s;"
           i_var i_var n_var i_var slots_var i_var cv.value;
         Printf.sprintf
-          "%s %s = ((%s){ .region = %s.header, .offset = %s, .len = %s, .expected_gen = %s.expected_gen });"
+          "%s %s = ((%s){ .slot = %s.slot, .offset = %s, .len = %s, .expected_gen = %s.expected_gen });"
           arr_c arr_var arr_c r_var off_var n_var r_var;
       ] in
       { stmts; value = arr_var }
@@ -685,19 +691,21 @@ let rec emit_expr
         @ List.concat_map (fun c -> c.stmts) elem_codes
         @ [
           Printf.sprintf "Region %s = %s;" r_var cr.value;
-          Printf.sprintf "if (%s.header->gen != %s.expected_gen) abort();"
+          Printf.sprintf
+            "if (ORTO_REGIONS[%s.slot].gen != %s.expected_gen) abort();"
             r_var r_var;
           Printf.sprintf
-            "if (%s.header->used + (size_t)%d * sizeof(%s) > %s.header->buffer_size) abort();"
+            "if (ORTO_REGIONS[%s.slot].used + (size_t)%d * sizeof(%s) > ORTO_REGIONS[%s.slot].buffer_size) abort();"
             r_var n elem_c r_var;
-          Printf.sprintf "int %s = (int)%s.header->used;" off_var r_var;
-          Printf.sprintf "%s.header->used += (size_t)%d * sizeof(%s);"
+          Printf.sprintf "int %s = (int)ORTO_REGIONS[%s.slot].used;"
+            off_var r_var;
+          Printf.sprintf "ORTO_REGIONS[%s.slot].used += (size_t)%d * sizeof(%s);"
             r_var n elem_c;
-          Printf.sprintf "%s* %s = (%s*)(%s.header->buffer + %s);"
+          Printf.sprintf "%s* %s = (%s*)(ORTO_REGIONS[%s.slot].buffer + %s);"
             elem_c slots_var elem_c r_var off_var;
         ] @ init_stmts @ [
           Printf.sprintf
-            "%s %s = ((%s){ .region = %s.header, .offset = %s, .len = %d, .expected_gen = %s.expected_gen });"
+            "%s %s = ((%s){ .slot = %s.slot, .offset = %s, .len = %d, .expected_gen = %s.expected_gen });"
             arr_c arr_var arr_c r_var off_var n r_var;
         ]
       in
@@ -747,28 +755,31 @@ let rec emit_expr
       { stmts; value = buf_var }
 
   | Check.T.TERegion (size_e, _) ->
-      (* Allocate a Region_header on the heap, then its buffer of N
-         bytes. The header outlives the buffer so dangling Array
-         handles can detect death via gen mismatch. *)
+      (* Take the next free slot from the slab, allocate its buffer,
+         and return {slot, gen}. Slot lookup is O(1); the slot stays
+         live forever, but its identity (gen) flips on each reuse so
+         dangling Array handles get caught on access. *)
       let cn = emit_expr ctor_map size_e in
       let n_var = fresh "_n" in
-      let h_var = fresh "_h" in
+      let slot_var = fresh "_slot" in
       let r_var = fresh "_reg" in
       let stmts = cn.stmts @ [
         Printf.sprintf "int %s = %s;" n_var cn.value;
         Printf.sprintf "if (%s < 0) abort();" n_var;
+        Printf.sprintf "if (ORTO_REGION_FREE_HEAD < 0) abort();";
+        Printf.sprintf "int %s = ORTO_REGION_FREE_HEAD;" slot_var;
         Printf.sprintf
-          "struct Region_header* %s = malloc(sizeof(struct Region_header));"
-          h_var;
-        Printf.sprintf "if (!%s) abort();" h_var;
-        Printf.sprintf "%s->gen = 1;" h_var;
-        Printf.sprintf "%s->buffer = malloc((size_t)%s);" h_var n_var;
-        Printf.sprintf "if (!%s->buffer) abort();" h_var;
-        Printf.sprintf "%s->buffer_size = (size_t)%s;" h_var n_var;
-        Printf.sprintf "%s->used = 0;" h_var;
+          "ORTO_REGION_FREE_HEAD = ORTO_REGIONS[%s].next_free;" slot_var;
         Printf.sprintf
-          "Region %s = ((Region){ .header = %s, .expected_gen = 1 });"
-          r_var h_var;
+          "ORTO_REGIONS[%s].buffer = malloc((size_t)%s);" slot_var n_var;
+        Printf.sprintf "if (!ORTO_REGIONS[%s].buffer) abort();" slot_var;
+        Printf.sprintf "ORTO_REGIONS[%s].buffer_size = (size_t)%s;"
+          slot_var n_var;
+        Printf.sprintf "ORTO_REGIONS[%s].used = 0;" slot_var;
+        Printf.sprintf "ORTO_REGIONS[%s].next_free = -1;" slot_var;
+        Printf.sprintf
+          "Region %s = ((Region){ .slot = %s, .expected_gen = ORTO_REGIONS[%s].gen });"
+          r_var slot_var slot_var;
       ] in
       { stmts; value = r_var }
 
@@ -823,13 +834,15 @@ and index_setup ctor_map arr_e idx_e elem_c =
       (ca, ci, a_var, i_var, arr_c, [], slot)
   | TyApp ("Array", _) ->
       let checks = [
-        Printf.sprintf "if (%s.region->gen != %s.expected_gen) abort();"
+        Printf.sprintf
+          "if (ORTO_REGIONS[%s.slot].gen != %s.expected_gen) abort();"
           a_var a_var;
         Printf.sprintf "if (%s < 0 || %s >= %s.len) abort();"
           i_var i_var a_var;
       ] in
       let slot =
-        Printf.sprintf "((%s*)(%s.region->buffer + %s.offset))[%s]"
+        Printf.sprintf
+          "((%s*)(ORTO_REGIONS[%s.slot].buffer + %s.offset))[%s]"
           elem_c a_var a_var i_var
       in
       (ca, ci, a_var, i_var, arr_c, checks, slot)
@@ -911,9 +924,30 @@ let emit (prog : Check.T.program) : string =
      #include <stdlib.h>\n\
      #include <stddef.h>\n\
      \n\
-     struct Region_header { \
-     int gen; char* buffer; size_t buffer_size; size_t used; };\n\
-     typedef struct { struct Region_header* header; int expected_gen; } Region;"
+     /* Region runtime: a global slab of region slots. Each slot is\n\
+      * reused after its region is dropped (gen bumps so old handles\n\
+      * see a mismatch and either abort or take the dangling branch).\n\
+      * No allocation per region beyond the user-requested buffer. */\n\
+     #define ORTO_REGION_SLOTS 4096\n\
+     struct Region_slot {\n\
+     \    int gen;\n\
+     \    char* buffer;\n\
+     \    size_t buffer_size;\n\
+     \    size_t used;\n\
+     \    int next_free;   /* -1 if in use, else next free slot id */\n\
+     };\n\
+     static struct Region_slot ORTO_REGIONS[ORTO_REGION_SLOTS];\n\
+     static int ORTO_REGION_FREE_HEAD = -1;\n\
+     static void orto_init_regions(void) __attribute__((constructor));\n\
+     static void orto_init_regions(void) {\n\
+     \    for (int i = 0; i < ORTO_REGION_SLOTS; i++) {\n\
+     \        ORTO_REGIONS[i].gen = 1;\n\
+     \        ORTO_REGIONS[i].next_free = i + 1;\n\
+     \    }\n\
+     \    ORTO_REGIONS[ORTO_REGION_SLOTS - 1].next_free = -1;\n\
+     \    ORTO_REGION_FREE_HEAD = 0;\n\
+     }\n\
+     typedef struct { int slot; int expected_gen; } Region;"
   in
   String.concat "\n\n"
     ([header]

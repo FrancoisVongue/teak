@@ -238,6 +238,22 @@ let rec ty_contains_linear (t : ty) : bool =
   | TyFun _ -> false
   | TyInt | TyBool | TyVar _ | TyMeta _ -> false
 
+(* When a generic is instantiated (function call, ctor application,
+   record literal), every type meta receives values by copy. Resolving
+   it to a linear type (Region) violates that contract — Region cannot
+   be copied, only moved. Catch this at the call site rather than
+   crashing later in mono. *)
+let check_instantiation (where : string) (metas : ty list) : unit =
+  List.iter (fun m ->
+    let mz = zonk m in
+    if ty_contains_linear mz then
+      raise (Type_error
+        (Printf.sprintf
+           "%s: cannot instantiate a generic type parameter with the \
+            linear type %s — only copyable types are allowed here"
+           where (show_ty mz))))
+    metas
+
 let rec validate_ty
   (type_env : (string * type_decl) list)
   (record_env : (string * record_decl) list)
@@ -775,6 +791,11 @@ let rec infer (env : env) (tparams : string list)
       let typed_args =
         check_args env tparams vars callee_label arg_tys args
       in
+      (match tc with
+       | T.TEFnRef (_, metas, _) ->
+           check_instantiation
+             (Printf.sprintf "call to %S" callee_label) metas
+       | _ -> ());
       (T.TECall (tc, typed_args, ret_ty), ret_ty)
 
   | ECtor (c, args) ->
@@ -791,6 +812,7 @@ let rec infer (env : env) (tparams : string list)
       in
       let result_ty = TyApp (info.ctor_owner, owner_tys) in
       let typed_args = check_args env tparams vars c arg_tys args in
+      check_instantiation (Printf.sprintf "constructor %S" c) metas;
       (T.TECtor (c, metas, typed_args, result_ty), result_ty)
 
   | ERecord (name, elems) ->
@@ -865,6 +887,7 @@ let rec infer (env : env) (tparams : string list)
         List.map (fun (fname, _) ->
           (fname, Hashtbl.find field_map fname)) declared_fields
       in
+      check_instantiation (Printf.sprintf "record %S literal" name) metas;
       let record_expr =
         T.TERecord (name, metas, typed_fields, result_ty)
       in
