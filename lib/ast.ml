@@ -51,6 +51,8 @@ type expr =
   | EMatch  of expr * (pat * expr) list
   | EArray  of expr * expr * expr         (* array(r, N, init) — allocate N slots in region r *)
   | EArrayLit of expr * expr list         (* array(r, [v0, v1, ...]) — allocate and initialize *)
+  | EBuf    of expr * expr                (* buf(N, init) — stack array, N must be int literal *)
+  | EBufLit of expr list                  (* [v0, v1, ..., vN-1] — stack array literal *)
   | ERegion of expr                       (* region(N) — owned arena of capacity N bytes *)
   | EIndex  of expr * expr                (* a[i] — read element *)
   | EAssignIdx of expr * expr * expr      (* a[i] := v — write element, returns int *)
@@ -179,6 +181,11 @@ let rec show_expr = function
       Printf.sprintf "array(%s, %s, %s)" (show_expr r) (show_expr n) (show_expr v)
   | EArrayLit (r, elems) ->
       Printf.sprintf "array(%s, [%s])" (show_expr r)
+        (String.concat ", " (List.map show_expr elems))
+  | EBuf (n, init) ->
+      Printf.sprintf "buf(%s, %s)" (show_expr n) (show_expr init)
+  | EBufLit elems ->
+      Printf.sprintf "[%s]"
         (String.concat ", " (List.map show_expr elems))
   | ERegion n -> Printf.sprintf "region(%s)" (show_expr n)
   | EIndex (a, i) -> Printf.sprintf "%s[%s]" (show_expr a) (show_expr i)

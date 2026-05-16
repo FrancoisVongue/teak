@@ -45,8 +45,15 @@ let fn_types_order : (string * ty) list ref = ref []
 let array_types_seen : (string, unit) Hashtbl.t = Hashtbl.create 8
 let array_types_order : (string * ty) list ref = ref []
 
+(* Buf[T] instantiations — raw stack-array handles. *)
+let buf_types_seen : (string, unit) Hashtbl.t = Hashtbl.create 8
+let buf_types_order : (string * ty) list ref = ref []
+
 let mangle_array_name (inner : ty) : string =
   "Array_" ^ Mono.mangle_ty inner
+
+let mangle_buf_name (inner : ty) : string =
+  "Buf_" ^ Mono.mangle_ty inner
 
 let rec collect_ty (t : ty) : unit =
   match t with
@@ -62,6 +69,15 @@ let rec collect_ty (t : ty) : unit =
       end
   | TyApp ("Array", _) ->
       failwith "emit collect_ty: Array with wrong arity"
+  | TyApp ("Buf", [inner]) ->
+      collect_ty inner;
+      let m = mangle_buf_name inner in
+      if not (Hashtbl.mem buf_types_seen m) then begin
+        Hashtbl.add buf_types_seen m ();
+        buf_types_order := (m, inner) :: !buf_types_order
+      end
+  | TyApp ("Buf", _) ->
+      failwith "emit collect_ty: Buf with wrong arity"
   | TyApp ("Region", []) -> ()
       (* Region runtime is emitted unconditionally at the top of the file. *)
   | TyApp ("Region", _) ->
@@ -111,6 +127,9 @@ let rec collect_expr (e : Check.T.expr) : unit =
       collect_expr r; collect_expr n; collect_expr v; collect_ty t
   | Check.T.TEArrayLit (r, elems, t) ->
       collect_expr r; List.iter collect_expr elems; collect_ty t
+  | Check.T.TEBuf (n, v, t) -> collect_expr n; collect_expr v; collect_ty t
+  | Check.T.TEBufLit (elems, t) ->
+      List.iter collect_expr elems; collect_ty t
   | Check.T.TERegion (n, t) -> collect_expr n; collect_ty t
   | Check.T.TEIndex (a, i, t) ->
       collect_expr a; collect_expr i; collect_ty t
@@ -122,6 +141,9 @@ let collect_program (prog : Check.T.program) : unit =
   Hashtbl.clear fn_types_seen;
   fn_types_order := [];
   Hashtbl.clear array_types_seen;
+  array_types_order := [];
+  Hashtbl.clear buf_types_seen;
+  buf_types_order := [];
   array_types_order := [];
   List.iter (fun td ->
     List.iter (fun v ->
@@ -143,6 +165,7 @@ let c_type (t : ty) : string =
   | TyInt -> "int"
   | TyBool -> "int"
   | TyApp ("Array", [inner]) -> mangle_array_name inner
+  | TyApp ("Buf", [inner]) -> mangle_buf_name inner
   | TyApp ("Region", []) -> "Region"
   | TyApp (n, []) -> n
   | TyFun _ -> Mono.mangle_ty t
@@ -175,6 +198,15 @@ let emit_array_forwards () : string list =
       "typedef struct { struct Region_header* region; int offset; \
        int len; int expected_gen; } %s;" mangled)
     !array_types_order
+
+(* Buf_T is a raw stack-array handle: { T* ptr; int len }. No gen, no
+   region. The storage is a plain C array in the surrounding C function's
+   frame. *)
+let emit_buf_forwards () : string list =
+  List.rev_map (fun (mangled, inner) ->
+    Printf.sprintf "typedef struct { %s* ptr; int len; } %s;"
+      (c_type inner) mangled)
+    !buf_types_order
 
 (* ---------- operator C-strings ---------- *)
 
@@ -254,6 +286,8 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
         TEArray (rn env r, rn env n, rn env v, t)
     | TEArrayLit (r, elems, t) ->
         TEArrayLit (rn env r, List.map (rn env) elems, t)
+    | TEBuf (n, v, t) -> TEBuf (rn env n, rn env v, t)
+    | TEBufLit (elems, t) -> TEBufLit (List.map (rn env) elems, t)
     | TERegion (n, t) -> TERegion (rn env n, t)
     | TEIndex (a, i, t) -> TEIndex (rn env a, rn env i, t)
     | TEAssignIdx (a, i, v, t) ->
@@ -380,6 +414,8 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TEMatch (_, _, _, t) -> t
   | Check.T.TEArray (_, _, _, t) -> t
   | Check.T.TEArrayLit (_, _, t) -> t
+  | Check.T.TEBuf (_, _, t) -> t
+  | Check.T.TEBufLit (_, t) -> t
   | Check.T.TERegion (_, t) -> t
   | Check.T.TEIndex (_, _, t) -> t
   | Check.T.TEAssignIdx (_, _, _, t) -> t
@@ -679,6 +715,49 @@ let rec emit_expr
       in
       { stmts; value = arr_var }
 
+  | Check.T.TEBuf (size_e, init_e, result_ty) ->
+      (* buf(N, init): N must be int literal — emit C `T _stor[N]`
+         (no VLA) plus a fill loop, plus a {ptr, len} handle. *)
+      let n_literal = match size_e with
+        | Check.T.TEInt n -> n
+        | _ -> failwith "emit TEBuf: size not an int literal"
+      in
+      let cv = emit_expr ctor_map init_e in
+      let stor_var = fresh "_stor" in
+      let buf_var = fresh "_buf" in
+      let i_var = fresh "_i" in
+      let buf_c = c_type result_ty in
+      let elem_c = c_type (ty_of_expr init_e) in
+      let stmts = cv.stmts @ [
+        Printf.sprintf "%s %s[%d];" elem_c stor_var n_literal;
+        Printf.sprintf "for (int %s = 0; %s < %d; %s++) %s[%s] = %s;"
+          i_var i_var n_literal i_var stor_var i_var cv.value;
+        Printf.sprintf "%s %s = ((%s){ .ptr = %s, .len = %d });"
+          buf_c buf_var buf_c stor_var n_literal;
+      ] in
+      { stmts; value = buf_var }
+
+  | Check.T.TEBufLit (elems, result_ty) ->
+      (* [v0, ..., vN-1]: C array initializer + handle. *)
+      let elem_codes = List.map (emit_expr ctor_map) elems in
+      let stor_var = fresh "_stor" in
+      let buf_var = fresh "_buf" in
+      let buf_c = c_type result_ty in
+      let elem_ty = match result_ty with
+        | TyApp ("Buf", [inner]) -> inner
+        | _ -> failwith "emit TEBufLit: result not Buf[_]"
+      in
+      let elem_c = c_type elem_ty in
+      let n = List.length elems in
+      let vals = String.concat ", "
+        (List.map (fun c -> c.value) elem_codes) in
+      let stmts = List.concat_map (fun c -> c.stmts) elem_codes @ [
+        Printf.sprintf "%s %s[%d] = { %s };" elem_c stor_var n vals;
+        Printf.sprintf "%s %s = ((%s){ .ptr = %s, .len = %d });"
+          buf_c buf_var buf_c stor_var n;
+      ] in
+      { stmts; value = buf_var }
+
   | Check.T.TERegion (size_e, _) ->
       (* Allocate a Region_header on the heap, then its buffer of N
          bytes. The header outlives the buffer so dangling Array
@@ -713,16 +792,30 @@ let rec emit_expr
       let result_var = fresh "_idx" in
       let arr_c = c_type (ty_of_expr arr_e) in
       let elem_c = c_type elem_ty in
+      let is_buf = match ty_of_expr arr_e with
+        | TyApp ("Buf", _) -> true | _ -> false in
+      let read_expr =
+        if is_buf then
+          (* Raw buf: no gen, no bounds check. Programmer's fault. *)
+          Printf.sprintf "%s.ptr[%s]" a_var i_var
+        else
+          Printf.sprintf "((%s*)(%s.region->buffer + %s.offset))[%s]"
+            elem_c a_var a_var i_var
+      in
+      let checks =
+        if is_buf then []
+        else [
+          Printf.sprintf "if (%s.region->gen != %s.expected_gen) abort();"
+            a_var a_var;
+          Printf.sprintf "if (%s < 0 || %s >= %s.len) abort();"
+            i_var i_var a_var;
+        ]
+      in
       let stmts = ca.stmts @ ci.stmts @ [
         Printf.sprintf "%s %s = %s;" arr_c a_var ca.value;
         Printf.sprintf "int %s = %s;" i_var ci.value;
-        Printf.sprintf "if (%s.region->gen != %s.expected_gen) abort();"
-          a_var a_var;
-        Printf.sprintf "if (%s < 0 || %s >= %s.len) abort();"
-          i_var i_var a_var;
-        Printf.sprintf
-          "%s %s = ((%s*)(%s.region->buffer + %s.offset))[%s];"
-          elem_c result_var elem_c a_var a_var i_var;
+      ] @ checks @ [
+        Printf.sprintf "%s %s = %s;" elem_c result_var read_expr;
       ] in
       { stmts; value = result_var }
 
@@ -734,16 +827,27 @@ let rec emit_expr
       let i_var = fresh "_i" in
       let arr_c = c_type (ty_of_expr arr_e) in
       let elem_c = c_type (ty_of_expr val_e) in
+      let is_buf = match ty_of_expr arr_e with
+        | TyApp ("Buf", _) -> true | _ -> false in
+      let write_lhs =
+        if is_buf then Printf.sprintf "%s.ptr[%s]" a_var i_var
+        else Printf.sprintf "((%s*)(%s.region->buffer + %s.offset))[%s]"
+               elem_c a_var a_var i_var
+      in
+      let checks =
+        if is_buf then []
+        else [
+          Printf.sprintf "if (%s.region->gen != %s.expected_gen) abort();"
+            a_var a_var;
+          Printf.sprintf "if (%s < 0 || %s >= %s.len) abort();"
+            i_var i_var a_var;
+        ]
+      in
       let stmts = ca.stmts @ ci.stmts @ cv.stmts @ [
         Printf.sprintf "%s %s = %s;" arr_c a_var ca.value;
         Printf.sprintf "int %s = %s;" i_var ci.value;
-        Printf.sprintf "if (%s.region->gen != %s.expected_gen) abort();"
-          a_var a_var;
-        Printf.sprintf "if (%s < 0 || %s >= %s.len) abort();"
-          i_var i_var a_var;
-        Printf.sprintf
-          "((%s*)(%s.region->buffer + %s.offset))[%s] = %s;"
-          elem_c a_var a_var i_var cv.value;
+      ] @ checks @ [
+        Printf.sprintf "%s = %s;" write_lhs cv.value;
       ] in
       { stmts; value = "0" }
 
@@ -807,6 +911,7 @@ let emit (prog : Check.T.program) : string =
   let adt_forwards = List.map emit_adt_forward prog.types in
   let rec_forwards = List.map emit_record_forward prog.records in
   let array_forwards = emit_array_forwards () in
+  let buf_forwards = emit_buf_forwards () in
   let fn_typedefs  = emit_fn_typedefs () in
   let ordered_structs = topo_sort_structs prog.types prog.records in
   let struct_defs = List.map (function
@@ -829,6 +934,7 @@ let emit (prog : Check.T.program) : string =
      @ adt_forwards
      @ rec_forwards
      @ array_forwards
+     @ buf_forwards
      @ fn_typedefs
      @ struct_defs
      @ extern_decls

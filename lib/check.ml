@@ -42,6 +42,10 @@ module T = struct
                   (* array(r, N, init) — allocate in region r, result is Array[T] *)
     | TEArrayLit of expr * expr list * ty
                   (* array(r, [v0..vN]) — allocate in r, init each slot *)
+    | TEBuf    of expr * expr * ty
+                  (* buf(N, init) — stack array; N must be int literal *)
+    | TEBufLit of expr list * ty
+                  (* [v0..vN-1] — stack array literal *)
     | TERegion of expr * ty
                   (* region(N) — result is Region *)
     | TEIndex  of expr * expr * ty
@@ -272,6 +276,16 @@ let rec validate_ty
                "Array expects exactly 1 type argument, got %d"
                (List.length args)));
         TyApp ("Array", args)
+      end else if n = "Buf" then begin
+        (* Buf[T] is a raw stack-allocated array handle — no gen,
+           no bounds check. Copyable, but its storage lives in some
+           caller frame; returning a Buf is UB by design. *)
+        if List.length args <> 1 then
+          raise (Type_error
+            (Printf.sprintf
+               "Buf expects exactly 1 type argument, got %d"
+               (List.length args)));
+        TyApp ("Buf", args)
       end else if n = "Region" then begin
         (* Region is a built-in nullary type — owned arena. Linear. *)
         if List.length args <> 0 then
@@ -567,6 +581,7 @@ let rec is_copyable (env : env) (t : ty) : bool =
   | TyMeta _       -> true
   | TyApp ("Region", _) -> false
   | TyApp ("Array", _) -> true   (* region-backed, wrapper is just a handle *)
+  | TyApp ("Buf", _) -> true     (* stack array handle — raw pointer + length *)
   | TyApp (n, args) when List.mem_assoc n env.records ->
       let rd = List.assoc n env.records in
       let subst = List.combine rd.rec_type_params args in
@@ -652,6 +667,10 @@ let rec takes_consume (env : env) (x : string) (e : T.expr) : bool =
   | T.TEArrayLit (r, elems, _) ->
       takes_consume env x r
       || List.exists (takes_consume env x) elems
+  | T.TEBuf (n, v, _) ->
+      takes_consume env x n || takes_consume env x v
+  | T.TEBufLit (elems, _) ->
+      List.exists (takes_consume env x) elems
   | T.TERegion (n, _) -> takes_consume env x n
   | T.TEIndex (a, i, _) ->
       takes_consume env x a || takes_consume env x i
@@ -1032,6 +1051,49 @@ let rec infer (env : env) (tparams : string list)
       let result_ty = TyApp ("Array", [elem_ty]) in
       (T.TEArrayLit (tr, List.map fst typed_elems, result_ty), result_ty)
 
+  | EBuf (size_e, init_e) ->
+      (* buf(N, init) : (int_literal, T) → Buf[T]. Stack-allocated.
+         N must be an int literal (parser already enforced). *)
+      let (tn, tn_ty) = infer env tparams vars size_e in
+      (try unify tn_ty TyInt
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "buf(N, _) : size must be int, got %s"
+              (show_ty (zonk tn_ty)))));
+      let (tv, tv_ty) = infer env tparams vars init_e in
+      if ty_contains_own (zonk tv_ty) then
+        raise (Type_error
+          (Printf.sprintf
+             "buf(_, v) : element type cannot contain a linear type (%s)"
+             (show_ty (zonk tv_ty))));
+      let result_ty = TyApp ("Buf", [tv_ty]) in
+      (T.TEBuf (tn, tv, result_ty), result_ty)
+
+  | EBufLit elems ->
+      (* [v0, ..., vN-1] : stack array literal → Buf[T]. *)
+      if elems = [] then
+        raise (Type_error
+          "empty array literal `[]` has no inferable type — \
+           use buf(0, default) for an empty buffer");
+      let typed_elems = List.map (infer env tparams vars) elems in
+      let elem_ty = snd (List.hd typed_elems) in
+      List.iter (fun (_, t) ->
+        (try unify elem_ty t
+         with Type_error _ ->
+           raise (Type_error
+             (Printf.sprintf
+                "array literal elements must all have the same type: \
+                 expected %s, got %s"
+                (show_ty (zonk elem_ty)) (show_ty (zonk t)))))) typed_elems;
+      if ty_contains_own (zonk elem_ty) then
+        raise (Type_error
+          (Printf.sprintf
+             "array literal element type cannot contain a linear type (%s)"
+             (show_ty (zonk elem_ty))));
+      let result_ty = TyApp ("Buf", [elem_ty]) in
+      (T.TEBufLit (List.map fst typed_elems, result_ty), result_ty)
+
   | ERegion size_e ->
       (* region(N) : int → Region. Owned arena of N bytes. Linear. *)
       let (tn, tn_ty) = infer env tparams vars size_e in
@@ -1045,16 +1107,21 @@ let rec infer (env : env) (tparams : string list)
       (T.TERegion (tn, result_ty), result_ty)
 
   | EIndex (arr_e, idx_e) ->
-      (* a[i] : Array[T], int → T.
-         Read element. Array is copyable (just a handle), no consume. *)
+      (* a[i] : (Array[T] or Buf[T]), int → T.
+         Read element. Both are copyable handles, no consume. *)
       let (ta, ta_ty) = infer env tparams vars arr_e in
       let elem = TyMeta (fresh_meta ()) in
-      (try unify ta_ty (TyApp ("Array", [elem]))
-       with Type_error _ ->
-         raise (Type_error
-           (Printf.sprintf
-              "indexing expects Array[T], got %s"
-              (show_ty (zonk ta_ty)))));
+      let ok =
+        try unify ta_ty (TyApp ("Array", [elem])); true
+        with Type_error _ ->
+          (try unify ta_ty (TyApp ("Buf", [elem])); true
+           with Type_error _ -> false)
+      in
+      if not ok then
+        raise (Type_error
+          (Printf.sprintf
+             "indexing expects Array[T] or Buf[T], got %s"
+             (show_ty (zonk ta_ty))));
       let (ti, ti_ty) = infer env tparams vars idx_e in
       (try unify ti_ty TyInt
        with Type_error _ ->
@@ -1065,17 +1132,21 @@ let rec infer (env : env) (tparams : string list)
       (T.TEIndex (ta, ti, elem), elem)
 
   | EAssignIdx (arr_e, idx_e, val_e) ->
-      (* a[i] := v : Array[T], int, T → int.
-         Write element. Receiver must be Array[T] — Ref is read-only.
+      (* a[i] := v : (Array[T] or Buf[T]), int, T → int.
          Result is 0 (placeholder for unit). *)
       let (ta, ta_ty) = infer env tparams vars arr_e in
       let elem = TyMeta (fresh_meta ()) in
-      (try unify ta_ty (TyApp ("Array", [elem]))
-       with Type_error _ ->
-         raise (Type_error
-           (Printf.sprintf
-              "array index-assignment expects Array[T], got %s"
-              (show_ty (zonk ta_ty)))));
+      let ok =
+        try unify ta_ty (TyApp ("Array", [elem])); true
+        with Type_error _ ->
+          (try unify ta_ty (TyApp ("Buf", [elem])); true
+           with Type_error _ -> false)
+      in
+      if not ok then
+        raise (Type_error
+          (Printf.sprintf
+             "array index-assignment expects Array[T] or Buf[T], got %s"
+             (show_ty (zonk ta_ty))));
       let (ti, ti_ty) = infer env tparams vars idx_e in
       (try unify ti_ty TyInt
        with Type_error _ ->
@@ -1093,15 +1164,20 @@ let rec infer (env : env) (tparams : string list)
       (T.TEAssignIdx (ta, ti, tv, TyInt), TyInt)
 
   | ELen arr_e ->
-      (* len(a) : Array[T] → int. *)
+      (* len(a) : (Array[T] or Buf[T]) → int. *)
       let (ta, ta_ty) = infer env tparams vars arr_e in
       let elem = TyMeta (fresh_meta ()) in
-      (try unify ta_ty (TyApp ("Array", [elem]))
-       with Type_error _ ->
-         raise (Type_error
-           (Printf.sprintf
-              "len expects Array[T], got %s"
-              (show_ty (zonk ta_ty)))));
+      let ok =
+        try unify ta_ty (TyApp ("Array", [elem])); true
+        with Type_error _ ->
+          (try unify ta_ty (TyApp ("Buf", [elem])); true
+           with Type_error _ -> false)
+      in
+      if not ok then
+        raise (Type_error
+          (Printf.sprintf
+             "len expects Array[T] or Buf[T], got %s"
+             (show_ty (zonk ta_ty))));
       (T.TELen (ta, TyInt), TyInt)
 
 and check_args env tparams vars callee_name param_tys args : T.expr list =
@@ -1149,6 +1225,13 @@ and validate_ty_for_ascription
                "Array expects exactly 1 type argument, got %d"
                (List.length args)));
         TyApp ("Array", args)
+      end else if n = "Buf" then begin
+        if List.length args <> 1 then
+          raise (Type_error
+            (Printf.sprintf
+               "Buf expects exactly 1 type argument, got %d"
+               (List.length args)));
+        TyApp ("Buf", args)
       end else if n = "Region" then begin
         if List.length args <> 0 then
           raise (Type_error
@@ -1221,6 +1304,10 @@ let rec zonk_expr (e : T.expr) : T.expr =
       T.TEArray (zonk_expr r, zonk_expr n, zonk_expr v, zonk_expect t)
   | T.TEArrayLit (r, elems, t) ->
       T.TEArrayLit (zonk_expr r, List.map zonk_expr elems, zonk_expect t)
+  | T.TEBuf (n, v, t) ->
+      T.TEBuf (zonk_expr n, zonk_expr v, zonk_expect t)
+  | T.TEBufLit (elems, t) ->
+      T.TEBufLit (List.map zonk_expr elems, zonk_expect t)
   | T.TERegion (n, t) -> T.TERegion (zonk_expr n, zonk_expect t)
   | T.TEIndex (a, i, t) ->
       T.TEIndex (zonk_expr a, zonk_expr i, zonk_expect t)
@@ -1421,6 +1508,18 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
         (e' :: acc, l)) ([], live) elems
       in
       (T.TEArrayLit (r', List.rev elems_rev, ty), live)
+
+  | T.TEBuf (n, v, ty) ->
+      let (n', live) = check_moves_expr env live false n in
+      let (v', live) = check_moves_expr env live false v in
+      (T.TEBuf (n', v', ty), live)
+
+  | T.TEBufLit (elems, ty) ->
+      let (elems_rev, live) = List.fold_left (fun (acc, l) e ->
+        let (e', l) = check_moves_expr env l false e in
+        (e' :: acc, l)) ([], live) elems
+      in
+      (T.TEBufLit (List.rev elems_rev, ty), live)
 
   | T.TERegion (n, ty) ->
       let (n', live) = check_moves_expr env live false n in
