@@ -97,6 +97,10 @@ let rec collect_ty (t : ty) : unit =
       end
   | TyApp ("Array", _) ->
       failwith "emit collect_ty: Array with wrong arity"
+  | TyApp ("Region", []) -> ()
+      (* Region runtime is emitted unconditionally at the top of the file. *)
+  | TyApp ("Region", _) ->
+      failwith "emit collect_ty: Region takes no type arguments"
   | TyApp (_, []) -> ()
   | TyApp (n, _) ->
       failwith (Printf.sprintf "emit collect_ty: %S still has args" n)
@@ -147,8 +151,9 @@ let rec collect_expr (e : Check.T.expr) : unit =
   | Check.T.TETake (e, t) -> collect_expr e; collect_ty t
   | Check.T.TEUnwrap (e, t) -> collect_expr e; collect_ty t
   | Check.T.TELook (e, t) -> collect_expr e; collect_ty t
-  | Check.T.TEArray (n, v, t) ->
-      collect_expr n; collect_expr v; collect_ty t
+  | Check.T.TEArray (r, n, v, t) ->
+      collect_expr r; collect_expr n; collect_expr v; collect_ty t
+  | Check.T.TERegion (n, t) -> collect_expr n; collect_ty t
   | Check.T.TEIndex (a, i, t) ->
       collect_expr a; collect_expr i; collect_ty t
   | Check.T.TEAssignIdx (a, i, v, t) ->
@@ -184,12 +189,12 @@ let c_type (t : ty) : string =
   | TyInt -> "int"
   | TyBool -> "int"
   | TyApp ("Ref", [TyApp ("Array", [inner])]) -> mangle_array_name inner
-                              (* Ref[Array[T]] shares the wrapper shape *)
   | TyApp ("Ref", [inner]) -> mangle_ref_name inner
   | TyApp ("Own", [inner]) -> mangle_own_name inner
   | TyApp ("Array", [inner]) -> mangle_array_name inner
+  | TyApp ("Region", []) -> "Region"
   | TyApp (n, []) -> n
-  | TyFun _ -> Mono.mangle_ty t   (* refers to the typedef name *)
+  | TyFun _ -> Mono.mangle_ty t
   | TyApp (n, _) ->
       failwith (Printf.sprintf "emit: %S still has type args" n)
   | TyVar n ->
@@ -251,23 +256,17 @@ let emit_own_cells () : string list =
       mangled (c_type inner))
     !own_types_order
 
-(* Array_T wrapper is {ptr, gen, len}; cell uses a C99 flexible array
-   member so the buffer lives in the same allocation as the gen field. *)
+(* Array_T is a copyable handle into a Region's buffer: it carries the
+   region header pointer, the byte-offset of this array's slice in
+   that buffer, the length, and the expected region generation. *)
 let emit_array_forwards () : string list =
   List.rev_map (fun (mangled, _inner) ->
-    [
-      Printf.sprintf "struct %s_cell;" mangled;
-      Printf.sprintf
-        "typedef struct { struct %s_cell* ptr; int expected_gen; int len; } %s;"
-        mangled mangled;
-    ]) !array_types_order
-  |> List.concat
-
-let emit_array_cells () : string list =
-  List.rev_map (fun (mangled, inner) ->
-    Printf.sprintf "struct %s_cell { int gen; %s buffer[]; };"
-      mangled (c_type inner))
+    Printf.sprintf
+      "typedef struct { struct Region_header* region; int offset; \
+       int len; int expected_gen; } %s;" mangled)
     !array_types_order
+
+let emit_array_cells () : string list = []
 
 (* ---------- operator C-strings ---------- *)
 
@@ -351,7 +350,9 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
     | TETake (e, t) -> TETake (rn env e, t)
     | TEUnwrap (e, t) -> TEUnwrap (rn env e, t)
     | TELook (e, t) -> TELook (rn env e, t)
-    | TEArray (n, v, t) -> TEArray (rn env n, rn env v, t)
+    | TEArray (r, n, v, t) ->
+        TEArray (rn env r, rn env n, rn env v, t)
+    | TERegion (n, t) -> TERegion (rn env n, t)
     | TEIndex (a, i, t) -> TEIndex (rn env a, rn env i, t)
     | TEAssignIdx (a, i, v, t) ->
         TEAssignIdx (rn env a, rn env i, rn env v, t)
@@ -483,7 +484,8 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TETake (_, t) -> t
   | Check.T.TEUnwrap (_, t) -> t
   | Check.T.TELook (_, t) -> t
-  | Check.T.TEArray (_, _, t) -> t
+  | Check.T.TEArray (_, _, _, t) -> t
+  | Check.T.TERegion (_, t) -> t
   | Check.T.TEIndex (_, _, t) -> t
   | Check.T.TEAssignIdx (_, _, _, t) -> t
   | Check.T.TELen (_, t) -> t
@@ -617,7 +619,19 @@ let rec emit_expr
           Printf.sprintf "%s %s = %s;" (c_type body_ty) temp cb.value
         in
         let free_stmt =
-          Printf.sprintf "free(%s.ptr);" x
+          match vt with
+          | TyApp ("Own", _) -> Printf.sprintf "free(%s.ptr);" x
+          | TyApp ("Region", _) ->
+              (* Free the region's buffer and bump its generation.
+                 The header itself stays alive — dangling Array
+                 handles use it for gen checks. *)
+              Printf.sprintf
+                "if (%s.header->gen == %s.expected_gen) { \
+                 free(%s.header->buffer); %s.header->buffer = NULL; \
+                 %s.header->buffer_size = 0; %s.header->used = 0; \
+                 %s.header->gen++; }"
+                x x x x x x x
+          | _ -> failwith "emit: auto_drop on non-linear type"
         in
         let stmts =
           cv.stmts
@@ -832,31 +846,68 @@ let rec emit_expr
       ] in
       { stmts; value = result_var }
 
-  | Check.T.TEArray (size_e, init_e, result_ty) ->
-      (* Allocate header + N * sizeof(T) in one malloc using FAM.
-         Initialize gen=1, fill every slot with init via a runtime loop. *)
+  | Check.T.TEArray (region_e, size_e, init_e, result_ty) ->
+      (* Bump-allocate N*sizeof(T) inside the region's buffer. Returns
+         a handle {region, offset, len, expected_gen}. The handle is
+         copyable; the buffer is owned by the region. *)
+      let cr = emit_expr ctor_map region_e in
       let cn = emit_expr ctor_map size_e in
       let cv = emit_expr ctor_map init_e in
+      let r_var = fresh "_r" in
       let n_var = fresh "_n" in
-      let cell_var = fresh "_cell" in
-      let arr_var = fresh "_arr" in
+      let off_var = fresh "_off" in
+      let slots_var = fresh "_slots" in
       let i_var = fresh "_i" in
+      let arr_var = fresh "_arr" in
       let arr_c = c_type result_ty in
       let elem_c = c_type (ty_of_expr init_e) in
-      let stmts = cn.stmts @ cv.stmts @ [
+      let stmts = cr.stmts @ cn.stmts @ cv.stmts @ [
+        Printf.sprintf "Region %s = %s;" r_var cr.value;
+        Printf.sprintf "if (%s.header->gen != %s.expected_gen) abort();"
+          r_var r_var;
         Printf.sprintf "int %s = %s;" n_var cn.value;
+        Printf.sprintf "if (%s < 0) abort();" n_var;
         Printf.sprintf
-          "struct %s_cell* %s = malloc(sizeof(struct %s_cell) + (size_t)%s * sizeof(%s));"
-          arr_c cell_var arr_c n_var elem_c;
-        Printf.sprintf "if (!%s) abort();" cell_var;
-        Printf.sprintf "%s->gen = 1;" cell_var;
-        Printf.sprintf "for (int %s = 0; %s < %s; %s++) %s->buffer[%s] = %s;"
-          i_var i_var n_var i_var cell_var i_var cv.value;
+          "if (%s.header->used + (size_t)%s * sizeof(%s) > %s.header->buffer_size) abort();"
+          r_var n_var elem_c r_var;
+        Printf.sprintf "int %s = (int)%s.header->used;" off_var r_var;
+        Printf.sprintf "%s.header->used += (size_t)%s * sizeof(%s);"
+          r_var n_var elem_c;
+        Printf.sprintf "%s* %s = (%s*)(%s.header->buffer + %s);"
+          elem_c slots_var elem_c r_var off_var;
+        Printf.sprintf "for (int %s = 0; %s < %s; %s++) %s[%s] = %s;"
+          i_var i_var n_var i_var slots_var i_var cv.value;
         Printf.sprintf
-          "%s %s = ((%s){ .ptr = %s, .expected_gen = 1, .len = %s });"
-          arr_c arr_var arr_c cell_var n_var;
+          "%s %s = ((%s){ .region = %s.header, .offset = %s, .len = %s, .expected_gen = %s.expected_gen });"
+          arr_c arr_var arr_c r_var off_var n_var r_var;
       ] in
       { stmts; value = arr_var }
+
+  | Check.T.TERegion (size_e, _) ->
+      (* Allocate a Region_header on the heap, then its buffer of N
+         bytes. The header outlives the buffer so dangling Array
+         handles can detect death via gen mismatch. *)
+      let cn = emit_expr ctor_map size_e in
+      let n_var = fresh "_n" in
+      let h_var = fresh "_h" in
+      let r_var = fresh "_reg" in
+      let stmts = cn.stmts @ [
+        Printf.sprintf "int %s = %s;" n_var cn.value;
+        Printf.sprintf "if (%s < 0) abort();" n_var;
+        Printf.sprintf
+          "struct Region_header* %s = malloc(sizeof(struct Region_header));"
+          h_var;
+        Printf.sprintf "if (!%s) abort();" h_var;
+        Printf.sprintf "%s->gen = 1;" h_var;
+        Printf.sprintf "%s->buffer = malloc((size_t)%s);" h_var n_var;
+        Printf.sprintf "if (!%s->buffer) abort();" h_var;
+        Printf.sprintf "%s->buffer_size = (size_t)%s;" h_var n_var;
+        Printf.sprintf "%s->used = 0;" h_var;
+        Printf.sprintf
+          "Region %s = ((Region){ .header = %s, .expected_gen = 1 });"
+          r_var h_var;
+      ] in
+      { stmts; value = r_var }
 
   | Check.T.TEIndex (arr_e, idx_e, elem_ty) ->
       let ca = emit_expr ctor_map arr_e in
@@ -869,12 +920,13 @@ let rec emit_expr
       let stmts = ca.stmts @ ci.stmts @ [
         Printf.sprintf "%s %s = %s;" arr_c a_var ca.value;
         Printf.sprintf "int %s = %s;" i_var ci.value;
-        Printf.sprintf "if (%s.ptr->gen != %s.expected_gen) abort();"
+        Printf.sprintf "if (%s.region->gen != %s.expected_gen) abort();"
           a_var a_var;
         Printf.sprintf "if (%s < 0 || %s >= %s.len) abort();"
           i_var i_var a_var;
-        Printf.sprintf "%s %s = %s.ptr->buffer[%s];"
-          elem_c result_var a_var i_var;
+        Printf.sprintf
+          "%s %s = ((%s*)(%s.region->buffer + %s.offset))[%s];"
+          elem_c result_var elem_c a_var a_var i_var;
       ] in
       { stmts; value = result_var }
 
@@ -885,14 +937,17 @@ let rec emit_expr
       let a_var = fresh "_a" in
       let i_var = fresh "_i" in
       let arr_c = c_type (ty_of_expr arr_e) in
+      let elem_c = c_type (ty_of_expr val_e) in
       let stmts = ca.stmts @ ci.stmts @ cv.stmts @ [
         Printf.sprintf "%s %s = %s;" arr_c a_var ca.value;
         Printf.sprintf "int %s = %s;" i_var ci.value;
-        Printf.sprintf "if (%s.ptr->gen != %s.expected_gen) abort();"
+        Printf.sprintf "if (%s.region->gen != %s.expected_gen) abort();"
           a_var a_var;
         Printf.sprintf "if (%s < 0 || %s >= %s.len) abort();"
           i_var i_var a_var;
-        Printf.sprintf "%s.ptr->buffer[%s] = %s;" a_var i_var cv.value;
+        Printf.sprintf
+          "((%s*)(%s.region->buffer + %s.offset))[%s] = %s;"
+          elem_c a_var a_var i_var cv.value;
       ] in
       { stmts; value = "0" }
 
@@ -969,7 +1024,15 @@ let emit (prog : Check.T.program) : string =
   let extern_decls = List.map emit_extern_decl prog.externs in
   let decls        = List.map emit_func_decl prog.funcs in
   let defs         = List.map (emit_func_def ctor_map) prog.funcs in
-  let header = "/* generated by orto */\n#include <stdlib.h>" in
+  let header =
+    "/* generated by orto */\n\
+     #include <stdlib.h>\n\
+     #include <stddef.h>\n\
+     \n\
+     struct Region_header { \
+     int gen; char* buffer; size_t buffer_size; size_t used; };\n\
+     typedef struct { struct Region_header* header; int expected_gen; } Region;"
+  in
   String.concat "\n\n"
     ([header]
      @ adt_forwards

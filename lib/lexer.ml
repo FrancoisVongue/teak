@@ -36,6 +36,7 @@ let lower_ident_or_keyword s =
   | "own"   -> TOwn
   | "array" -> TArray
   | "len"   -> TLen
+  | "region" -> TRegion
   | "take"  -> TTake
   | "unwrap" -> TUnwrap
   | "look"  -> TLook

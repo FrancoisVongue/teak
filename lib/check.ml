@@ -55,8 +55,10 @@ module T = struct
                   (* unwrap(o) — result is T (copy out of heap) *)
     | TELook   of expr * ty
                   (* look(r) — result is Option[T] *)
-    | TEArray  of expr * expr * ty
-                  (* array(N, init) — result is Own[Array[T]] *)
+    | TEArray  of expr * expr * expr * ty
+                  (* array(r, N, init) — allocate in region r, result is Array[T] *)
+    | TERegion of expr * ty
+                  (* region(N) — result is Region *)
     | TEIndex  of expr * expr * ty
                   (* a[i] — result is T (element type) *)
     | TEAssignIdx of expr * expr * expr * ty
@@ -234,13 +236,14 @@ let split_program (prog : program)
 (* ---------- type validation ---------- *)
 
 (* Tests whether a type contains a linear (non-copyable) builtin —
-   Own[_] or Array[_] — anywhere except behind a function arrow.
-   Linear types can only live as the top-level type of a name; they
-   are forbidden as record fields, ADT variant args, or type args. *)
+   Own[_] or Region — anywhere except behind a function arrow. Linear
+   types can only live as the top-level type of a name; they are
+   forbidden as record fields, ADT variant args, or type args.
+   Array[_] is copyable now — its memory lives in a Region. *)
 let rec ty_contains_own (t : ty) : bool =
   match t with
   | TyApp ("Own", _) -> true
-  | TyApp ("Array", _) -> true
+  | TyApp ("Region", _) -> true
   | TyApp (_, args) -> List.exists ty_contains_own args
   | TyFun _ -> false
   | TyInt | TyBool | TyVar _ | TyMeta _ -> false
@@ -293,14 +296,22 @@ let rec validate_ty
                (List.length args)));
         TyApp ("Own", args)
       end else if n = "Array" then begin
-        (* Array is a built-in unary type constructor — heap-allocated buffer.
-           Array[T] is itself a linear type (move-only). *)
+        (* Array[T] is a built-in unary type constructor — handle to a
+           region-allocated buffer. The wrapper is copyable. *)
         if List.length args <> 1 then
           raise (Type_error
             (Printf.sprintf
                "Array expects exactly 1 type argument, got %d"
                (List.length args)));
         TyApp ("Array", args)
+      end else if n = "Region" then begin
+        (* Region is a built-in nullary type — owned arena. Linear. *)
+        if List.length args <> 0 then
+          raise (Type_error
+            (Printf.sprintf
+               "Region takes no type arguments, got %d"
+               (List.length args)));
+        TyApp ("Region", [])
       end else
         (match List.assoc_opt n type_env with
          | Some td ->
@@ -587,7 +598,8 @@ let rec is_copyable (env : env) (t : ty) : bool =
   | TyFun _        -> true
   | TyMeta _       -> true
   | TyApp ("Own", _) -> false
-  | TyApp ("Array", _) -> false
+  | TyApp ("Region", _) -> false
+  | TyApp ("Array", _) -> true   (* region-backed, wrapper is just a handle *)
   | TyApp ("Ref", _) -> true
   | TyApp (n, args) when List.mem_assoc n env.records ->
       let rd = List.assoc n env.records in
@@ -684,8 +696,9 @@ let rec takes_consume (env : env) (x : string) (e : T.expr) : bool =
          same shape as fn-arg/ctor-arg/record-field positions. *)
       takes_consume env x arg || consumed_in_arg env x arg
   | T.TELook (e, _) -> takes_consume env x e
-  | T.TEArray (n, v, _) ->
-      takes_consume env x n || takes_consume env x v
+  | T.TEArray (r, n, v, _) ->
+      takes_consume env x r || takes_consume env x n || takes_consume env x v
+  | T.TERegion (n, _) -> takes_consume env x n
   | T.TEIndex (a, i, _) ->
       takes_consume env x a || takes_consume env x i
   | T.TEAssignIdx (a, i, v, _) ->
@@ -936,7 +949,7 @@ let rec infer (env : env) (tparams : string list)
       let x_actual =
         if x = "_" then
           (match prune tv_ty with
-           | TyApp ("Own", _) | TyApp ("Array", _) ->
+           | TyApp ("Own", _) | TyApp ("Region", _) ->
                incr drop_name_counter;
                Printf.sprintf "_drop_%d" !drop_name_counter
            | _ -> x)
@@ -950,7 +963,7 @@ let rec infer (env : env) (tparams : string list)
         if x_actual = "_" then false
         else
           (match prune tv_ty with
-           | TyApp ("Own", _) | TyApp ("Array", _) ->
+           | TyApp ("Own", _) | TyApp ("Region", _) ->
                not (is_consumed env x_actual tb)
            | _ -> false)
       in
@@ -1138,25 +1151,44 @@ let rec infer (env : env) (tparams : string list)
       let result_ty = TyApp ("Option", [inner]) in
       (T.TELook (tr, result_ty), result_ty)
 
-  | EArray (size_e, init_e) ->
-      (* array(N, v) : (int, T) → Array[T].
-         Allocates a fixed-size heap block, fills every slot with v.
-         Array[T] is itself a linear type — move-only, freed at scope-exit. *)
+  | EArray (region_e, size_e, init_e) ->
+      (* array(r, N, v) : (Region, int, T) → Array[T].
+         Bump-allocates N slots in region r, fills each with v.
+         The Array wrapper is copyable — its memory lives in r. *)
+      let (tr, tr_ty) = infer env tparams vars region_e in
+      (try unify tr_ty (TyApp ("Region", []))
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "array(r, _, _) : first argument must be Region, got %s"
+              (show_ty (zonk tr_ty)))));
       let (tn, tn_ty) = infer env tparams vars size_e in
       (try unify tn_ty TyInt
        with Type_error _ ->
          raise (Type_error
            (Printf.sprintf
-              "array(N, _) : size must be int, got %s"
+              "array(_, N, _) : size must be int, got %s"
               (show_ty (zonk tn_ty)))));
       let (tv, tv_ty) = infer env tparams vars init_e in
       if ty_contains_own (zonk tv_ty) then
         raise (Type_error
           (Printf.sprintf
-             "array(_, v) : element type cannot contain a linear type (%s)"
+             "array(_, _, v) : element type cannot contain a linear type (%s)"
              (show_ty (zonk tv_ty))));
       let result_ty = TyApp ("Array", [tv_ty]) in
-      (T.TEArray (tn, tv, result_ty), result_ty)
+      (T.TEArray (tr, tn, tv, result_ty), result_ty)
+
+  | ERegion size_e ->
+      (* region(N) : int → Region. Owned arena of N bytes. Linear. *)
+      let (tn, tn_ty) = infer env tparams vars size_e in
+      (try unify tn_ty TyInt
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "region(N) : size must be int, got %s"
+              (show_ty (zonk tn_ty)))));
+      let result_ty = TyApp ("Region", []) in
+      (T.TERegion (tn, result_ty), result_ty)
 
   | EIndex (arr_e, idx_e) ->
       (* a[i] : Array[T] or Ref[Array[T]], int → T.
@@ -1287,6 +1319,13 @@ and validate_ty_for_ascription
                "Array expects exactly 1 type argument, got %d"
                (List.length args)));
         TyApp ("Array", args)
+      end else if n = "Region" then begin
+        if List.length args <> 0 then
+          raise (Type_error
+            (Printf.sprintf
+               "Region takes no type arguments, got %d"
+               (List.length args)));
+        TyApp ("Region", [])
       end else
         (match List.assoc_opt n env.types with
          | Some td ->
@@ -1364,8 +1403,9 @@ let rec zonk_expr (e : T.expr) : T.expr =
       T.TEUnwrap (zonk_expr e, zonk_expect t)
   | T.TELook (e, t) ->
       T.TELook (zonk_expr e, zonk_expect t)
-  | T.TEArray (n, v, t) ->
-      T.TEArray (zonk_expr n, zonk_expr v, zonk_expect t)
+  | T.TEArray (r, n, v, t) ->
+      T.TEArray (zonk_expr r, zonk_expr n, zonk_expr v, zonk_expect t)
+  | T.TERegion (n, t) -> T.TERegion (zonk_expr n, zonk_expect t)
   | T.TEIndex (a, i, t) ->
       T.TEIndex (zonk_expr a, zonk_expr i, zonk_expect t)
   | T.TEAssignIdx (a, i, v, t) ->
@@ -1575,10 +1615,15 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       let (sub', live) = check_moves_expr env live false sub in
       (T.TELook (sub', ty), live)
 
-  | T.TEArray (n, v, ty) ->
+  | T.TEArray (r, n, v, ty) ->
+      let (r', live) = check_moves_expr env live false r in
       let (n', live) = check_moves_expr env live false n in
-      let (v', live) = consume_arg env live v in
-      (T.TEArray (n', v', ty), live)
+      let (v', live) = check_moves_expr env live false v in
+      (T.TEArray (r', n', v', ty), live)
+
+  | T.TERegion (n, ty) ->
+      let (n', live) = check_moves_expr env live false n in
+      (T.TERegion (n', ty), live)
 
   | T.TEIndex (a, i, ty) ->
       let (a', live) = check_moves_expr env live false a in
@@ -1628,7 +1673,7 @@ let check_func (env : env) (f : func) : T.func =
   let body_with_drops =
     List.fold_right (fun (pname, pty) acc ->
       match prune pty with
-      | TyApp ("Own", _) | TyApp ("Array", _)
+      | TyApp ("Own", _) | TyApp ("Region", _)
         when not (is_consumed env pname acc) ->
           T.TELet (pname, pty, T.TEVar (pname, pty),
                    acc, tbody_ty, true)

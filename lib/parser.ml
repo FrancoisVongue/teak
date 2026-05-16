@@ -248,7 +248,7 @@ and parse_atom st =
   | TIf | TMatch
   | TRef | TDeref | TPanic
   | TOwn | TTake | TUnwrap | TLook
-  | TArray | TLen -> parse_atom_consume st
+  | TArray | TLen | TRegion -> parse_atom_consume st
   | t -> raise (Parse_error
     (Printf.sprintf "expected expression, got %s" (Token.show t)))
 
@@ -313,11 +313,18 @@ and parse_atom_consume st =
       ELook e
   | TArray ->
       expect st TLParen;
+      let r = parse_expr st in
+      expect st TComma;
       let n = parse_expr st in
       expect st TComma;
       let v = parse_expr st in
       expect st TRParen;
-      EArray (n, v)
+      EArray (r, n, v)
+  | TRegion ->
+      expect st TLParen;
+      let n = parse_expr st in
+      expect st TRParen;
+      ERegion n
   | TLen ->
       expect st TLParen;
       let e = parse_expr st in

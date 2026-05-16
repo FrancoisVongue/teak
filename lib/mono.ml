@@ -101,11 +101,16 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
     | TyApp ("Own", _) ->
         failwith "mono rewrite_ty: Own with wrong arity (should be unary)"
     | TyApp ("Array", [inner]) ->
-        (* Array is also structural — emit emits one cell+wrapper pair
-           per distinct element type. *)
+        (* Array is structural — emit emits one wrapper+cell pair per
+           distinct element type. *)
         TyApp ("Array", [rewrite_ty subst inner])
     | TyApp ("Array", _) ->
         failwith "mono rewrite_ty: Array with wrong arity (should be unary)"
+    | TyApp ("Region", []) ->
+        (* Region is a structural nullary builtin — emit just typedefs it. *)
+        TyApp ("Region", [])
+    | TyApp ("Region", _) ->
+        failwith "mono rewrite_ty: Region takes no type arguments"
     | TyApp (n, args) ->
         let args = List.map (rewrite_ty subst) args in
         if is_record_name n then request_rec n args
@@ -197,8 +202,12 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         Check.T.TEUnwrap (rewrite_expr subst e, rt t)
     | Check.T.TELook (e, t) ->
         Check.T.TELook (rewrite_expr subst e, rt t)
-    | Check.T.TEArray (n, v, t) ->
-        Check.T.TEArray (rewrite_expr subst n, rewrite_expr subst v, rt t)
+    | Check.T.TEArray (r, n, v, t) ->
+        Check.T.TEArray (rewrite_expr subst r,
+                         rewrite_expr subst n,
+                         rewrite_expr subst v, rt t)
+    | Check.T.TERegion (n, t) ->
+        Check.T.TERegion (rewrite_expr subst n, rt t)
     | Check.T.TEIndex (a, i, t) ->
         Check.T.TEIndex (rewrite_expr subst a, rewrite_expr subst i, rt t)
     | Check.T.TEAssignIdx (a, i, v, t) ->

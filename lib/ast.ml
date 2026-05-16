@@ -58,7 +58,8 @@ type expr =
   | ETake   of expr                       (* take(o) — explicit consume of Own *)
   | EUnwrap of expr                       (* unwrap(o) — copy out of Own; only copyable T *)
   | ELook   of expr                       (* look(r) — read through Ref, returns Option *)
-  | EArray  of expr * expr                (* array(N, init) — heap-allocated sized buffer *)
+  | EArray  of expr * expr * expr         (* array(r, N, init) — allocate N slots in region r *)
+  | ERegion of expr                       (* region(N) — owned arena of capacity N bytes *)
   | EIndex  of expr * expr                (* a[i] — read element *)
   | EAssignIdx of expr * expr * expr      (* a[i] := v — write element, returns int *)
   | ELen    of expr                       (* len(a) — array length *)
@@ -193,8 +194,9 @@ let rec show_expr = function
   | ETake e   -> Printf.sprintf "take(%s)" (show_expr e)
   | EUnwrap e -> Printf.sprintf "unwrap(%s)" (show_expr e)
   | ELook e   -> Printf.sprintf "look(%s)" (show_expr e)
-  | EArray (n, v) ->
-      Printf.sprintf "array(%s, %s)" (show_expr n) (show_expr v)
+  | EArray (r, n, v) ->
+      Printf.sprintf "array(%s, %s, %s)" (show_expr r) (show_expr n) (show_expr v)
+  | ERegion n -> Printf.sprintf "region(%s)" (show_expr n)
   | EIndex (a, i) -> Printf.sprintf "%s[%s]" (show_expr a) (show_expr i)
   | EAssignIdx (a, i, v) ->
       Printf.sprintf "(%s[%s] := %s)" (show_expr a) (show_expr i) (show_expr v)
