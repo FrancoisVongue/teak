@@ -23,9 +23,11 @@ int main(void) {
     Own_int _o_3 = a_1;
     if (_o_3.ptr->gen != _o_3.expected_gen) abort();
     int _unwrap_4 = _o_3.ptr->value;
+    free(_o_3.ptr);
     Own_int _o_5 = b_2;
     if (_o_5.ptr->gen != _o_5.expected_gen) abort();
     int _unwrap_6 = _o_5.ptr->value;
+    free(_o_5.ptr);
     int sum_3 = (_unwrap_4 + _unwrap_6);
     struct Own_int_cell* _cell_7 = malloc(sizeof(struct Own_int_cell));
     if (!_cell_7) abort();
@@ -35,12 +37,7 @@ int main(void) {
     Own_int _o_8 = factor_4;
     if (_o_8.ptr->gen != _o_8.expected_gen) abort();
     int _unwrap_9 = _o_8.ptr->value;
+    free(_o_8.ptr);
     int result_5 = (sum_3 * _unwrap_9);
-    int _let_result_10 = result_5;
-    free(factor_4.ptr);
-    int _let_result_11 = _let_result_10;
-    free(b_2.ptr);
-    int _let_result_12 = _let_result_11;
-    free(a_1.ptr);
-    return _let_result_12;
+    return result_5;
 }

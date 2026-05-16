@@ -18,6 +18,7 @@ int main(void) {
     Own_int _o_2 = x_1;
     if (_o_2.ptr->gen != _o_2.expected_gen) abort();
     int _unwrap_3 = _o_2.ptr->value;
+    free(_o_2.ptr);
     int tmp_4;
     if ((_unwrap_3 > 5)) {
         tmp_4 = 100;
@@ -25,7 +26,5 @@ int main(void) {
         tmp_4 = 200;
     }
     int result_2 = tmp_4;
-    int _let_result_5 = result_2;
-    free(x_1.ptr);
-    return _let_result_5;
+    return result_2;
 }

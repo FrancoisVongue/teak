@@ -23,9 +23,8 @@ int produce(void) {
     Own_int _o_2 = y_2;
     if (_o_2.ptr->gen != _o_2.expected_gen) abort();
     int _unwrap_3 = _o_2.ptr->value;
-    int _let_result_4 = _unwrap_3;
-    free(y_2.ptr);
-    return _let_result_4;
+    free(_o_2.ptr);
+    return _unwrap_3;
 }
 
 int main(void) {

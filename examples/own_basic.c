@@ -18,8 +18,7 @@ int main(void) {
     Own_int _o_2 = x_1;
     if (_o_2.ptr->gen != _o_2.expected_gen) abort();
     int _unwrap_3 = _o_2.ptr->value;
+    free(_o_2.ptr);
     int v_2 = _unwrap_3;
-    int _let_result_4 = v_2;
-    free(x_1.ptr);
-    return _let_result_4;
+    return v_2;
 }

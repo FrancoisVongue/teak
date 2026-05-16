@@ -653,7 +653,11 @@ let rec takes_consume (env : env) (x : string) (e : T.expr) : bool =
       (match arg with
        | T.TEVar (y, _) when y = x -> true
        | _ -> takes_consume env x arg)
-  | T.TEUnwrap (e, _) -> takes_consume env x e
+  | T.TEUnwrap (arg, _) ->
+      (* unwrap reads the cell value and frees the cell — it consumes
+         its argument. A bare EVar argument is therefore a consume,
+         same shape as fn-arg/ctor-arg/record-field positions. *)
+      takes_consume env x arg || consumed_in_arg env x arg
   | T.TELook (e, _) -> takes_consume env x e
 
 (* tail_consume: does x reach the tail position of the expression? *)

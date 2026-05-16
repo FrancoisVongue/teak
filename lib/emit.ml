@@ -737,9 +737,10 @@ let rec emit_expr
       emit_expr ctor_map o
 
   | Check.T.TEUnwrap (o, inner_ty) ->
-      (* Read value out of Own. Owner guarantees liveness, no Option needed.
-         In this sub-stage we still emit the gen check defensively; gcc -O2
-         will elide it when generations are statically 1. *)
+      (* unwrap is consuming: it reads the value from the cell and
+         frees the cell. The source Own name is dead afterwards (the
+         consume analysis prevents any other use), so freeing here is
+         the unique release point for this allocation. *)
       let co = emit_expr ctor_map o in
       let o_var = fresh "_o" in
       let result_var = fresh "_unwrap" in
@@ -750,6 +751,7 @@ let rec emit_expr
         Printf.sprintf "if (%s.ptr->gen != %s.expected_gen) abort();"
           o_var o_var;
         Printf.sprintf "%s %s = %s.ptr->value;" inner_c result_var o_var;
+        Printf.sprintf "free(%s.ptr);" o_var;
       ] in
       { stmts; value = result_var }
 
