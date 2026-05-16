@@ -50,42 +50,35 @@ fn main() -> int {
 }
 
 // Проход по values, инкремент counters[values[i]] для каждого i.
-// values consume'нут через recursion → ownership уходит. counters
-// тоже consume'нут через recursion → возвращается через tail.
-// В else-ветке values не используется — компилятор автоматически
-// вставит free(values.ptr) перед return counters, чтобы поведение
-// было симметричным с then-веткой.
+// then-ветка consume'ит values и counters через рекурсию.
+// else-ветка должна симметризовать: counters уходит через tail,
+// а values нужно явно выкинуть через `let _ = values`.
+// Каждое use некопируемого имени видно в исходнике; компилятор
+// ничего сам не вставляет.
 fn build_histogram(values: Array[int], counters: Array[int], i: int)
     -> Array[int] {
     if i < len(values) {
-        // values[i] это копия (int копируется бесплатно).
         let v = values[i];
-        // counters[v] := counters[v] + 1: read+write, counters остаётся жив.
         let _ = counters[v] := counters[v] + 1;
-        // Recursive call — оба массива consumed. Возвращается обновлённая
-        // counters. Это tail-позиция этой ветки.
         build_histogram(values, counters, i + 1)
     } else {
-        // База рекурсии. counters в tail — move out. values не нужна
-        // больше — компилятор auto-вставит free(values.ptr) здесь.
+        // Явно потребляем values (`let _ = values` для Array компилится
+        // в одноразовое связывание с auto-drop → free(_drop_N.ptr)).
+        // counters уходит через tail.
+        let _ = values;
         counters
     }
 }
 
-// Линейный max по элементам counters. Каждый i проходит через recursion.
-// В тail-позиции возвращаем int — counters consume'нут полностью
-// внутри функции, free в else-ветке.
+// Линейный max. Симметрично: counters consume'ется через рекурсию в
+// then-ветке, в else-ветке мы вручную выкидываем.
 fn find_max(counters: Array[int], i: int, best: int) -> int {
     if i < len(counters) {
-        // Читаем элемент в копию.
         let v = counters[i];
-        // Сравниваем — конкатенация if это выражение.
         let new_best = if v > best { v } else { best };
-        // Recursive call — counters consumed.
         find_max(counters, i + 1, new_best)
     } else {
-        // База. best — int, копируется. counters больше не нужна,
-        // auto-drop вставит free(counters.ptr) здесь.
+        let _ = counters;
         best
     }
 }

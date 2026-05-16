@@ -131,6 +131,7 @@ let check_not_c_reserved (kind : string) (name : string) : unit =
 (* ---------- meta variables, zonk, unify ---------- *)
 
 let meta_counter = ref 0
+let drop_name_counter = ref 0
 let fresh_meta () : meta =
   incr meta_counter;
   { id = !meta_counter; resolved = None }
@@ -928,21 +929,32 @@ let rec infer (env : env) (tparams : string list)
        | Some t ->
            let t = validate_ty_for_ascription env tparams t in
            unify tv_ty t);
-      let body_vars = if x = "_" then vars else (x, tv_ty) :: vars in
+      (* `let _ = expr` for a linear-typed value means "consume and
+         immediately drop". Rename `_` to a fresh `_drop_N` so the
+         binding carries auto_drop=true and produces a visible free in
+         emit. Copyable values keep `_` as a side-effect discard. *)
+      let x_actual =
+        if x = "_" then
+          (match prune tv_ty with
+           | TyApp ("Own", _) | TyApp ("Array", _) ->
+               incr drop_name_counter;
+               Printf.sprintf "_drop_%d" !drop_name_counter
+           | _ -> x)
+        else x
+      in
+      let body_vars =
+        if x_actual = "_" then vars else (x_actual, tv_ty) :: vars
+      in
       let (tb, tb_ty) = infer env tparams body_vars body in
-      (* auto_drop applies when:
-           - the bound type is Own[T]
-           - x is a real name (not "_")
-           - x is NOT consumed in the body *)
       let auto_drop =
-        if x = "_" then false
+        if x_actual = "_" then false
         else
           (match prune tv_ty with
            | TyApp ("Own", _) | TyApp ("Array", _) ->
-               not (is_consumed env x tb)
+               not (is_consumed env x_actual tb)
            | _ -> false)
       in
-      (T.TELet (x, tv_ty, tv, tb, tb_ty, auto_drop), tb_ty)
+      (T.TELet (x_actual, tv_ty, tv, tb, tb_ty, auto_drop), tb_ty)
 
   | EMatch (scrut, arms) ->
       if arms = [] then
@@ -1389,18 +1401,10 @@ and zonk_expect (t : ty) : ty =
    double-free in another, so we reject it and require the user to
    write symmetric branches. *)
 
-(* Tracks live names with their types. Type is needed because when we
-   auto-insert a drop in a diverging branch, the inserted TELet needs
-   to know what to drop's type. *)
+(* Tracks live names with their types. Type is needed because when an
+   inner binding shadows an outer name we need to restore the outer
+   type on scope exit. *)
 module SM = Map.Make (String)
-
-(* Wrap an expression in a chain of `let name = name; expr` bindings
-   with auto_drop=true, one per name in [drops]. Each wrap turns into
-   a `free(name.ptr)` after the inner expression in emit. *)
-let wrap_with_drops (drops : (string * ty) list) (body_ty : ty) (e : T.expr) : T.expr =
-  List.fold_left (fun expr (name, ty) ->
-    T.TELet (name, ty, T.TEVar (name, ty), expr, body_ty, true))
-    e drops
 
 let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.expr)
   : T.expr * ty SM.t =
@@ -1467,24 +1471,17 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       let (cond', live) = check_moves_expr env live false cond in
       let (t', live_t) = check_moves_expr env live in_tail t in
       let (el', live_e) = check_moves_expr env live in_tail el in
-      (* Final live set after the if is the intersection — names live
-         in both. For each branch, names alive in it but not in the
-         intersection must be dropped at the branch's tail. The
-         compiler inserts those drops as TELet wraps. *)
-      let final = SM.merge (fun _ a b ->
-        match a, b with
-        | Some t1, Some _ -> Some t1
-        | _ -> None) live_t live_e
-      in
-      let drops_of branch_live =
-        SM.fold (fun k v acc ->
-          if SM.mem k final then acc else (k, v) :: acc) branch_live []
-      in
-      let drops_t = drops_of live_t in
-      let drops_e = drops_of live_e in
-      let t'' = wrap_with_drops drops_t ty t' in
-      let el'' = wrap_with_drops drops_e ty el' in
-      (T.TEIf (cond', t'', el'', ty), final)
+      if not (SM.equal (fun _ _ -> true) live_t live_e) then
+        raise (Type_error
+          (Printf.sprintf
+             "if branches diverge in ownership: \
+              then leaves [%s] live, else leaves [%s] live. \
+              Both branches must end with the same ownership state. \
+              Use `let _ = x` to consume a linear value in a branch that \
+              doesn't otherwise use it."
+             (String.concat ", " (List.map fst (SM.bindings live_t)))
+             (String.concat ", " (List.map fst (SM.bindings live_e)))));
+      (T.TEIf (cond', t', el', ty), live_t)
 
   | T.TELet (x, vt, v, b, bt, ad) ->
       let (v', live) = consume_arg env live v in
@@ -1540,23 +1537,20 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       ) arms in
       (match arm_data with
        | [] -> (T.TEMatch (scrut', scrut_ty, [], ty), live)
-       | _ :: _ ->
-           let final = List.fold_left (fun acc (_, _, l) ->
-             SM.merge (fun _ a b ->
-               match a, b with
-               | Some t, Some _ -> Some t
-               | _ -> None) acc l)
-             (let (_, _, l) = List.hd arm_data in l)
-             (List.tl arm_data)
-           in
-           let arms' = List.map (fun (pat, body, live_after) ->
-             let drops = SM.fold (fun k v acc ->
-               if SM.mem k final then acc else (k, v) :: acc)
-               live_after []
-             in
-             (pat, wrap_with_drops drops ty body)) arm_data
-           in
-           (T.TEMatch (scrut', scrut_ty, arms', ty), final))
+       | (_, _, first_live) :: rest ->
+           List.iteri (fun i (_, _, l) ->
+             if not (SM.equal (fun _ _ -> true) first_live l) then
+               raise (Type_error
+                 (Printf.sprintf
+                    "match arm #%d diverges from arm #1 in ownership: \
+                     arm #1 leaves [%s] live, arm #%d leaves [%s] live"
+                    (i + 2)
+                    (String.concat ", " (List.map fst (SM.bindings first_live)))
+                    (i + 2)
+                    (String.concat ", " (List.map fst (SM.bindings l))))))
+             rest;
+           let arms' = List.map (fun (p, b, _) -> (p, b)) arm_data in
+           (T.TEMatch (scrut', scrut_ty, arms', ty), first_live))
 
   | T.TERef (sub, ty) ->
       let (sub', live) = check_moves_expr env live false sub in
@@ -1673,6 +1667,7 @@ let builtin_option_decl : type_decl = {
 
 let check (prog : program) : T.program =
   meta_counter := 0;
+  drop_name_counter := 0;
   let (types, records, funcs, externs) = split_program prog in
   (* Reject any user attempt to redeclare reserved built-in names. *)
   List.iter (fun (td : type_decl) ->

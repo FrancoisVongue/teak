@@ -39,9 +39,9 @@ Array_int build_histogram(Array_int values, Array_int counters, int i) {
         (void)(0);
         tmp_10 = build_histogram(values, counters, (i + 1));
     } else {
-        Array_int values_1 = values;
+        Array_int _drop_1_1 = values;
         Array_int _let_result_9 = counters;
-        free(values_1.ptr);
+        free(_drop_1_1.ptr);
         tmp_10 = _let_result_9;
     }
     return tmp_10;
@@ -65,9 +65,9 @@ int find_max(Array_int counters, int i, int best) {
         int new_best_3 = tmp_4;
         tmp_6 = find_max(counters, (i + 1), new_best_3);
     } else {
-        Array_int counters_1 = counters;
+        Array_int _drop_2_1 = counters;
         int _let_result_5 = best;
-        free(counters_1.ptr);
+        free(_drop_2_1.ptr);
         tmp_6 = _let_result_5;
     }
     return tmp_6;
