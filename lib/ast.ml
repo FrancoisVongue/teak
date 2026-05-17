@@ -22,6 +22,7 @@ and ty =
   | TyVar  of string             (* rigid, declared in [T] of a fn/type decl *)
   | TyApp  of string * ty list   (* e.g. Option[int], Shape (= TyApp("Shape", [])) *)
   | TyFun  of ty list * ty       (* fn(args) -> ret *)
+  | TyPtr  of ty                 (* *T — raw C pointer, escape hatch for FFI *)
   | TyMeta of meta               (* unification variable, only inside the checker *)
 
 type pat =
@@ -61,6 +62,12 @@ type expr =
   | ESlice  of expr * expr * expr         (* slice(a, lo, hi) — sub-handle in same region *)
   | EToInt  of expr                       (* to_int(b) — widen byte to int *)
   | EToByte of expr                       (* to_byte(n) — truncate int to byte *)
+  | ECAlloc of ty * expr                  (* c_alloc[T](n) — malloc n*sizeof(T), returns *T *)
+  | ECFree  of expr                       (* c_free(p) — free raw pointer *)
+  | ENullPtr of ty                        (* null_ptr[T]() — typed NULL *)
+  | EIsNull of expr                       (* is_null(p) — NULL check *)
+  | EArrayData of expr                    (* array_data(a) — *T view of Array[T] bytes *)
+  | EDeref  of expr                       (* *p — pointer deref *)
 
 and record_init_elem =
   | RAssign of string * expr   (* field: value *)
@@ -119,6 +126,7 @@ let rec show_ty = function
       Printf.sprintf "fn(%s) -> %s"
         (String.concat ", " (List.map show_ty args))
         (show_ty ret)
+  | TyPtr t -> "*" ^ show_ty t
   | TyMeta { resolved = Some t; _ } -> show_ty t
   | TyMeta { id; resolved = None } -> Printf.sprintf "?%d" id
 
@@ -200,3 +208,10 @@ let rec show_expr = function
         (show_expr a) (show_expr lo) (show_expr hi)
   | EToInt e  -> Printf.sprintf "to_int(%s)"  (show_expr e)
   | EToByte e -> Printf.sprintf "to_byte(%s)" (show_expr e)
+  | ECAlloc (t, n) ->
+      Printf.sprintf "c_alloc[%s](%s)" (show_ty t) (show_expr n)
+  | ECFree p -> Printf.sprintf "c_free(%s)" (show_expr p)
+  | ENullPtr t -> Printf.sprintf "null_ptr[%s]()" (show_ty t)
+  | EIsNull p -> Printf.sprintf "is_null(%s)" (show_expr p)
+  | EArrayData a -> Printf.sprintf "array_data(%s)" (show_expr a)
+  | EDeref p -> Printf.sprintf "*%s" (show_expr p)

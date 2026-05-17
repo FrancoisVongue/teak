@@ -42,6 +42,10 @@ let rec parse_ty st =
   | TIntTy        -> TyInt
   | TBoolTy       -> TyBool
   | TByteTy       -> TyApp ("byte", [])
+  | TStar         ->
+      (* *T — raw C pointer. Prefix only; infix * is multiplication. *)
+      let inner = parse_ty st in
+      TyPtr inner
   | TFn           ->
       expect st TLParen;
       let args =
@@ -160,6 +164,12 @@ and parse_unary st =
       advance st;
       let inner = parse_unary st in
       EUnop (OpNeg, inner)
+  | TStar ->
+      (* *p — pointer deref. Prefix-only here; infix * is matched in
+         parse_mul, which only triggers after an operand has been parsed. *)
+      advance st;
+      let inner = parse_unary st in
+      EDeref inner
   | _ -> parse_postfix st
 
 and parse_postfix st =
@@ -239,6 +249,7 @@ and parse_atom st =
   | TIf | TMatch
   | TArray | TLen | TSlice
   | TToInt | TToByte
+  | TCAlloc | TCFree | TNullPtr | TIsNull | TArrayData
   | TRegion | TStackRegion | TAlignedRegion -> parse_atom_consume st
   | t -> raise (Parse_error
     (Printf.sprintf "expected expression, got %s" (Token.show t)))
@@ -327,6 +338,36 @@ and parse_atom_consume st =
       let e = parse_expr st in
       expect st TRParen;
       EToByte e
+  | TCAlloc ->
+      expect st TLBracket;
+      let t = parse_ty st in
+      expect st TRBracket;
+      expect st TLParen;
+      let n = parse_expr st in
+      expect st TRParen;
+      ECAlloc (t, n)
+  | TCFree ->
+      expect st TLParen;
+      let p = parse_expr st in
+      expect st TRParen;
+      ECFree p
+  | TNullPtr ->
+      expect st TLBracket;
+      let t = parse_ty st in
+      expect st TRBracket;
+      expect st TLParen;
+      expect st TRParen;
+      ENullPtr t
+  | TIsNull ->
+      expect st TLParen;
+      let p = parse_expr st in
+      expect st TRParen;
+      EIsNull p
+  | TArrayData ->
+      expect st TLParen;
+      let a = parse_expr st in
+      expect st TRParen;
+      EArrayData a
   | TStackRegion ->
       (* stack_region(N) — N must be an int literal (compile-time size).
          The block lives in the surrounding C function's frame; the

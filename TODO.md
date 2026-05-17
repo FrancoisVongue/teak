@@ -66,6 +66,7 @@ generic функцию, и внутри функции линейность не
 - ~~Own/Ref/take/unwrap/look/legacy ref/deref/:=/??/panic~~ — удалено.
 - ~~Cascade destructors~~ — невозможны по построению (linear только Region).
 - ~~Strings~~ — `Array[byte]` + статический region для литералов + `slice` + `to_int`/`to_byte`.
+- ~~Raw pointers `*T`~~ — `c_alloc`/`c_free`/`*p`/`null_ptr`/`is_null`/`array_data` для FFI.
 
 ---
 

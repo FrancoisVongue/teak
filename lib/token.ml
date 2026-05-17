@@ -26,6 +26,11 @@ type token =
   | TSlice        (* slice(a, lo, hi) — sub-handle into the same region *)
   | TToInt        (* to_int(b) — widen byte to int *)
   | TToByte       (* to_byte(n) — truncate int to byte *)
+  | TCAlloc       (* c_alloc[T](n) — malloc n*sizeof(T), returns *T *)
+  | TCFree        (* c_free(p) — free a raw pointer *)
+  | TNullPtr      (* null_ptr[T]() — typed NULL *)
+  | TIsNull       (* is_null(p) — NULL check *)
+  | TArrayData    (* array_data(a) — *T pointing at the bytes of Array[T] *)
   | TRegion       (* region(N) — heap arena, malloc'd block *)
   | TStackRegion  (* stack_region(N) — N literal, block on stack *)
   | TAlignedRegion (* aligned_region(N, A) — heap, A-byte aligned *)
@@ -87,6 +92,11 @@ let show = function
   | TSlice        -> "SLICE"
   | TToInt        -> "TO_INT"
   | TToByte       -> "TO_BYTE"
+  | TCAlloc       -> "C_ALLOC"
+  | TCFree        -> "C_FREE"
+  | TNullPtr      -> "NULL_PTR"
+  | TIsNull       -> "IS_NULL"
+  | TArrayData    -> "ARRAY_DATA"
   | TRegion       -> "REGION"
   | TStackRegion  -> "STACK_REGION"
   | TAlignedRegion -> "ALIGNED_REGION"

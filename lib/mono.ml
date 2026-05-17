@@ -27,6 +27,7 @@ let rec mangle_ty (t : ty) : string =
              @ ["to"; mangle_ty ret]
       in
       String.concat "_" parts
+  | TyPtr inner -> "ptr_" ^ mangle_ty inner
   | TyMeta _ -> failwith "mono: TyMeta after check"
 
 let mangle_name (name : string) (ts : ty list) : string =
@@ -110,6 +111,7 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         TyApp (mangle_name n args, [])
     | TyFun (args, ret) ->
         TyFun (List.map (rewrite_ty subst) args, rewrite_ty subst ret)
+    | TyPtr inner -> TyPtr (rewrite_ty subst inner)
     | TyMeta _ ->
         failwith "mono rewrite_ty: TyMeta after checking"
   in
@@ -207,6 +209,18 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         Check.T.TEToInt (rewrite_expr subst e)
     | Check.T.TEToByte e ->
         Check.T.TEToByte (rewrite_expr subst e)
+    | Check.T.TECAlloc (et, n, rt_) ->
+        Check.T.TECAlloc (rt et, rewrite_expr subst n, rt rt_)
+    | Check.T.TECFree p ->
+        Check.T.TECFree (rewrite_expr subst p)
+    | Check.T.TENullPtr t ->
+        Check.T.TENullPtr (rt t)
+    | Check.T.TEIsNull p ->
+        Check.T.TEIsNull (rewrite_expr subst p)
+    | Check.T.TEArrayData (a, t) ->
+        Check.T.TEArrayData (rewrite_expr subst a, rt t)
+    | Check.T.TEDeref (p, t) ->
+        Check.T.TEDeref (rewrite_expr subst p, rt t)
   in
 
   request_fn "main" [];

@@ -102,6 +102,7 @@ let rec collect_ty (t : ty) : unit =
         Hashtbl.add fn_types_seen m ();
         fn_types_order := (m, t) :: !fn_types_order
       end
+  | TyPtr inner -> collect_ty inner
   | TyMeta _ -> failwith "emit collect_ty: TyMeta"
 
 let rec collect_expr (e : Check.T.expr) : unit =
@@ -154,6 +155,12 @@ let rec collect_expr (e : Check.T.expr) : unit =
       collect_expr a; collect_expr lo; collect_expr hi; collect_ty t
   | Check.T.TEToInt e  -> collect_expr e
   | Check.T.TEToByte e -> collect_expr e
+  | Check.T.TECAlloc (et, n, t) -> collect_ty et; collect_expr n; collect_ty t
+  | Check.T.TECFree p -> collect_expr p
+  | Check.T.TENullPtr t -> collect_ty t
+  | Check.T.TEIsNull p -> collect_expr p
+  | Check.T.TEArrayData (a, t) -> collect_expr a; collect_ty t
+  | Check.T.TEDeref (p, t) -> collect_expr p; collect_ty t
 
 let collect_program (prog : Check.T.program) : unit =
   Hashtbl.clear fn_types_seen;
@@ -178,7 +185,7 @@ let collect_program (prog : Check.T.program) : unit =
 
 (* ---------- rendering C types ---------- *)
 
-let c_type (t : ty) : string =
+let rec c_type (t : ty) : string =
   match t with
   | TyInt -> "int"
   | TyBool -> "int"
@@ -187,6 +194,7 @@ let c_type (t : ty) : string =
   | TyApp ("Region", []) -> "Region"
   | TyApp (n, []) -> n
   | TyFun _ -> Mono.mangle_ty t
+  | TyPtr inner -> c_type inner ^ "*"
   | TyApp (n, _) ->
       failwith (Printf.sprintf "emit: %S still has type args" n)
   | TyVar n ->
@@ -307,6 +315,12 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
         TESlice (rn env a, rn env lo, rn env hi, t)
     | TEToInt e  -> TEToInt (rn env e)
     | TEToByte e -> TEToByte (rn env e)
+    | TECAlloc (et, n, t) -> TECAlloc (et, rn env n, t)
+    | TECFree p -> TECFree (rn env p)
+    | TENullPtr t -> TENullPtr t
+    | TEIsNull p -> TEIsNull (rn env p)
+    | TEArrayData (a, t) -> TEArrayData (rn env a, t)
+    | TEDeref (p, t) -> TEDeref (rn env p, t)
   in
   let initial_env = List.map (fun (p, _) -> (p, p)) f.params in
   { f with body = rn initial_env f.body }
@@ -344,6 +358,7 @@ let topo_sort_structs
     | TyApp (n, []) when Hashtbl.mem all_names n -> n :: acc
     | TyApp _ -> acc
     | TyFun _ -> acc   (* fn pointers don't transmit by-value deps *)
+    | TyPtr _ -> acc   (* raw pointers don't transmit by-value deps either *)
   in
   let deps_of name =
     match Hashtbl.find all_names name with
@@ -438,6 +453,12 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TESlice (_, _, _, t) -> t
   | Check.T.TEToInt _  -> TyInt
   | Check.T.TEToByte _ -> TyApp ("byte", [])
+  | Check.T.TECAlloc (_, _, t) -> t
+  | Check.T.TECFree _ -> TyInt
+  | Check.T.TENullPtr t -> t
+  | Check.T.TEIsNull _ -> TyBool
+  | Check.T.TEArrayData (_, t) -> t
+  | Check.T.TEDeref (_, t) -> t
 
 (* Release a Region's buffer (if it's heap-allocated), bump the
    generation, and push the slot back onto the free list. Stack
@@ -918,6 +939,57 @@ let rec emit_expr
       { stmts = cs.stmts;
         value = Printf.sprintf "((uint8_t)(%s))" cs.value }
 
+  | Check.T.TECAlloc (et, n_e, _result_ty) ->
+      let cn = emit_expr ctor_map n_e in
+      let elem_c = c_type et in
+      let value =
+        Printf.sprintf "((%s*)malloc((size_t)(%s) * sizeof(%s)))"
+          elem_c cn.value elem_c
+      in
+      { stmts = cn.stmts; value }
+
+  | Check.T.TECFree p_e ->
+      let cp = emit_expr ctor_map p_e in
+      (* Wrap in comma expression so result is int (placeholder for unit). *)
+      let value = Printf.sprintf "(free(%s), 0)" cp.value in
+      { stmts = cp.stmts; value }
+
+  | Check.T.TENullPtr t ->
+      { stmts = []; value = Printf.sprintf "((%s)NULL)" (c_type t) }
+
+  | Check.T.TEIsNull p_e ->
+      let cp = emit_expr ctor_map p_e in
+      { stmts = cp.stmts;
+        value = Printf.sprintf "((%s) == NULL)" cp.value }
+
+  | Check.T.TEArrayData (a_e, result_ty) ->
+      (* array_data(a) — produce a raw *T pointing at the first element
+         of the Array[T] in its region. Still gen-checks: passing
+         dangling bytes to C would crash. *)
+      let ca = emit_expr ctor_map a_e in
+      let a_var = fresh "_a" in
+      let arr_c = c_type (ty_of_expr a_e) in
+      let elem_c = match result_ty with
+        | TyPtr inner -> c_type inner
+        | _ -> failwith "emit TEArrayData: result not *T"
+      in
+      let res_var = fresh "_data" in
+      let stmts = ca.stmts @ [
+        Printf.sprintf "%s %s = %s;" arr_c a_var ca.value;
+        Printf.sprintf
+          "if (ORTO_REGIONS[%s.slot].gen != %s.expected_gen) abort();"
+          a_var a_var;
+        Printf.sprintf
+          "%s* %s = (%s*)(ORTO_REGIONS[%s.slot].buffer + %s.offset);"
+          elem_c res_var elem_c a_var a_var;
+      ] in
+      { stmts; value = res_var }
+
+  | Check.T.TEDeref (p_e, _) ->
+      let cp = emit_expr ctor_map p_e in
+      { stmts = cp.stmts;
+        value = Printf.sprintf "(*%s)" cp.value }
+
 (* Shared setup for a[i] and a[i] := v. Returns the array/index codes,
    fresh names, the array's C type, the abort-checks, and the C
    expression for the slot at index. *)
@@ -942,6 +1014,13 @@ and index_setup ctor_map arr_e idx_e elem_c =
           elem_c a_var a_var i_var
       in
       (ca, ci, a_var, i_var, arr_c, checks, slot)
+  | TyPtr _ ->
+      (* Raw pointer indexing — no gen, no bounds. The slot expression
+         doesn't use elem_c (the pointer type already carries it), but
+         we keep the parameter for symmetry with the Array branch. *)
+      let _ = elem_c in
+      let slot = Printf.sprintf "%s[%s]" a_var i_var in
+      (ca, ci, a_var, i_var, arr_c, [], slot)
   | t ->
       failwith (Printf.sprintf
         "emit: indexing on non-indexable type %s" (Ast.show_ty t))

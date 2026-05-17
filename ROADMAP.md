@@ -32,6 +32,14 @@
 - `to_int(b: byte) -> int`, `to_byte(n: int) -> byte` — явная конверсия.
 - Операции (concat, eq, find, parse, etc.) — программист пишет как обычные функции, принимающие Region. Появятся в stdlib когда модули.
 
+**Raw pointers `*T` (escape hatch для FFI):**
+- Тип `*T` — копируемый, без gen-check, без bounds-check.
+- `c_alloc[T](n) -> *T` — malloc(n*sizeof(T)).
+- `c_free(p)` — free; программист сам решает когда.
+- `*p` deref, `p[i]` индекс, `p[i] := v` запись.
+- `null_ptr[T]() -> *T`, `is_null(p) -> bool` — для NULL-returning C-API.
+- `array_data(a: Array[T]) -> *T` — отдать байты Array в libc/C-функцию.
+
 **Управление:**
 - Всё — выражения. `if`/`match`/`let` возвращают значения.
 - Dead-name tracking — use-after-move = compile error.
@@ -42,19 +50,7 @@
 
 ## → Дорога вперёд
 
-### 1. Raw pointers `*T` *(следующее — для C interop)*
-
-Escape hatch для интеграции с C-библиотеками:
-- `c_alloc(N)` → `*T`, выделяет через `malloc`.
-- `c_free(p)` — программист сам.
-- `*p` разыменование, `p[i]` индексирование.
-- Никаких проверок, никакого gen.
-
-Это **параллельный** путь к Region. Используется когда C-API требует владения указателем (или возвращает указатель который должен освободиться через `free`). Программист сознательно сходит с safe пути.
-
-Тип явно `Unsafe` или `Raw` чтобы было видно в сигнатурах: `fn glfw_init() -> *Window` бьёт сразу — это C boundary.
-
-### 2. Модули
+### 1. Модули *(следующее)*
 
 `module foo; use foo::bar;` — разделение программ на файлы. Открывает дорогу к stdlib.
 
@@ -64,7 +60,7 @@ Escape hatch для интеграции с C-библиотеками:
 - Не плодим cyclic-зависимости.
 - Маньглинг имён включает имя модуля.
 
-### 3. Stdlib
+### 2. Stdlib
 
 Когда модули появятся:
 - `std::gen_arena` — generational arena поверх `Array[Slot[T]]`. Game-style handle tables, resource pools, evicting caches (где базовый Region — bump-only и не освобождает per-entry).
@@ -74,7 +70,7 @@ Escape hatch для интеграции с C-библиотеками:
 
 Все — orto code, не compiler features.
 
-### 4. `try_at(a, i)` для defensive чтения
+### 3. `try_at(a, i)` для defensive чтения
 
 Дефолтный `a[i]` остаётся abort-on-dangling (быстрый, для обычных случаев где регион гарантированно жив). Добавим safe-вариант:
 - `try_at(a, i)` → `Option[T]`.

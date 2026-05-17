@@ -36,6 +36,11 @@ let lower_ident_or_keyword s =
   | "slice" -> TSlice
   | "to_int" -> TToInt
   | "to_byte" -> TToByte
+  | "c_alloc" -> TCAlloc
+  | "c_free"  -> TCFree
+  | "null_ptr" -> TNullPtr
+  | "is_null" -> TIsNull
+  | "array_data" -> TArrayData
   | "region" -> TRegion
   | "stack_region" -> TStackRegion
   | "aligned_region" -> TAlignedRegion
