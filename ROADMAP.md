@@ -67,7 +67,7 @@ Escape hatch для интеграции с C-библиотеками:
 ### 3. Stdlib
 
 Когда модули появятся:
-- `std::gen_arena` — generational arena поверх `Array[Slot[T]]`. Game-style handle tables, resource pools.
+- `std::gen_arena` — generational arena поверх `Array[Slot[T]]`. Game-style handle tables, resource pools, evicting caches (где базовый Region — bump-only и не освобождает per-entry).
 - `std::slab` — slab pool для homogeneous-size объектов.
 - `std::ring` — ring buffer / circular array для стримов.
 - `std::str` — операции над строками. Канонические: `bytes_copy(r, s)` (копирует Array[byte] в другой Region), `bytes_concat(r, [s...])` (склейка), `bytes_eq`, `bytes_find`, `parse_int`, `int_to_bytes(r, n)`, `starts_with`, `split`, etc.
