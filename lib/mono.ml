@@ -88,10 +88,6 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
          with Not_found ->
            failwith (Printf.sprintf
              "mono rewrite_ty: free type variable %S" n))
-    | TyApp ("Buf", [inner]) ->
-        TyApp ("Buf", [rewrite_ty subst inner])
-    | TyApp ("Buf", _) ->
-        failwith "mono rewrite_ty: Buf with wrong arity (should be unary)"
     | TyApp ("Array", [inner]) ->
         (* Array is structural — emit emits one wrapper+cell pair per
            distinct element type. *)
@@ -184,12 +180,13 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         Check.T.TEArrayLit (rewrite_expr subst r,
                             List.map (rewrite_expr subst) elems,
                             rt t)
-    | Check.T.TEBuf (n, v, t) ->
-        Check.T.TEBuf (rewrite_expr subst n, rewrite_expr subst v, rt t)
-    | Check.T.TEBufLit (elems, t) ->
-        Check.T.TEBufLit (List.map (rewrite_expr subst) elems, rt t)
     | Check.T.TERegion (n, t) ->
         Check.T.TERegion (rewrite_expr subst n, rt t)
+    | Check.T.TEStackRegion (n, t) ->
+        Check.T.TEStackRegion (rewrite_expr subst n, rt t)
+    | Check.T.TEAlignedRegion (n, a, t) ->
+        Check.T.TEAlignedRegion (rewrite_expr subst n,
+                                 rewrite_expr subst a, rt t)
     | Check.T.TEIndex (a, i, t) ->
         Check.T.TEIndex (rewrite_expr subst a, rewrite_expr subst i, rt t)
     | Check.T.TEAssignIdx (a, i, v, t) ->

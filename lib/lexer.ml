@@ -31,9 +31,10 @@ let lower_ident_or_keyword s =
   | "match" -> TMatch
   | "extern" -> TExtern
   | "array" -> TArray
-  | "buf"   -> TBuf
   | "len"   -> TLen
   | "region" -> TRegion
+  | "stack_region" -> TStackRegion
+  | "aligned_region" -> TAlignedRegion
   | "_"     -> TUnderscore
   | _       -> TIdent s
 

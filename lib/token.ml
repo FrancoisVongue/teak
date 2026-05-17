@@ -20,9 +20,10 @@ type token =
   | TStruct
   | TEnum
   | TArray        (* array — sized buffer allocated in a region *)
-  | TBuf          (* buf — raw stack-allocated array, compile-time size *)
   | TLen          (* len — array length *)
-  | TRegion       (* region — owned arena, frees its buffer at scope-exit *)
+  | TRegion       (* region(N) — heap arena, malloc'd block *)
+  | TStackRegion  (* stack_region(N) — N literal, block on stack *)
+  | TAlignedRegion (* aligned_region(N, A) — heap, A-byte aligned *)
   | TUnderscore   (* `_` as a standalone token (wildcard pattern) *)
   (* punctuation *)
   | TLParen
@@ -75,9 +76,10 @@ let show = function
   | TStruct       -> "STRUCT"
   | TEnum         -> "ENUM"
   | TArray        -> "ARRAY"
-  | TBuf          -> "BUF"
   | TLen          -> "LEN"
   | TRegion       -> "REGION"
+  | TStackRegion  -> "STACK_REGION"
+  | TAlignedRegion -> "ALIGNED_REGION"
   | TUnderscore   -> "_"
   | TLParen       -> "("
   | TRParen       -> ")"

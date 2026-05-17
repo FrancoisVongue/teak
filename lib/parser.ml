@@ -235,8 +235,8 @@ and parse_atom st =
   | TInt _ | TTrue | TFalse | TLParen
   | TIdent _ | TCtorIdent _
   | TIf | TMatch
-  | TArray | TBuf | TLen | TRegion
-  | TLBracket -> parse_atom_consume st
+  | TArray | TLen
+  | TRegion | TStackRegion | TAlignedRegion -> parse_atom_consume st
   | t -> raise (Parse_error
     (Printf.sprintf "expected expression, got %s" (Token.show t)))
 
@@ -304,34 +304,33 @@ and parse_atom_consume st =
       let e = parse_expr st in
       expect st TRParen;
       ELen e
-  | TBuf ->
-      (* buf(N, init) — stack array, N must be an int literal at parse time. *)
+  | TStackRegion ->
+      (* stack_region(N) — N must be an int literal (compile-time size).
+         The block lives in the surrounding C function's frame; the
+         slot still goes through the slab so gen-check still works. *)
       expect st TLParen;
       let n = parse_expr st in
       (match n with
        | EInt _ -> ()
        | _ -> raise (Parse_error
-           "buf(N, init): N must be an integer literal (compile-time size)"));
-      expect st TComma;
-      let v = parse_expr st in
+           "stack_region(N): N must be an integer literal"));
       expect st TRParen;
-      EBuf (n, v)
-  | TLBracket ->
-      (* `[v0, v1, ..., vN]` standalone — stack array literal. *)
-      let elems =
-        if peek st = TRBracket then []
-        else
-          let rec collect () =
-            let e = parse_expr st in
-            if peek st = TComma then begin
-              advance st;
-              if peek st = TRBracket then [e] else e :: collect ()
-            end else [e]
-          in
-          collect ()
-      in
-      expect st TRBracket;
-      EBufLit elems
+      EStackRegion n
+  | TAlignedRegion ->
+      (* aligned_region(N, A) — N is the size in bytes, A is the
+         alignment (must be an int literal and a power of two). *)
+      expect st TLParen;
+      let n = parse_expr st in
+      expect st TComma;
+      let a = parse_expr st in
+      (match a with
+       | EInt k when k > 0 && (k land (k - 1)) = 0 -> ()
+       | EInt _ -> raise (Parse_error
+           "aligned_region(_, A): A must be a positive power of two")
+       | _ -> raise (Parse_error
+           "aligned_region(_, A): A must be an integer literal"));
+      expect st TRParen;
+      EAlignedRegion (n, a)
   | _ -> assert false
 
 and parse_if_after_kw st =

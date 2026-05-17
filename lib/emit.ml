@@ -41,23 +41,17 @@ let reset_counter () = counter := 0
 let fn_types_seen : (string, unit) Hashtbl.t = Hashtbl.create 16
 let fn_types_order : (string * ty) list ref = ref []
 
-(* Handle instantiations: Array[T] and Buf[T]. Each entry remembers its
-   kind so emit_handle_forwards can produce the right typedef shape. *)
-type handle_kind = HArray | HBuf
-
-let handle_types_seen : (string, unit) Hashtbl.t = Hashtbl.create 8
-let handle_types_order : (handle_kind * string * ty) list ref = ref []
+(* Array[T] instantiations: emit one typedef per distinct element type. *)
+let array_types_seen : (string, unit) Hashtbl.t = Hashtbl.create 8
+let array_types_order : (string * ty) list ref = ref []
 
 let mangle_array_name (inner : ty) : string =
   "Array_" ^ Mono.mangle_ty inner
 
-let mangle_buf_name (inner : ty) : string =
-  "Buf_" ^ Mono.mangle_ty inner
-
-let register_handle (k : handle_kind) (mangled : string) (inner : ty) =
-  if not (Hashtbl.mem handle_types_seen mangled) then begin
-    Hashtbl.add handle_types_seen mangled ();
-    handle_types_order := (k, mangled, inner) :: !handle_types_order
+let register_array (mangled : string) (inner : ty) =
+  if not (Hashtbl.mem array_types_seen mangled) then begin
+    Hashtbl.add array_types_seen mangled ();
+    array_types_order := (mangled, inner) :: !array_types_order
   end
 
 let rec collect_ty (t : ty) : unit =
@@ -67,14 +61,9 @@ let rec collect_ty (t : ty) : unit =
       failwith (Printf.sprintf "emit collect_ty: TyVar %S after mono" n)
   | TyApp ("Array", [inner]) ->
       collect_ty inner;
-      register_handle HArray (mangle_array_name inner) inner
+      register_array (mangle_array_name inner) inner
   | TyApp ("Array", _) ->
       failwith "emit collect_ty: Array with wrong arity"
-  | TyApp ("Buf", [inner]) ->
-      collect_ty inner;
-      register_handle HBuf (mangle_buf_name inner) inner
-  | TyApp ("Buf", _) ->
-      failwith "emit collect_ty: Buf with wrong arity"
   | TyApp ("Region", []) -> ()
       (* Region runtime is emitted unconditionally at the top of the file. *)
   | TyApp ("Region", _) ->
@@ -124,10 +113,10 @@ let rec collect_expr (e : Check.T.expr) : unit =
       collect_expr r; collect_expr n; collect_expr v; collect_ty t
   | Check.T.TEArrayLit (r, elems, t) ->
       collect_expr r; List.iter collect_expr elems; collect_ty t
-  | Check.T.TEBuf (n, v, t) -> collect_expr n; collect_expr v; collect_ty t
-  | Check.T.TEBufLit (elems, t) ->
-      List.iter collect_expr elems; collect_ty t
   | Check.T.TERegion (n, t) -> collect_expr n; collect_ty t
+  | Check.T.TEStackRegion (n, t) -> collect_expr n; collect_ty t
+  | Check.T.TEAlignedRegion (n, a, t) ->
+      collect_expr n; collect_expr a; collect_ty t
   | Check.T.TEIndex (a, i, t) ->
       collect_expr a; collect_expr i; collect_ty t
   | Check.T.TEAssignIdx (a, i, v, t) ->
@@ -137,8 +126,8 @@ let rec collect_expr (e : Check.T.expr) : unit =
 let collect_program (prog : Check.T.program) : unit =
   Hashtbl.clear fn_types_seen;
   fn_types_order := [];
-  Hashtbl.clear handle_types_seen;
-  handle_types_order := [];
+  Hashtbl.clear array_types_seen;
+  array_types_order := [];
   List.iter (fun td ->
     List.iter (fun v ->
       List.iter collect_ty v.arg_tys) td.variants) prog.types;
@@ -159,7 +148,6 @@ let c_type (t : ty) : string =
   | TyInt -> "int"
   | TyBool -> "int"
   | TyApp ("Array", [inner]) -> mangle_array_name inner
-  | TyApp ("Buf", [inner]) -> mangle_buf_name inner
   | TyApp ("Region", []) -> "Region"
   | TyApp (n, []) -> n
   | TyFun _ -> Mono.mangle_ty t
@@ -183,20 +171,15 @@ let emit_fn_typedefs () : string list =
     | _ -> failwith "emit_fn_typedefs: non-fn type in list")
     !fn_types_order
 
-(* Emit one typedef per collected handle. Array_T carries a region
-   pointer + offset + gen for safe access. Buf_T carries a raw pointer
-   + length for direct stack-array access. *)
-let emit_handle_forwards () : string list =
-  List.rev_map (fun (k, mangled, inner) ->
-    match k with
-    | HArray ->
-        Printf.sprintf
-          "typedef struct { int slot; int offset; int len; int expected_gen; } %s;"
-          mangled
-    | HBuf ->
-        Printf.sprintf "typedef struct { %s* ptr; int len; } %s;"
-          (c_type inner) mangled)
-    !handle_types_order
+(* One typedef per distinct Array[T] element type. The handle carries
+   the region slot, byte-offset of this slice within the region's
+   block, length, and the slot's expected generation. *)
+let emit_array_forwards () : string list =
+  List.rev_map (fun (mangled, _inner) ->
+    Printf.sprintf
+      "typedef struct { int slot; int offset; int len; int expected_gen; } %s;"
+      mangled)
+    !array_types_order
 
 (* ---------- operator C-strings ---------- *)
 
@@ -276,9 +259,10 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
         TEArray (rn env r, rn env n, rn env v, t)
     | TEArrayLit (r, elems, t) ->
         TEArrayLit (rn env r, List.map (rn env) elems, t)
-    | TEBuf (n, v, t) -> TEBuf (rn env n, rn env v, t)
-    | TEBufLit (elems, t) -> TEBufLit (List.map (rn env) elems, t)
     | TERegion (n, t) -> TERegion (rn env n, t)
+    | TEStackRegion (n, t) -> TEStackRegion (rn env n, t)
+    | TEAlignedRegion (n, a, t) ->
+        TEAlignedRegion (rn env n, rn env a, t)
     | TEIndex (a, i, t) -> TEIndex (rn env a, rn env i, t)
     | TEAssignIdx (a, i, v, t) ->
         TEAssignIdx (rn env a, rn env i, rn env v, t)
@@ -404,27 +388,29 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TEMatch (_, _, _, t) -> t
   | Check.T.TEArray (_, _, _, t) -> t
   | Check.T.TEArrayLit (_, _, t) -> t
-  | Check.T.TEBuf (_, _, t) -> t
-  | Check.T.TEBufLit (_, t) -> t
   | Check.T.TERegion (_, t) -> t
+  | Check.T.TEStackRegion (_, t) -> t
+  | Check.T.TEAlignedRegion (_, _, t) -> t
   | Check.T.TEIndex (_, _, t) -> t
   | Check.T.TEAssignIdx (_, _, _, t) -> t
   | Check.T.TELen (_, t) -> t
 
-(* Release a Region's buffer, bump its generation, and push the slot
-   back onto the free list. Used by let-scope auto_drop and by
+(* Release a Region's buffer (if it's heap-allocated), bump the
+   generation, and push the slot back onto the free list. Stack
+   regions skip the free — their storage is reclaimed when the
+   surrounding C function returns. Used by let-scope auto_drop and
    function-end param drops. *)
 let drop_region_stmt (name : string) : string =
   Printf.sprintf
     "if (ORTO_REGIONS[%s.slot].gen == %s.expected_gen) { \
-     free(ORTO_REGIONS[%s.slot].buffer); \
+     if (!ORTO_REGIONS[%s.slot].is_stack) free(ORTO_REGIONS[%s.slot].buffer); \
      ORTO_REGIONS[%s.slot].buffer = NULL; \
      ORTO_REGIONS[%s.slot].buffer_size = 0; \
      ORTO_REGIONS[%s.slot].used = 0; \
      ORTO_REGIONS[%s.slot].gen++; \
      ORTO_REGIONS[%s.slot].next_free = ORTO_REGION_FREE_HEAD; \
      ORTO_REGION_FREE_HEAD = %s.slot; }"
-    name name name name name name name name name
+    name name name name name name name name name name
 
 let rec emit_expr
   (ctor_map : (string, type_decl * variant * int) Hashtbl.t)
@@ -711,54 +697,8 @@ let rec emit_expr
       in
       { stmts; value = arr_var }
 
-  | Check.T.TEBuf (size_e, init_e, result_ty) ->
-      (* buf(N, init): N must be int literal — emit C `T _stor[N]`
-         (no VLA) plus a fill loop, plus a {ptr, len} handle. *)
-      let n_literal = match size_e with
-        | Check.T.TEInt n -> n
-        | _ -> failwith "emit TEBuf: size not an int literal"
-      in
-      let cv = emit_expr ctor_map init_e in
-      let stor_var = fresh "_stor" in
-      let buf_var = fresh "_buf" in
-      let i_var = fresh "_i" in
-      let buf_c = c_type result_ty in
-      let elem_c = c_type (ty_of_expr init_e) in
-      let stmts = cv.stmts @ [
-        Printf.sprintf "%s %s[%d];" elem_c stor_var n_literal;
-        Printf.sprintf "for (int %s = 0; %s < %d; %s++) %s[%s] = %s;"
-          i_var i_var n_literal i_var stor_var i_var cv.value;
-        Printf.sprintf "%s %s = ((%s){ .ptr = %s, .len = %d });"
-          buf_c buf_var buf_c stor_var n_literal;
-      ] in
-      { stmts; value = buf_var }
-
-  | Check.T.TEBufLit (elems, result_ty) ->
-      (* [v0, ..., vN-1]: C array initializer + handle. *)
-      let elem_codes = List.map (emit_expr ctor_map) elems in
-      let stor_var = fresh "_stor" in
-      let buf_var = fresh "_buf" in
-      let buf_c = c_type result_ty in
-      let elem_ty = match result_ty with
-        | TyApp ("Buf", [inner]) -> inner
-        | _ -> failwith "emit TEBufLit: result not Buf[_]"
-      in
-      let elem_c = c_type elem_ty in
-      let n = List.length elems in
-      let vals = String.concat ", "
-        (List.map (fun c -> c.value) elem_codes) in
-      let stmts = List.concat_map (fun c -> c.stmts) elem_codes @ [
-        Printf.sprintf "%s %s[%d] = { %s };" elem_c stor_var n vals;
-        Printf.sprintf "%s %s = ((%s){ .ptr = %s, .len = %d });"
-          buf_c buf_var buf_c stor_var n;
-      ] in
-      { stmts; value = buf_var }
-
   | Check.T.TERegion (size_e, _) ->
-      (* Take the next free slot from the slab, allocate its buffer,
-         and return {slot, gen}. Slot lookup is O(1); the slot stays
-         live forever, but its identity (gen) flips on each reuse so
-         dangling Array handles get caught on access. *)
+      (* Take a slot from the slab, malloc its buffer. *)
       let cn = emit_expr ctor_map size_e in
       let n_var = fresh "_n" in
       let slot_var = fresh "_slot" in
@@ -777,6 +717,69 @@ let rec emit_expr
           slot_var n_var;
         Printf.sprintf "ORTO_REGIONS[%s].used = 0;" slot_var;
         Printf.sprintf "ORTO_REGIONS[%s].next_free = -1;" slot_var;
+        Printf.sprintf "ORTO_REGIONS[%s].is_stack = 0;" slot_var;
+        Printf.sprintf
+          "Region %s = ((Region){ .slot = %s, .expected_gen = ORTO_REGIONS[%s].gen });"
+          r_var slot_var slot_var;
+      ] in
+      { stmts; value = r_var }
+
+  | Check.T.TEStackRegion (size_e, _) ->
+      (* Allocate a local C array of N bytes (N is a literal) and wire
+         it into a slab slot. is_stack=1 so drop skips free. *)
+      let n_literal = match size_e with
+        | Check.T.TEInt n -> n
+        | _ -> failwith "emit TEStackRegion: size not an int literal"
+      in
+      let stor_var = fresh "_stack_buf" in
+      let slot_var = fresh "_slot" in
+      let r_var = fresh "_reg" in
+      let stmts = [
+        Printf.sprintf "char %s[%d];" stor_var n_literal;
+        Printf.sprintf "if (ORTO_REGION_FREE_HEAD < 0) abort();";
+        Printf.sprintf "int %s = ORTO_REGION_FREE_HEAD;" slot_var;
+        Printf.sprintf
+          "ORTO_REGION_FREE_HEAD = ORTO_REGIONS[%s].next_free;" slot_var;
+        Printf.sprintf "ORTO_REGIONS[%s].buffer = %s;" slot_var stor_var;
+        Printf.sprintf "ORTO_REGIONS[%s].buffer_size = %d;"
+          slot_var n_literal;
+        Printf.sprintf "ORTO_REGIONS[%s].used = 0;" slot_var;
+        Printf.sprintf "ORTO_REGIONS[%s].next_free = -1;" slot_var;
+        Printf.sprintf "ORTO_REGIONS[%s].is_stack = 1;" slot_var;
+        Printf.sprintf
+          "Region %s = ((Region){ .slot = %s, .expected_gen = ORTO_REGIONS[%s].gen });"
+          r_var slot_var slot_var;
+      ] in
+      { stmts; value = r_var }
+
+  | Check.T.TEAlignedRegion (size_e, align_e, _) ->
+      (* posix_memalign for the buffer; same slab dance otherwise. *)
+      let cn = emit_expr ctor_map size_e in
+      let ca = emit_expr ctor_map align_e in
+      let n_var = fresh "_n" in
+      let a_var = fresh "_a" in
+      let slot_var = fresh "_slot" in
+      let buf_var = fresh "_buf" in
+      let r_var = fresh "_reg" in
+      let stmts = cn.stmts @ ca.stmts @ [
+        Printf.sprintf "int %s = %s;" n_var cn.value;
+        Printf.sprintf "if (%s < 0) abort();" n_var;
+        Printf.sprintf "int %s = %s;" a_var ca.value;
+        Printf.sprintf "if (ORTO_REGION_FREE_HEAD < 0) abort();";
+        Printf.sprintf "int %s = ORTO_REGION_FREE_HEAD;" slot_var;
+        Printf.sprintf
+          "ORTO_REGION_FREE_HEAD = ORTO_REGIONS[%s].next_free;" slot_var;
+        Printf.sprintf "void* %s = NULL;" buf_var;
+        Printf.sprintf
+          "if (posix_memalign(&%s, (size_t)%s, (size_t)%s) != 0) abort();"
+          buf_var a_var n_var;
+        Printf.sprintf "ORTO_REGIONS[%s].buffer = (char*)%s;"
+          slot_var buf_var;
+        Printf.sprintf "ORTO_REGIONS[%s].buffer_size = (size_t)%s;"
+          slot_var n_var;
+        Printf.sprintf "ORTO_REGIONS[%s].used = 0;" slot_var;
+        Printf.sprintf "ORTO_REGIONS[%s].next_free = -1;" slot_var;
+        Printf.sprintf "ORTO_REGIONS[%s].is_stack = 0;" slot_var;
         Printf.sprintf
           "Region %s = ((Region){ .slot = %s, .expected_gen = ORTO_REGIONS[%s].gen });"
           r_var slot_var slot_var;
@@ -819,8 +822,8 @@ let rec emit_expr
       { stmts = ca.stmts; value }
 
 (* Shared setup for a[i] and a[i] := v. Returns the array/index codes,
-   fresh names, the array's C type, the abort-checks (empty for Buf),
-   and the C expression for the slot at index. *)
+   fresh names, the array's C type, the abort-checks, and the C
+   expression for the slot at index. *)
 and index_setup ctor_map arr_e idx_e elem_c =
   let ca = emit_expr ctor_map arr_e in
   let ci = emit_expr ctor_map idx_e in
@@ -828,10 +831,6 @@ and index_setup ctor_map arr_e idx_e elem_c =
   let i_var = fresh "_i" in
   let arr_c = c_type (ty_of_expr arr_e) in
   match ty_of_expr arr_e with
-  | TyApp ("Buf", _) ->
-      (* Raw buf — no gen check, no bounds check. *)
-      let slot = Printf.sprintf "%s.ptr[%s]" a_var i_var in
-      (ca, ci, a_var, i_var, arr_c, [], slot)
   | TyApp ("Array", _) ->
       let checks = [
         Printf.sprintf
@@ -910,7 +909,7 @@ let emit (prog : Check.T.program) : string =
   let ctor_map = build_ctor_map prog.types in
   let adt_forwards = List.map emit_adt_forward prog.types in
   let rec_forwards = List.map emit_record_forward prog.records in
-  let handle_forwards = emit_handle_forwards () in
+  let array_forwards = emit_array_forwards () in
   let fn_typedefs  = emit_fn_typedefs () in
   let ordered_structs = topo_sort_structs prog.types prog.records in
   let struct_defs = List.map (function
@@ -935,6 +934,7 @@ let emit (prog : Check.T.program) : string =
      \    size_t buffer_size;\n\
      \    size_t used;\n\
      \    int next_free;   /* -1 if in use, else next free slot id */\n\
+     \    int is_stack;    /* 1 if buffer is stack memory (do not free) */\n\
      };\n\
      static struct Region_slot ORTO_REGIONS[ORTO_REGION_SLOTS];\n\
      static int ORTO_REGION_FREE_HEAD = -1;\n\
@@ -953,7 +953,7 @@ let emit (prog : Check.T.program) : string =
     ([header]
      @ adt_forwards
      @ rec_forwards
-     @ handle_forwards
+     @ array_forwards
      @ fn_typedefs
      @ struct_defs
      @ extern_decls
