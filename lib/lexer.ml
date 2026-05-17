@@ -25,6 +25,7 @@ let lower_ident_or_keyword s =
   | "false" -> TFalse
   | "int"   -> TIntTy
   | "bool"  -> TBoolTy
+  | "byte"  -> TByteTy
   | "type"  -> TType
   | "struct" -> TStruct
   | "enum"  -> TEnum
@@ -32,6 +33,9 @@ let lower_ident_or_keyword s =
   | "extern" -> TExtern
   | "array" -> TArray
   | "len"   -> TLen
+  | "slice" -> TSlice
+  | "to_int" -> TToInt
+  | "to_byte" -> TToByte
   | "region" -> TRegion
   | "stack_region" -> TStackRegion
   | "aligned_region" -> TAlignedRegion
@@ -119,6 +123,39 @@ let lex (src : string) : token list =
         end else begin
           push TDot; incr i
         end
+
+    | '"' ->
+        incr i;
+        Buffer.clear buf;
+        let closed = ref false in
+        while !i < n && not !closed do
+          let ch = src.[!i] in
+          if ch = '"' then begin
+            incr i; closed := true
+          end else if ch = '\\' then begin
+            if !i + 1 >= n then
+              raise (Lex_error ("unterminated escape in string literal", !i));
+            (match src.[!i + 1] with
+             | 'n'  -> Buffer.add_char buf '\n'
+             | 't'  -> Buffer.add_char buf '\t'
+             | 'r'  -> Buffer.add_char buf '\r'
+             | '0'  -> Buffer.add_char buf '\000'
+             | '\\' -> Buffer.add_char buf '\\'
+             | '"'  -> Buffer.add_char buf '"'
+             | '\'' -> Buffer.add_char buf '\''
+             | c    -> raise (Lex_error
+                 (Printf.sprintf "unknown escape \\%c in string literal" c, !i)));
+            i := !i + 2
+          end else if ch = '\n' then
+            raise (Lex_error ("newline in string literal — use \\n", !i))
+          else begin
+            Buffer.add_char buf ch;
+            incr i
+          end
+        done;
+        if not !closed then
+          raise (Lex_error ("unterminated string literal", !i));
+        push (TStringLit (Buffer.contents buf))
 
     | c when is_digit c ->
         Buffer.clear buf;

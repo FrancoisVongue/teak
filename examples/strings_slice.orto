@@ -1,0 +1,22 @@
+// Slice into the static region: substring is a new handle, same bytes.
+// Sub-handle dies with the source region (here: static, so it lives
+// forever). Exit code = first byte of the substring "world" = 'w' = 119.
+
+extern fn putchar(c: int) -> int
+
+fn print_loop(s: Array[byte], i: int) -> int {
+    if i >= len(s) {
+        0
+    } else {
+        putchar(to_int(s[i]));
+        print_loop(s, i + 1)
+    }
+}
+
+fn main() -> int {
+    let greeting = "Hello, world!\n";
+    let sub      = slice(greeting, 7, 12);   // "world"
+    print_loop(sub, 0);
+    putchar(10);
+    to_int(sub[0])   // 'w' = 119
+}

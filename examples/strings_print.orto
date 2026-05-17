@@ -1,0 +1,25 @@
+// Hello world via putchar + recursion + byte indexing.
+//
+// Demonstrates the round trip: literal "..." → Array[byte] in static
+// region → s[i] yields byte → to_int(b) widens to int → putchar.
+// Exit code 0.
+
+extern fn putchar(c: int) -> int
+
+fn print_loop(s: Array[byte], i: int) -> int {
+    if i >= len(s) {
+        0
+    } else {
+        putchar(to_int(s[i]));
+        print_loop(s, i + 1)
+    }
+}
+
+fn print(s: Array[byte]) -> int {
+    print_loop(s, 0)
+}
+
+fn main() -> int {
+    print("Hello, world!\n");
+    0
+}

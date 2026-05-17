@@ -40,6 +40,7 @@ type expr =
   | EInt    of int
   | EBool   of bool
   | EVar    of string
+  | EStringLit of string                  (* "..." — byte literal in static region *)
   | EBinop  of binop * expr * expr
   | EUnop   of unop  * expr
   | ECall   of expr * expr list
@@ -57,6 +58,9 @@ type expr =
   | EIndex  of expr * expr                (* a[i] — read element *)
   | EAssignIdx of expr * expr * expr      (* a[i] := v — write element, returns int *)
   | ELen    of expr                       (* len(a) — array length *)
+  | ESlice  of expr * expr * expr         (* slice(a, lo, hi) — sub-handle in same region *)
+  | EToInt  of expr                       (* to_int(b) — widen byte to int *)
+  | EToByte of expr                       (* to_byte(n) — truncate int to byte *)
 
 and record_init_elem =
   | RAssign of string * expr   (* field: value *)
@@ -141,6 +145,7 @@ let rec show_expr = function
   | EBool true      -> "true"
   | EBool false     -> "false"
   | EVar x          -> x
+  | EStringLit s    -> Printf.sprintf "%S" s
   | EBinop (op, a, b) ->
       Printf.sprintf "(%s %s %s)"
         (show_expr a) (show_binop op) (show_expr b)
@@ -190,3 +195,8 @@ let rec show_expr = function
   | EAssignIdx (a, i, v) ->
       Printf.sprintf "(%s[%s] := %s)" (show_expr a) (show_expr i) (show_expr v)
   | ELen e -> Printf.sprintf "len(%s)" (show_expr e)
+  | ESlice (a, lo, hi) ->
+      Printf.sprintf "slice(%s, %s, %s)"
+        (show_expr a) (show_expr lo) (show_expr hi)
+  | EToInt e  -> Printf.sprintf "to_int(%s)"  (show_expr e)
+  | EToByte e -> Printf.sprintf "to_byte(%s)" (show_expr e)

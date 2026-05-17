@@ -5,6 +5,7 @@ type token =
   | TInt of int
   | TIdent of string
   | TCtorIdent of string
+  | TStringLit of string   (* "..." — byte string literal *)
   (* keywords *)
   | TFn
   | TLet
@@ -14,6 +15,7 @@ type token =
   | TFalse
   | TIntTy
   | TBoolTy
+  | TByteTy       (* byte — 1-byte unsigned primitive *)
   | TType
   | TMatch
   | TExtern
@@ -21,6 +23,9 @@ type token =
   | TEnum
   | TArray        (* array — sized buffer allocated in a region *)
   | TLen          (* len — array length *)
+  | TSlice        (* slice(a, lo, hi) — sub-handle into the same region *)
+  | TToInt        (* to_int(b) — widen byte to int *)
+  | TToByte       (* to_byte(n) — truncate int to byte *)
   | TRegion       (* region(N) — heap arena, malloc'd block *)
   | TStackRegion  (* stack_region(N) — N literal, block on stack *)
   | TAlignedRegion (* aligned_region(N, A) — heap, A-byte aligned *)
@@ -62,6 +67,7 @@ let show = function
   | TInt n        -> Printf.sprintf "INT(%d)" n
   | TIdent s      -> Printf.sprintf "IDENT(%s)" s
   | TCtorIdent s  -> Printf.sprintf "CTOR(%s)" s
+  | TStringLit s  -> Printf.sprintf "STR(%S)" s
   | TFn           -> "FN"
   | TLet          -> "LET"
   | TIf           -> "IF"
@@ -70,6 +76,7 @@ let show = function
   | TFalse        -> "FALSE"
   | TIntTy        -> "INT_TY"
   | TBoolTy       -> "BOOL_TY"
+  | TByteTy       -> "BYTE_TY"
   | TType         -> "TYPE"
   | TMatch        -> "MATCH"
   | TExtern       -> "EXTERN"
@@ -77,6 +84,9 @@ let show = function
   | TEnum         -> "ENUM"
   | TArray        -> "ARRAY"
   | TLen          -> "LEN"
+  | TSlice        -> "SLICE"
+  | TToInt        -> "TO_INT"
+  | TToByte       -> "TO_BYTE"
   | TRegion       -> "REGION"
   | TStackRegion  -> "STACK_REGION"
   | TAlignedRegion -> "ALIGNED_REGION"

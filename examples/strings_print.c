@@ -20,8 +20,8 @@ struct Region_slot {
 static struct Region_slot ORTO_REGIONS[ORTO_REGION_SLOTS];
 static int ORTO_REGION_FREE_HEAD = -1;
 
-static const uint8_t ORTO_STATIC_BYTES[1] = { 0x00 };
-#define ORTO_STATIC_BYTES_LEN 0
+static const uint8_t ORTO_STATIC_BYTES[14] = { 0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x2c, 0x20, 0x77, 0x6f, 0x72, 0x6c, 0x64, 0x21, 0x0a };
+#define ORTO_STATIC_BYTES_LEN 14
 
 static void orto_init_regions(void) __attribute__((constructor));
 static void orto_init_regions(void) {
@@ -40,71 +40,43 @@ static void orto_init_regions(void) {
 }
 typedef struct { int slot; int expected_gen; } Region;
 
+typedef struct { int slot; int offset; int len; int expected_gen; } Array_byte;
+
 typedef int (*fn_int_to_int)(int);
 
-typedef int (*fn_int_to_bool)(int);
+typedef int (*fn_Array_byte_int_to_int)(Array_byte, int);
 
-typedef int (*fn_fn_int_to_int_int_to_int)(fn_int_to_int, int);
+typedef int (*fn_Array_byte_to_int)(Array_byte);
 
-typedef int (*fn_fn_int_to_bool_int_to_bool)(fn_int_to_bool, int);
+extern int putchar(int c);
 
-int twice(fn_int_to_int f, int x);
+int print_loop(Array_byte s, int i);
 
-int inc(int x);
-
-int dbl(int x);
-
-int is_even(int x);
-
-int apply_int_int(fn_int_to_int f, int x);
-
-int apply_int_bool(fn_int_to_bool f, int x);
+int print(Array_byte s);
 
 int main(void);
 
-int add5(int x);
-
-int twice(fn_int_to_int f, int x) {
-    return f(f(x));
+int print_loop(Array_byte s, int i) {
+    int tmp_4;
+    if ((i >= s.len)) {
+        tmp_4 = 0;
+    } else {
+        Array_byte _a_1 = s;
+        int _i_2 = i;
+        if (ORTO_REGIONS[_a_1.slot].gen != _a_1.expected_gen) abort();
+        if (_i_2 < 0 || _i_2 >= _a_1.len) abort();
+        uint8_t _idx_3 = ((uint8_t*)(ORTO_REGIONS[_a_1.slot].buffer + _a_1.offset))[_i_2];
+        (void)(putchar(((int)(_idx_3))));
+        tmp_4 = print_loop(s, (i + 1));
+    }
+    return tmp_4;
 }
 
-int inc(int x) {
-    return (x + 1);
-}
-
-int dbl(int x) {
-    return (x * 2);
-}
-
-int is_even(int x) {
-    return ((x % 2) == 0);
-}
-
-int apply_int_int(fn_int_to_int f, int x) {
-    return f(x);
-}
-
-int apply_int_bool(fn_int_to_bool f, int x) {
-    return f(x);
+int print(Array_byte s) {
+    return print_loop(s, 0);
 }
 
 int main(void) {
-    int a_1 = twice(inc, 10);
-    int b_2 = twice(dbl, 3);
-    int c_3 = apply_int_int(add5, 20);
-    int d_bool_4 = apply_int_bool(is_even, 6);
-    int tmp_1;
-    if (d_bool_4) {
-        tmp_1 = 100;
-    } else {
-        tmp_1 = 0;
-    }
-    int d_5 = tmp_1;
-    fn_int_to_int f_6 = inc;
-    int e_7 = f_6(f_6(f_6(5)));
-    return ((((a_1 + b_2) + c_3) + d_5) + e_7);
-}
-
-int add5(int x) {
-    return (x + 5);
+    (void)(print(((Array_byte){ .slot = 0, .offset = 0, .len = 14, .expected_gen = 1 })));
+    return 0;
 }

@@ -41,6 +41,7 @@ let rec parse_ty st =
   match eat st with
   | TIntTy        -> TyInt
   | TBoolTy       -> TyBool
+  | TByteTy       -> TyApp ("byte", [])
   | TFn           ->
       expect st TLParen;
       let args =
@@ -234,8 +235,10 @@ and parse_atom st =
   match peek st with
   | TInt _ | TTrue | TFalse | TLParen
   | TIdent _ | TCtorIdent _
+  | TStringLit _
   | TIf | TMatch
-  | TArray | TLen
+  | TArray | TLen | TSlice
+  | TToInt | TToByte
   | TRegion | TStackRegion | TAlignedRegion -> parse_atom_consume st
   | t -> raise (Parse_error
     (Printf.sprintf "expected expression, got %s" (Token.show t)))
@@ -245,6 +248,7 @@ and parse_atom_consume st =
   | TInt n      -> EInt n
   | TTrue       -> EBool true
   | TFalse      -> EBool false
+  | TStringLit s -> EStringLit s
   | TLParen     ->
       let e = parse_expr st in
       expect st TRParen;
@@ -304,6 +308,25 @@ and parse_atom_consume st =
       let e = parse_expr st in
       expect st TRParen;
       ELen e
+  | TSlice ->
+      expect st TLParen;
+      let a = parse_expr st in
+      expect st TComma;
+      let lo = parse_expr st in
+      expect st TComma;
+      let hi = parse_expr st in
+      expect st TRParen;
+      ESlice (a, lo, hi)
+  | TToInt ->
+      expect st TLParen;
+      let e = parse_expr st in
+      expect st TRParen;
+      EToInt e
+  | TToByte ->
+      expect st TLParen;
+      let e = parse_expr st in
+      expect st TRParen;
+      EToByte e
   | TStackRegion ->
       (* stack_region(N) — N must be an int literal (compile-time size).
          The block lives in the surrounding C function's frame; the

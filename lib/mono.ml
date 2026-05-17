@@ -99,6 +99,10 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         TyApp ("Region", [])
     | TyApp ("Region", _) ->
         failwith "mono rewrite_ty: Region takes no type arguments"
+    | TyApp ("byte", []) ->
+        TyApp ("byte", [])
+    | TyApp ("byte", _) ->
+        failwith "mono rewrite_ty: byte takes no type arguments"
     | TyApp (n, args) ->
         let args = List.map (rewrite_ty subst) args in
         if is_record_name n then request_rec n args
@@ -114,7 +118,7 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
     (e : Check.T.expr) : Check.T.expr =
     let rt = rewrite_ty subst in
     match e with
-    | Check.T.TEInt _ | Check.T.TEBool _ -> e
+    | Check.T.TEInt _ | Check.T.TEBool _ | Check.T.TEStringLit _ -> e
     | Check.T.TEVar (x, t) -> Check.T.TEVar (x, rt t)
 
     | Check.T.TEFnRef (name, ts, fn_ty) ->
@@ -195,6 +199,14 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
                              rewrite_expr subst v, rt t)
     | Check.T.TELen (e, t) ->
         Check.T.TELen (rewrite_expr subst e, rt t)
+    | Check.T.TESlice (a, lo, hi, t) ->
+        Check.T.TESlice (rewrite_expr subst a,
+                         rewrite_expr subst lo,
+                         rewrite_expr subst hi, rt t)
+    | Check.T.TEToInt e ->
+        Check.T.TEToInt (rewrite_expr subst e)
+    | Check.T.TEToByte e ->
+        Check.T.TEToByte (rewrite_expr subst e)
   in
 
   request_fn "main" [];

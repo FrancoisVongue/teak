@@ -15,14 +15,22 @@
 - Один линейный примитив — `Region`.
 - Три способа создать: `region(N)` (heap), `stack_region(N)` (стек, N литерал), `aligned_region(N, A)` (posix_memalign, A литерал power-of-2).
 - `Array[T]` — копируемая ручка в Region. Gen-check + bounds-check на доступ.
+- `slice(a, lo, hi)` — sub-handle в тот же Region, без копирования.
 - Slab allocator под капотом — никаких leak'ов, slots переиспользуются.
 
 **Типы:**
-- `int`, `bool`, `struct`, `enum`, `fn(...) -> ...`.
+- `int`, `bool`, `byte`, `struct`, `enum`, `fn(...) -> ...`.
 - Generics с параметрами `[T, U, ...]`.
 - Параметрический полиморфизм, monomorphization.
 - Запрет линейных типов в data position (поле, вариант, type-arg).
 - Запрет линейных типов в позиции generic параметра (Region не пройдёт через `[T]`).
+
+**Строки:**
+- `Array[byte]` — единственный тип строки. Никаких String/&str/CString/Cow.
+- Литералы `"hello"` живут в статическом регионе (slot 0, never freed). Дедуплицируются.
+- Escape sequences: `\n \t \r \0 \\ \" \'`.
+- `to_int(b: byte) -> int`, `to_byte(n: int) -> byte` — явная конверсия.
+- Операции (concat, eq, find, parse, etc.) — программист пишет как обычные функции, принимающие Region. Появятся в stdlib когда модули.
 
 **Управление:**
 - Всё — выражения. `if`/`match`/`let` возвращают значения.
@@ -34,15 +42,7 @@
 
 ## → Дорога вперёд
 
-### 1. Strings *(следующее)*
-
-Текстовые данные. Варианты:
-- `Array[byte]` плюс syntax sugar для строковых литералов (`"hello"` → массив байт в регионе).
-- Или специальный builtin тип `String` поверх Array.
-
-Скорее всего первое — переиспользует Array machinery, не добавляет новый примитив. Литералы дают inline для коротких строк, длинные — программист сам кладёт в нужный регион.
-
-### 2. Raw pointers `*T` *(для C interop)*
+### 1. Raw pointers `*T` *(следующее — для C interop)*
 
 Escape hatch для интеграции с C-библиотеками:
 - `c_alloc(N)` → `*T`, выделяет через `malloc`.
@@ -54,7 +54,7 @@ Escape hatch для интеграции с C-библиотеками:
 
 Тип явно `Unsafe` или `Raw` чтобы было видно в сигнатурах: `fn glfw_init() -> *Window` бьёт сразу — это C boundary.
 
-### 3. Модули
+### 2. Модули
 
 `module foo; use foo::bar;` — разделение программ на файлы. Открывает дорогу к stdlib.
 
@@ -64,17 +64,17 @@ Escape hatch для интеграции с C-библиотеками:
 - Не плодим cyclic-зависимости.
 - Маньглинг имён включает имя модуля.
 
-### 4. Stdlib
+### 3. Stdlib
 
 Когда модули появятся:
 - `std::gen_arena` — generational arena поверх `Array[Slot[T]]`. Game-style handle tables, resource pools.
 - `std::slab` — slab pool для homogeneous-size объектов.
 - `std::ring` — ring buffer / circular array для стримов.
-- `std::str` — операции над строками (concat, split, parse_int, etc.).
+- `std::str` — операции над строками. Канонические: `bytes_copy(r, s)` (копирует Array[byte] в другой Region), `bytes_concat(r, [s...])` (склейка), `bytes_eq`, `bytes_find`, `parse_int`, `int_to_bytes(r, n)`, `starts_with`, `split`, etc.
 
 Все — orto code, не compiler features.
 
-### 5. `try_at(a, i)` для defensive чтения
+### 4. `try_at(a, i)` для defensive чтения
 
 Дефолтный `a[i]` остаётся abort-on-dangling (быстрый, для обычных случаев где регион гарантированно жив). Добавим safe-вариант:
 - `try_at(a, i)` → `Option[T]`.

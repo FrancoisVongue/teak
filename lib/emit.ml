@@ -45,6 +45,25 @@ let fn_types_order : (string * ty) list ref = ref []
 let array_types_seen : (string, unit) Hashtbl.t = Hashtbl.create 8
 let array_types_order : (string * ty) list ref = ref []
 
+(* String literal pool. Every "..." in the program is deduplicated and
+   assigned a byte-offset into one shared static buffer. The buffer
+   sits at region slot 0 (reserved at startup, never freed). Each
+   literal emits to an Array[byte] handle with .slot=0, the offset,
+   length, and the static gen=1. *)
+let string_pool : (string, int) Hashtbl.t = Hashtbl.create 16
+let string_pool_order : (string * int) list ref = ref []
+let string_pool_size = ref 0
+
+let register_string (s : string) : int =
+  match Hashtbl.find_opt string_pool s with
+  | Some off -> off
+  | None ->
+      let off = !string_pool_size in
+      Hashtbl.replace string_pool s off;
+      string_pool_order := (s, off) :: !string_pool_order;
+      string_pool_size := off + String.length s;
+      off
+
 let mangle_array_name (inner : ty) : string =
   "Array_" ^ Mono.mangle_ty inner
 
@@ -68,6 +87,10 @@ let rec collect_ty (t : ty) : unit =
       (* Region runtime is emitted unconditionally at the top of the file. *)
   | TyApp ("Region", _) ->
       failwith "emit collect_ty: Region takes no type arguments"
+  | TyApp ("byte", []) -> ()
+      (* byte is a primitive; maps directly to uint8_t in C. *)
+  | TyApp ("byte", _) ->
+      failwith "emit collect_ty: byte takes no type arguments"
   | TyApp (_, []) -> ()
   | TyApp (n, _) ->
       failwith (Printf.sprintf "emit collect_ty: %S still has args" n)
@@ -84,6 +107,11 @@ let rec collect_ty (t : ty) : unit =
 let rec collect_expr (e : Check.T.expr) : unit =
   match e with
   | Check.T.TEInt _ | Check.T.TEBool _ -> ()
+  | Check.T.TEStringLit s ->
+      let _ = register_string s in
+      (* String literal materialises as an Array[byte] handle — make
+         sure the Array_byte typedef is emitted. *)
+      collect_ty (TyApp ("Array", [TyApp ("byte", [])]))
   | Check.T.TEVar (_, t) -> collect_ty t
   | Check.T.TEFnRef (_, _, t) -> collect_ty t
   | Check.T.TECall (callee, args, t) ->
@@ -122,12 +150,19 @@ let rec collect_expr (e : Check.T.expr) : unit =
   | Check.T.TEAssignIdx (a, i, v, t) ->
       collect_expr a; collect_expr i; collect_expr v; collect_ty t
   | Check.T.TELen (e, t) -> collect_expr e; collect_ty t
+  | Check.T.TESlice (a, lo, hi, t) ->
+      collect_expr a; collect_expr lo; collect_expr hi; collect_ty t
+  | Check.T.TEToInt e  -> collect_expr e
+  | Check.T.TEToByte e -> collect_expr e
 
 let collect_program (prog : Check.T.program) : unit =
   Hashtbl.clear fn_types_seen;
   fn_types_order := [];
   Hashtbl.clear array_types_seen;
   array_types_order := [];
+  Hashtbl.clear string_pool;
+  string_pool_order := [];
+  string_pool_size := 0;
   List.iter (fun td ->
     List.iter (fun v ->
       List.iter collect_ty v.arg_tys) td.variants) prog.types;
@@ -147,6 +182,7 @@ let c_type (t : ty) : string =
   match t with
   | TyInt -> "int"
   | TyBool -> "int"
+  | TyApp ("byte", []) -> "uint8_t"
   | TyApp ("Array", [inner]) -> mangle_array_name inner
   | TyApp ("Region", []) -> "Region"
   | TyApp (n, []) -> n
@@ -216,7 +252,7 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
   let rec rn (env : (string * string) list) (e : Check.T.expr) : Check.T.expr =
     let open Check.T in
     match e with
-    | TEInt _ | TEBool _ | TEFnRef _ -> e
+    | TEInt _ | TEBool _ | TEStringLit _ | TEFnRef _ -> e
     | TEVar (x, t) ->
         let x' = try List.assoc x env with Not_found -> x in
         TEVar (x', t)
@@ -267,6 +303,10 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
     | TEAssignIdx (a, i, v, t) ->
         TEAssignIdx (rn env a, rn env i, rn env v, t)
     | TELen (e, t) -> TELen (rn env e, t)
+    | TESlice (a, lo, hi, t) ->
+        TESlice (rn env a, rn env lo, rn env hi, t)
+    | TEToInt e  -> TEToInt (rn env e)
+    | TEToByte e -> TEToByte (rn env e)
   in
   let initial_env = List.map (fun (p, _) -> (p, p)) f.params in
   { f with body = rn initial_env f.body }
@@ -375,6 +415,7 @@ let build_ctor_map (types : type_decl list)
 let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TEInt _ -> TyInt
   | Check.T.TEBool _ -> TyBool
+  | Check.T.TEStringLit _ -> TyApp ("Array", [TyApp ("byte", [])])
   | Check.T.TEVar (_, t) -> t
   | Check.T.TEFnRef (_, _, t) -> t
   | Check.T.TECall (_, _, t) -> t
@@ -394,6 +435,9 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TEIndex (_, _, t) -> t
   | Check.T.TEAssignIdx (_, _, _, t) -> t
   | Check.T.TELen (_, t) -> t
+  | Check.T.TESlice (_, _, _, t) -> t
+  | Check.T.TEToInt _  -> TyInt
+  | Check.T.TEToByte _ -> TyApp ("byte", [])
 
 (* Release a Region's buffer (if it's heap-allocated), bump the
    generation, and push the slot back onto the free list. Stack
@@ -419,6 +463,14 @@ let rec emit_expr
   | Check.T.TEInt n      -> { stmts = []; value = string_of_int n }
   | Check.T.TEBool true  -> { stmts = []; value = "1" }
   | Check.T.TEBool false -> { stmts = []; value = "0" }
+  | Check.T.TEStringLit s ->
+      let off = register_string s in
+      let len = String.length s in
+      let value = Printf.sprintf
+        "((Array_byte){ .slot = 0, .offset = %d, .len = %d, .expected_gen = 1 })"
+        off len
+      in
+      { stmts = []; value }
   | Check.T.TEVar (x, _) -> { stmts = []; value = x }
 
   | Check.T.TEFnRef (name, _, _) ->
@@ -821,6 +873,51 @@ let rec emit_expr
       in
       { stmts = ca.stmts; value }
 
+  | Check.T.TESlice (arr_e, lo_e, hi_e, result_ty) ->
+      (* slice(a, lo, hi): produce a new handle into the same region.
+         Bounds: 0 <= lo <= hi <= len. Gen check still happens — the
+         slice is alive only while the source region is alive. The
+         element type carries through, so slice(s: Array[byte], ...)
+         returns Array[byte]; slice(xs: Array[T], ...) returns Array[T]. *)
+      let ca  = emit_expr ctor_map arr_e in
+      let clo = emit_expr ctor_map lo_e in
+      let chi = emit_expr ctor_map hi_e in
+      let a_var  = fresh "_a"  in
+      let lo_var = fresh "_lo" in
+      let hi_var = fresh "_hi" in
+      let res_var = fresh "_sl" in
+      let arr_c = c_type result_ty in
+      let elem_c =
+        match result_ty with
+        | TyApp ("Array", [inner]) -> c_type inner
+        | _ -> failwith "emit TESlice: result not Array[_]"
+      in
+      let stmts = ca.stmts @ clo.stmts @ chi.stmts @ [
+        Printf.sprintf "%s %s = %s;" arr_c a_var ca.value;
+        Printf.sprintf "int %s = %s;" lo_var clo.value;
+        Printf.sprintf "int %s = %s;" hi_var chi.value;
+        Printf.sprintf
+          "if (ORTO_REGIONS[%s.slot].gen != %s.expected_gen) abort();"
+          a_var a_var;
+        Printf.sprintf
+          "if (%s < 0 || %s < %s || %s > %s.len) abort();"
+          lo_var hi_var lo_var hi_var a_var;
+        Printf.sprintf
+          "%s %s = ((%s){ .slot = %s.slot, .offset = %s.offset + %s * (int)sizeof(%s), .len = %s - %s, .expected_gen = %s.expected_gen });"
+          arr_c res_var arr_c a_var a_var lo_var elem_c hi_var lo_var a_var;
+      ] in
+      { stmts; value = res_var }
+
+  | Check.T.TEToInt sub ->
+      let cs = emit_expr ctor_map sub in
+      { stmts = cs.stmts;
+        value = Printf.sprintf "((int)(%s))" cs.value }
+
+  | Check.T.TEToByte sub ->
+      let cs = emit_expr ctor_map sub in
+      { stmts = cs.stmts;
+        value = Printf.sprintf "((uint8_t)(%s))" cs.value }
+
 (* Shared setup for a[i] and a[i] := v. Returns the array/index codes,
    fresh names, the array's C type, the abort-checks, and the C
    expression for the slot at index. *)
@@ -899,6 +996,24 @@ let emit_func_def ctor_map (f : Check.T.func) : string =
     (c_type f.return_ty) f.name params_s
     (String.concat "\n" indented)
 
+(* Render the static byte pool as a C array literal. Every "..." literal
+   from the program ends up in this buffer at its assigned offset. The
+   buffer is never freed; its gen stays at 1 forever. *)
+let emit_static_bytes_array () : string =
+  let total = if !string_pool_size = 0 then 1 else !string_pool_size in
+  let buf = Bytes.make total '\x00' in
+  List.iter (fun (s, off) ->
+    String.iteri (fun i c -> Bytes.set buf (off + i) c) s)
+    !string_pool_order;
+  let chars =
+    List.init total (fun i ->
+      Printf.sprintf "0x%02x" (Char.code (Bytes.get buf i)))
+  in
+  Printf.sprintf
+    "static const uint8_t ORTO_STATIC_BYTES[%d] = { %s };\n\
+     #define ORTO_STATIC_BYTES_LEN %d"
+    total (String.concat ", " chars) !string_pool_size
+
 (* ---------- whole program ---------- *)
 
 let emit (prog : Check.T.program) : string =
@@ -918,15 +1033,18 @@ let emit (prog : Check.T.program) : string =
   let extern_decls = List.map emit_extern_decl prog.externs in
   let decls        = List.map emit_func_decl prog.funcs in
   let defs         = List.map (emit_func_def ctor_map) prog.funcs in
-  let header =
+  let static_bytes = emit_static_bytes_array () in
+  let header = Printf.sprintf
     "/* generated by orto */\n\
      #include <stdlib.h>\n\
      #include <stddef.h>\n\
+     #include <stdint.h>\n\
      \n\
      /* Region runtime: a global slab of region slots. Each slot is\n\
       * reused after its region is dropped (gen bumps so old handles\n\
       * see a mismatch and either abort or take the dangling branch).\n\
-      * No allocation per region beyond the user-requested buffer. */\n\
+      * No allocation per region beyond the user-requested buffer.\n\
+      * Slot 0 is reserved for the static string-literal pool. */\n\
      #define ORTO_REGION_SLOTS 4096\n\
      struct Region_slot {\n\
      \    int gen;\n\
@@ -938,6 +1056,9 @@ let emit (prog : Check.T.program) : string =
      };\n\
      static struct Region_slot ORTO_REGIONS[ORTO_REGION_SLOTS];\n\
      static int ORTO_REGION_FREE_HEAD = -1;\n\
+     \n\
+     %s\n\
+     \n\
      static void orto_init_regions(void) __attribute__((constructor));\n\
      static void orto_init_regions(void) {\n\
      \    for (int i = 0; i < ORTO_REGION_SLOTS; i++) {\n\
@@ -945,9 +1066,16 @@ let emit (prog : Check.T.program) : string =
      \        ORTO_REGIONS[i].next_free = i + 1;\n\
      \    }\n\
      \    ORTO_REGIONS[ORTO_REGION_SLOTS - 1].next_free = -1;\n\
-     \    ORTO_REGION_FREE_HEAD = 0;\n\
+     \    /* slot 0 = static string pool, never freed */\n\
+     \    ORTO_REGIONS[0].buffer = (char*)ORTO_STATIC_BYTES;\n\
+     \    ORTO_REGIONS[0].buffer_size = sizeof(ORTO_STATIC_BYTES);\n\
+     \    ORTO_REGIONS[0].used = ORTO_STATIC_BYTES_LEN;\n\
+     \    ORTO_REGIONS[0].is_stack = 1;\n\
+     \    ORTO_REGIONS[0].next_free = -1;\n\
+     \    ORTO_REGION_FREE_HEAD = 1;\n\
      }\n\
      typedef struct { int slot; int expected_gen; } Region;"
+    static_bytes
   in
   String.concat "\n\n"
     ([header]

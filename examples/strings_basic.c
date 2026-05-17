@@ -20,8 +20,8 @@ struct Region_slot {
 static struct Region_slot ORTO_REGIONS[ORTO_REGION_SLOTS];
 static int ORTO_REGION_FREE_HEAD = -1;
 
-static const uint8_t ORTO_STATIC_BYTES[1] = { 0x00 };
-#define ORTO_STATIC_BYTES_LEN 0
+static const uint8_t ORTO_STATIC_BYTES[5] = { 0x68, 0x65, 0x6c, 0x6c, 0x6f };
+#define ORTO_STATIC_BYTES_LEN 5
 
 static void orto_init_regions(void) __attribute__((constructor));
 static void orto_init_regions(void) {
@@ -40,71 +40,11 @@ static void orto_init_regions(void) {
 }
 typedef struct { int slot; int expected_gen; } Region;
 
-typedef int (*fn_int_to_int)(int);
-
-typedef int (*fn_int_to_bool)(int);
-
-typedef int (*fn_fn_int_to_int_int_to_int)(fn_int_to_int, int);
-
-typedef int (*fn_fn_int_to_bool_int_to_bool)(fn_int_to_bool, int);
-
-int twice(fn_int_to_int f, int x);
-
-int inc(int x);
-
-int dbl(int x);
-
-int is_even(int x);
-
-int apply_int_int(fn_int_to_int f, int x);
-
-int apply_int_bool(fn_int_to_bool f, int x);
+typedef struct { int slot; int offset; int len; int expected_gen; } Array_byte;
 
 int main(void);
 
-int add5(int x);
-
-int twice(fn_int_to_int f, int x) {
-    return f(f(x));
-}
-
-int inc(int x) {
-    return (x + 1);
-}
-
-int dbl(int x) {
-    return (x * 2);
-}
-
-int is_even(int x) {
-    return ((x % 2) == 0);
-}
-
-int apply_int_int(fn_int_to_int f, int x) {
-    return f(x);
-}
-
-int apply_int_bool(fn_int_to_bool f, int x) {
-    return f(x);
-}
-
 int main(void) {
-    int a_1 = twice(inc, 10);
-    int b_2 = twice(dbl, 3);
-    int c_3 = apply_int_int(add5, 20);
-    int d_bool_4 = apply_int_bool(is_even, 6);
-    int tmp_1;
-    if (d_bool_4) {
-        tmp_1 = 100;
-    } else {
-        tmp_1 = 0;
-    }
-    int d_5 = tmp_1;
-    fn_int_to_int f_6 = inc;
-    int e_7 = f_6(f_6(f_6(5)));
-    return ((((a_1 + b_2) + c_3) + d_5) + e_7);
-}
-
-int add5(int x) {
-    return (x + 5);
+    Array_byte s_1 = ((Array_byte){ .slot = 0, .offset = 0, .len = 5, .expected_gen = 1 });
+    return s_1.len;
 }

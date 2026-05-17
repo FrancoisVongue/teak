@@ -20,6 +20,8 @@ module T = struct
     | TEInt    of int
     | TEBool   of bool
     | TEVar    of string * ty
+    | TEStringLit of string
+                  (* "..." — byte literal, lives in the static region *)
     | TEFnRef  of string * ty list * ty
                   (* fn as a value: name, type args, fn type *)
     | TECall   of expr * expr list * ty
@@ -54,6 +56,12 @@ module T = struct
                   (* a[i] := v — result is int (placeholder for unit) *)
     | TELen    of expr * ty
                   (* len(a) — result is int *)
+    | TESlice  of expr * expr * expr * ty
+                  (* slice(a, lo, hi) — sub-handle into the same region *)
+    | TEToInt  of expr
+                  (* to_int(b) — widen byte to int *)
+    | TEToByte of expr
+                  (* to_byte(n) — truncate int to byte *)
 
   type func = {
     name        : string;
@@ -302,6 +310,14 @@ let rec validate_ty
                "Region takes no type arguments, got %d"
                (List.length args)));
         TyApp ("Region", [])
+      end else if n = "byte" then begin
+        (* byte is a built-in nullary primitive — 1 byte, unsigned. *)
+        if List.length args <> 0 then
+          raise (Type_error
+            (Printf.sprintf
+               "byte takes no type arguments, got %d"
+               (List.length args)));
+        TyApp ("byte", [])
       end else
         (match List.assoc_opt n type_env with
          | Some td ->
@@ -589,6 +605,7 @@ let rec is_copyable (env : env) (t : ty) : bool =
   | TyMeta _       -> true
   | TyApp ("Region", _) -> false
   | TyApp ("Array", _) -> true   (* region-backed handle, plain values *)
+  | TyApp ("byte", _)  -> true   (* primitive *)
   | TyApp (n, args) when List.mem_assoc n env.records ->
       let rd = List.assoc n env.records in
       let subst = List.combine rd.rec_type_params args in
@@ -637,7 +654,7 @@ let consumed_in_arg (env : env) (x : string) (a : T.expr) : bool =
 (* takes_consume: does the expression contain a direct consume of `x`? *)
 let rec takes_consume (env : env) (x : string) (e : T.expr) : bool =
   match e with
-  | T.TEInt _ | T.TEBool _ | T.TEVar _ | T.TEFnRef _ -> false
+  | T.TEInt _ | T.TEBool _ | T.TEStringLit _ | T.TEVar _ | T.TEFnRef _ -> false
   | T.TECall (callee, args, _) ->
       takes_consume env x callee
       || List.exists (takes_consume env x) args
@@ -683,6 +700,12 @@ let rec takes_consume (env : env) (x : string) (e : T.expr) : bool =
   | T.TEAssignIdx (a, i, v, _) ->
       takes_consume env x a || takes_consume env x i || takes_consume env x v
   | T.TELen (e, _) -> takes_consume env x e
+  | T.TESlice (a, lo, hi, _) ->
+      takes_consume env x a
+      || takes_consume env x lo
+      || takes_consume env x hi
+  | T.TEToInt e  -> takes_consume env x e
+  | T.TEToByte e -> takes_consume env x e
 
 (* tail_consume: does x reach the tail position of the expression? *)
 let rec tail_consume (x : string) (e : T.expr) : bool =
@@ -709,6 +732,11 @@ let rec infer (env : env) (tparams : string list)
   match e with
   | EInt n  -> (T.TEInt n,  TyInt)
   | EBool b -> (T.TEBool b, TyBool)
+  | EStringLit s ->
+      (* "..." : Array[byte] — bytes live in the static region forever.
+         The handle is copyable, the gen tag will always match. *)
+      let result_ty = TyApp ("Array", [TyApp ("byte", [])]) in
+      (T.TEStringLit s, result_ty)
 
   | EBinop (op, a, b) ->
       let (ta, ta_ty) = infer env tparams vars a in
@@ -1169,6 +1197,55 @@ let rec infer (env : env) (tparams : string list)
               (show_ty (zonk ta_ty)))));
       (T.TELen (ta, TyInt), TyInt)
 
+  | ESlice (arr_e, lo_e, hi_e) ->
+      (* slice(a, lo, hi) : Array[T], int, int → Array[T]. New handle
+         pointing at the same region, with offset += lo and len = hi - lo.
+         Same gen, same slot — slice dies with the original region. *)
+      let (ta, ta_ty) = infer env tparams vars arr_e in
+      let elem = TyMeta (fresh_meta ()) in
+      (try unify ta_ty (TyApp ("Array", [elem]))
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "slice expects Array[T], got %s"
+              (show_ty (zonk ta_ty)))));
+      let (tlo, tlo_ty) = infer env tparams vars lo_e in
+      (try unify tlo_ty TyInt
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "slice(_, lo, _) : lo must be int, got %s"
+              (show_ty (zonk tlo_ty)))));
+      let (thi, thi_ty) = infer env tparams vars hi_e in
+      (try unify thi_ty TyInt
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "slice(_, _, hi) : hi must be int, got %s"
+              (show_ty (zonk thi_ty)))));
+      let result_ty = TyApp ("Array", [elem]) in
+      (T.TESlice (ta, tlo, thi, result_ty), result_ty)
+
+  | EToInt sub_e ->
+      let (ts, ts_ty) = infer env tparams vars sub_e in
+      (try unify ts_ty (TyApp ("byte", []))
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "to_int expects byte, got %s"
+              (show_ty (zonk ts_ty)))));
+      (T.TEToInt ts, TyInt)
+
+  | EToByte sub_e ->
+      let (ts, ts_ty) = infer env tparams vars sub_e in
+      (try unify ts_ty TyInt
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "to_byte expects int, got %s"
+              (show_ty (zonk ts_ty)))));
+      (T.TEToByte ts, TyApp ("byte", []))
+
 and check_args env tparams vars callee_name param_tys args : T.expr list =
   let n_expected = List.length param_tys in
   let n_got = List.length args in
@@ -1196,7 +1273,7 @@ and validate_ty_for_ascription
 
 let rec zonk_expr (e : T.expr) : T.expr =
   match e with
-  | T.TEInt _ | T.TEBool _ -> e
+  | T.TEInt _ | T.TEBool _ | T.TEStringLit _ -> e
   | T.TEVar (x, t) -> T.TEVar (x, zonk_expect t)
   | T.TEFnRef (name, ts, fn_ty) ->
       T.TEFnRef (name, List.map zonk_expect ts, zonk_expect fn_ty)
@@ -1239,6 +1316,10 @@ let rec zonk_expr (e : T.expr) : T.expr =
       T.TEAssignIdx (zonk_expr a, zonk_expr i, zonk_expr v, zonk_expect t)
   | T.TELen (e, t) ->
       T.TELen (zonk_expr e, zonk_expect t)
+  | T.TESlice (a, lo, hi, t) ->
+      T.TESlice (zonk_expr a, zonk_expr lo, zonk_expr hi, zonk_expect t)
+  | T.TEToInt e  -> T.TEToInt (zonk_expr e)
+  | T.TEToByte e -> T.TEToByte (zonk_expr e)
 
 and zonk_expect (t : ty) : ty =
   let t = zonk t in
@@ -1276,7 +1357,7 @@ module SM = Map.Make (String)
 let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.expr)
   : T.expr * ty SM.t =
   match e with
-  | T.TEInt _ | T.TEBool _ | T.TEFnRef _ -> (e, live)
+  | T.TEInt _ | T.TEBool _ | T.TEStringLit _ | T.TEFnRef _ -> (e, live)
 
   | T.TEVar (x, t) ->
       if not (SM.mem x live) then
@@ -1460,6 +1541,20 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
   | T.TELen (sub, ty) ->
       let (sub', live) = check_moves_expr env live false sub in
       (T.TELen (sub', ty), live)
+
+  | T.TESlice (a, lo, hi, ty) ->
+      let (a', live)  = check_moves_expr env live false a in
+      let (lo', live) = check_moves_expr env live false lo in
+      let (hi', live) = check_moves_expr env live false hi in
+      (T.TESlice (a', lo', hi', ty), live)
+
+  | T.TEToInt sub ->
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TEToInt sub', live)
+
+  | T.TEToByte sub ->
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TEToByte sub', live)
 
 and consume_arg (env : env) (live : ty SM.t) (e : T.expr)
   : T.expr * ty SM.t =

@@ -65,6 +65,7 @@ generic функцию, и внутри функции линейность не
 - ~~Дубликат диспатча в TEIndex/TEAssignIdx~~ — вынесен в index_setup helper.
 - ~~Own/Ref/take/unwrap/look/legacy ref/deref/:=/??/panic~~ — удалено.
 - ~~Cascade destructors~~ — невозможны по построению (linear только Region).
+- ~~Strings~~ — `Array[byte]` + статический region для литералов + `slice` + `to_int`/`to_byte`.
 
 ---
 
@@ -76,6 +77,5 @@ generic функцию, и внутри функции линейность не
 - **`type` keyword под type aliases.** Не реализовано.
 - **Lambda / closures.** Пока только именованные функции верхнего уровня.
 - **Pipeline `|>` оператор.** Обсуждался как сахар. Не делаем.
-- **Strings.** Через `Array[int]` (как UTF-32) или `Buf[byte]` — не решено.
 - **Сырые указатели `*T`** для системного программирования. Параллельный
   путь к региону + array. Не реализовано.

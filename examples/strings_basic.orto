@@ -1,0 +1,10 @@
+// Basic string sanity:
+//   - len of a literal
+//   - byte indexing
+//   - to_int conversion from byte
+//   - exit code = len of "hello"
+
+fn main() -> int {
+    let s = "hello";
+    len(s)   // 5
+}
