@@ -42,17 +42,19 @@ typedef struct { int slot; int expected_gen; } Region;
 
 typedef struct { int slot; int offset; int len; int expected_gen; } Array_byte;
 
+typedef struct { int slot; int offset; int len; int expected_gen; } Array_Array_byte;
+
 typedef int (*fn_Array_byte_int_int_to_int)(Array_byte, int, int);
-
-typedef Array_byte (*fn_Array_byte_Array_byte_to_Array_byte)(Array_byte, Array_byte);
-
-typedef int (*fn_Array_byte_to_int)(Array_byte);
 
 typedef Array_byte (*fn_Region_Array_byte_to_Array_byte)(Region, Array_byte);
 
+typedef Array_byte (*fn_Array_byte_Array_byte_to_Array_byte)(Array_byte, Array_byte);
+
 typedef Array_byte (*fn_Region_int_to_Array_byte)(Region, int);
 
-typedef Array_byte (*fn_Region_Array_byte_Array_byte_to_Array_byte)(Region, Array_byte, Array_byte);
+typedef int (*fn_Array_byte_to_int)(Array_byte);
+
+typedef Array_byte (*fn_Region_Array_Array_byte_to_Array_byte)(Region, Array_Array_byte);
 
 typedef int (*fn_int_to_int)(int);
 
@@ -61,6 +63,10 @@ typedef int (*fn_Array_byte_int_to_int)(Array_byte, int);
 typedef Array_byte (*fn_Array_byte_Array_byte_int_to_Array_byte)(Array_byte, Array_byte, int);
 
 typedef int (*fn_Array_byte_Array_byte_int_to_bool)(Array_byte, Array_byte, int);
+
+typedef int (*fn_Array_Array_byte_int_int_to_int)(Array_Array_byte, int, int);
+
+typedef int (*fn_Array_byte_Array_Array_byte_int_int_to_int)(Array_byte, Array_Array_byte, int, int);
 
 typedef uint8_t (*fn_byte_to_byte)(uint8_t);
 
@@ -90,11 +96,13 @@ Array_byte str__lookup(Array_byte s, Array_byte key);
 
 int str__bytes_eq(Array_byte a, Array_byte b);
 
+Array_byte str__concat_all(Region r, Array_Array_byte parts);
+
 int str__to_upper_loop(Array_byte src, Array_byte dst, int i);
 
-uint8_t str__upper_byte(uint8_t b);
-
 int str__index_of(Array_byte s, uint8_t c);
+
+uint8_t str__upper_byte(uint8_t b);
 
 int str__bytes_eq_loop(Array_byte a, Array_byte b, int i);
 
@@ -108,13 +116,15 @@ int str__parse_int(Array_byte s);
 
 int str__digits_count(int n);
 
-Array_byte str__concat(Region r, Array_byte a, Array_byte b);
+int str__total_len_loop(Array_Array_byte parts, int i, int acc);
 
 Array_byte str__field_after(Array_byte s, Array_byte key, int from);
 
 int main(void);
 
 int io__println(Array_byte s);
+
+int str__concat_all_loop(Array_byte dst, Array_Array_byte parts, int i, int at);
 
 int str__write_digits(Array_byte dst, int n, int pos) {
     int tmp_5;
@@ -139,17 +149,24 @@ int str__write_digits(Array_byte dst, int n, int pos) {
 }
 
 Array_byte log_format__format_log(Region r, Array_byte input) {
-    Array_byte name_1 = str__lookup(input, ((Array_byte){ .slot = 0, .offset = 0, .len = 4, .expected_gen = 1 }));
-    int age_2 = str__parse_int(str__lookup(input, ((Array_byte){ .slot = 0, .offset = 4, .len = 3, .expected_gen = 1 })));
+    Array_byte name_1 = str__to_upper(r, str__lookup(input, ((Array_byte){ .slot = 0, .offset = 0, .len = 4, .expected_gen = 1 })));
+    Array_byte age_2 = str__int_to_bytes(r, str__parse_int(str__lookup(input, ((Array_byte){ .slot = 0, .offset = 4, .len = 3, .expected_gen = 1 }))));
     Array_byte city_3 = str__lookup(input, ((Array_byte){ .slot = 0, .offset = 7, .len = 4, .expected_gen = 1 }));
-    Array_byte upper_name_4 = str__to_upper(r, name_1);
-    Array_byte age_bytes_5 = str__int_to_bytes(r, age_2);
-    Array_byte p1_6 = str__concat(r, ((Array_byte){ .slot = 0, .offset = 11, .len = 3, .expected_gen = 1 }), upper_name_4);
-    Array_byte p2_7 = str__concat(r, p1_6, ((Array_byte){ .slot = 0, .offset = 14, .len = 2, .expected_gen = 1 }));
-    Array_byte p3_8 = str__concat(r, p2_7, age_bytes_5);
-    Array_byte p4_9 = str__concat(r, p3_8, ((Array_byte){ .slot = 0, .offset = 16, .len = 11, .expected_gen = 1 }));
-    Array_byte p5_10 = str__concat(r, p4_9, city_3);
-    return str__concat(r, p5_10, ((Array_byte){ .slot = 0, .offset = 27, .len = 3, .expected_gen = 1 }));
+    Region _r_1 = r;
+    if (ORTO_REGIONS[_r_1.slot].gen != _r_1.expected_gen) abort();
+    if (ORTO_REGIONS[_r_1.slot].used + (size_t)7 * sizeof(Array_byte) > ORTO_REGIONS[_r_1.slot].buffer_size) abort();
+    int _off_2 = (int)ORTO_REGIONS[_r_1.slot].used;
+    ORTO_REGIONS[_r_1.slot].used += (size_t)7 * sizeof(Array_byte);
+    Array_byte* _slots_3 = (Array_byte*)(ORTO_REGIONS[_r_1.slot].buffer + _off_2);
+    _slots_3[0] = ((Array_byte){ .slot = 0, .offset = 11, .len = 3, .expected_gen = 1 });
+    _slots_3[1] = name_1;
+    _slots_3[2] = ((Array_byte){ .slot = 0, .offset = 14, .len = 2, .expected_gen = 1 });
+    _slots_3[3] = age_2;
+    _slots_3[4] = ((Array_byte){ .slot = 0, .offset = 16, .len = 11, .expected_gen = 1 });
+    _slots_3[5] = city_3;
+    _slots_3[6] = ((Array_byte){ .slot = 0, .offset = 27, .len = 3, .expected_gen = 1 });
+    Array_Array_byte _arr_4 = ((Array_Array_byte){ .slot = _r_1.slot, .offset = _off_2, .len = 7, .expected_gen = _r_1.expected_gen });
+    return str__concat_all(r, _arr_4);
 }
 
 int str__parse_int_loop(Array_byte s, int i, int acc) {
@@ -221,6 +238,23 @@ int str__bytes_eq(Array_byte a, Array_byte b) {
     return tmp_1;
 }
 
+Array_byte str__concat_all(Region r, Array_Array_byte parts) {
+    int total_1 = str__total_len_loop(parts, 0, 0);
+    Region _r_1 = r;
+    if (ORTO_REGIONS[_r_1.slot].gen != _r_1.expected_gen) abort();
+    int _n_2 = total_1;
+    if (_n_2 < 0) abort();
+    if (ORTO_REGIONS[_r_1.slot].used + (size_t)_n_2 * sizeof(uint8_t) > ORTO_REGIONS[_r_1.slot].buffer_size) abort();
+    int _off_3 = (int)ORTO_REGIONS[_r_1.slot].used;
+    ORTO_REGIONS[_r_1.slot].used += (size_t)_n_2 * sizeof(uint8_t);
+    uint8_t* _slots_4 = (uint8_t*)(ORTO_REGIONS[_r_1.slot].buffer + _off_3);
+    for (int _i_5 = 0; _i_5 < _n_2; _i_5++) _slots_4[_i_5] = ((uint8_t)(0));
+    Array_byte _arr_6 = ((Array_byte){ .slot = _r_1.slot, .offset = _off_3, .len = _n_2, .expected_gen = _r_1.expected_gen });
+    Array_byte dst_2 = _arr_6;
+    (void)(str__concat_all_loop(dst_2, parts, 0, 0));
+    return dst_2;
+}
+
 int str__to_upper_loop(Array_byte src, Array_byte dst, int i) {
     int tmp_6;
     if ((i >= src.len)) {
@@ -242,6 +276,10 @@ int str__to_upper_loop(Array_byte src, Array_byte dst, int i) {
     return tmp_6;
 }
 
+int str__index_of(Array_byte s, uint8_t c) {
+    return str__index_of_loop(s, c, 0);
+}
+
 uint8_t str__upper_byte(uint8_t b) {
     int n_1 = ((int)(b));
     uint8_t tmp_1;
@@ -251,10 +289,6 @@ uint8_t str__upper_byte(uint8_t b) {
         tmp_1 = b;
     }
     return tmp_1;
-}
-
-int str__index_of(Array_byte s, uint8_t c) {
-    return str__index_of_loop(s, c, 0);
 }
 
 int str__bytes_eq_loop(Array_byte a, Array_byte b, int i) {
@@ -355,21 +389,19 @@ int str__digits_count(int n) {
     return tmp_1;
 }
 
-Array_byte str__concat(Region r, Array_byte a, Array_byte b) {
-    Region _r_1 = r;
-    if (ORTO_REGIONS[_r_1.slot].gen != _r_1.expected_gen) abort();
-    int _n_2 = (a.len + b.len);
-    if (_n_2 < 0) abort();
-    if (ORTO_REGIONS[_r_1.slot].used + (size_t)_n_2 * sizeof(uint8_t) > ORTO_REGIONS[_r_1.slot].buffer_size) abort();
-    int _off_3 = (int)ORTO_REGIONS[_r_1.slot].used;
-    ORTO_REGIONS[_r_1.slot].used += (size_t)_n_2 * sizeof(uint8_t);
-    uint8_t* _slots_4 = (uint8_t*)(ORTO_REGIONS[_r_1.slot].buffer + _off_3);
-    for (int _i_5 = 0; _i_5 < _n_2; _i_5++) _slots_4[_i_5] = ((uint8_t)(0));
-    Array_byte _arr_6 = ((Array_byte){ .slot = _r_1.slot, .offset = _off_3, .len = _n_2, .expected_gen = _r_1.expected_gen });
-    Array_byte dst_1 = _arr_6;
-    (void)(str__copy_into(dst_1, a, 0, 0));
-    (void)(str__copy_into(dst_1, b, a.len, 0));
-    return dst_1;
+int str__total_len_loop(Array_Array_byte parts, int i, int acc) {
+    int tmp_4;
+    if ((i >= parts.len)) {
+        tmp_4 = acc;
+    } else {
+        Array_Array_byte _a_1 = parts;
+        int _i_2 = i;
+        if (ORTO_REGIONS[_a_1.slot].gen != _a_1.expected_gen) abort();
+        if (_i_2 < 0 || _i_2 >= _a_1.len) abort();
+        Array_byte _idx_3 = ((Array_byte*)(ORTO_REGIONS[_a_1.slot].buffer + _a_1.offset))[_i_2];
+        tmp_4 = str__total_len_loop(parts, (i + 1), (acc + (_idx_3).len));
+    }
+    return tmp_4;
 }
 
 Array_byte str__field_after(Array_byte s, Array_byte key, int from) {
@@ -470,4 +502,25 @@ int main(void) {
 int io__println(Array_byte s) {
     (void)(io__print_loop(s, 0));
     return putchar(10);
+}
+
+int str__concat_all_loop(Array_byte dst, Array_Array_byte parts, int i, int at) {
+    int tmp_7;
+    if ((i >= parts.len)) {
+        tmp_7 = 0;
+    } else {
+        Array_Array_byte _a_1 = parts;
+        int _i_2 = i;
+        if (ORTO_REGIONS[_a_1.slot].gen != _a_1.expected_gen) abort();
+        if (_i_2 < 0 || _i_2 >= _a_1.len) abort();
+        Array_byte _idx_3 = ((Array_byte*)(ORTO_REGIONS[_a_1.slot].buffer + _a_1.offset))[_i_2];
+        (void)(str__copy_into(dst, _idx_3, at, 0));
+        Array_Array_byte _a_4 = parts;
+        int _i_5 = i;
+        if (ORTO_REGIONS[_a_4.slot].gen != _a_4.expected_gen) abort();
+        if (_i_5 < 0 || _i_5 >= _a_4.len) abort();
+        Array_byte _idx_6 = ((Array_byte*)(ORTO_REGIONS[_a_4.slot].buffer + _a_4.offset))[_i_5];
+        tmp_7 = str__concat_all_loop(dst, parts, (i + 1), (at + (_idx_6).len));
+    }
+    return tmp_7;
 }

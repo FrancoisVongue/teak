@@ -64,6 +64,29 @@ fn concat(r: Region, a: Array[byte], b: Array[byte]) -> Array[byte] {
     dst
 }
 
+// Sum of lengths across an Array[Array[byte]].
+fn total_len_loop(parts: Array[Array[byte]], i: int, acc: int) -> int {
+    if i >= len(parts) { acc }
+    else { total_len_loop(parts, i + 1, acc + len(parts[i])) }
+}
+
+// Variadic-style concat. Builds one buffer of the right size, writes
+// each part in order. Replaces chains of pairwise concat.
+fn concat_all_loop(dst: Array[byte], parts: Array[Array[byte]], i: int, at: int) -> int {
+    if i >= len(parts) { 0 }
+    else {
+        copy_into(dst, parts[i], at, 0);
+        concat_all_loop(dst, parts, i + 1, at + len(parts[i]))
+    }
+}
+
+fn concat_all(r: Region, parts: Array[Array[byte]]) -> Array[byte] {
+    let total = total_len_loop(parts, 0, 0);
+    let dst = array(r, total, to_byte(0));
+    concat_all_loop(dst, parts, 0, 0);
+    dst
+}
+
 fn digits_count(n: int) -> int {
     if n < 10 { 1 } else { 1 + digits_count(n / 10) }
 }

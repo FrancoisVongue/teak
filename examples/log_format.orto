@@ -4,23 +4,14 @@
 // Strings library lives in str.orto; output helpers in io.orto.
 // We pull in just what we need via `use`.
 
-use str::{lookup, to_upper, concat, parse_int, int_to_bytes};
+use str::{lookup, to_upper, concat_all, parse_int, int_to_bytes};
 use io::println;
 
 fn format_log(r: Region, input: Array[byte]) -> Array[byte] {
-    let name = lookup(input, "user");
-    let age  = parse_int(lookup(input, "age"));
+    let name = to_upper(r, lookup(input, "user"));
+    let age  = int_to_bytes(r, parse_int(lookup(input, "age")));
     let city = lookup(input, "city");
-
-    let upper_name = to_upper(r, name);
-    let age_bytes  = int_to_bytes(r, age);
-
-    let p1 = concat(r, ">> ", upper_name);
-    let p2 = concat(r, p1, " (");
-    let p3 = concat(r, p2, age_bytes);
-    let p4 = concat(r, p3, ") lives in ");
-    let p5 = concat(r, p4, city);
-    concat(r, p5, " <<")
+    concat_all(r, array(r, [">> ", name, " (", age, ") lives in ", city, " <<"]))
 }
 
 fn main() -> int {
