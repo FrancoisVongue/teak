@@ -127,6 +127,12 @@ type extern_decl = {
   ext_name      : string;
   ext_params    : (string * ty) list;
   ext_return_ty : ty;
+  (* `extern async fn ...` — the C-side glue prepares an io_uring SQE
+     and the call only makes sense inside `await`. Compiler reads it
+     and (a) wraps the declared return type in Task[T] for the type
+     system, (b) lowers `await call(...)` to a submit-and-suspend
+     pattern in async functions. *)
+  ext_is_async  : bool;
 }
 
 (* `use mod::{a, b, c};` — selective import from another module.

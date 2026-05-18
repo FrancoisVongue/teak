@@ -51,6 +51,7 @@ type token =
   | TAwait        (* await — Stage 3 async suspension point *)
   | TSpawn        (* spawn f(...) — Stage 3 fire-and-forget task *)
   | TYield        (* yield — Stage 3 cooperative scheduling point *)
+  | TAsync        (* async — modifier on `extern fn` for ring-prepared I/O *)
   | TUnderscore   (* `_` as a standalone token (wildcard pattern) *)
   (* punctuation *)
   | TLParen
@@ -141,6 +142,7 @@ let show = function
   | TAwait        -> "AWAIT"
   | TSpawn        -> "SPAWN"
   | TYield        -> "YIELD"
+  | TAsync        -> "ASYNC"
   | TUnderscore   -> "_"
   | TLParen       -> "("
   | TRParen       -> ")"

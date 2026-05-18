@@ -45,6 +45,26 @@ let fn_types_order : (string * ty) list ref = ref []
 let array_types_seen : (string, unit) Hashtbl.t = Hashtbl.create 8
 let array_types_order : (string * ty) list ref = ref []
 
+(* Task[T] / Stream[T] instantiations. The C struct is opaque for now
+   (placeholder field) — async-extern lowering never reads it. Spawn
+   (later phase) gives it concrete contents. *)
+let task_wrappers_seen : (string, unit) Hashtbl.t = Hashtbl.create 4
+let task_wrappers_order : string list ref = ref []
+let stream_wrappers_seen : (string, unit) Hashtbl.t = Hashtbl.create 4
+let stream_wrappers_order : string list ref = ref []
+
+let register_task_wrapper (inner_mangled : string) =
+  if not (Hashtbl.mem task_wrappers_seen inner_mangled) then begin
+    Hashtbl.add task_wrappers_seen inner_mangled ();
+    task_wrappers_order := inner_mangled :: !task_wrappers_order
+  end
+
+let register_stream_wrapper (inner_mangled : string) =
+  if not (Hashtbl.mem stream_wrappers_seen inner_mangled) then begin
+    Hashtbl.add stream_wrappers_seen inner_mangled ();
+    stream_wrappers_order := inner_mangled :: !stream_wrappers_order
+  end
+
 (* String literal pool. Every "..." in the program is deduplicated and
    assigned a byte-offset into one shared static buffer. The buffer
    sits at region slot 0 (reserved at startup, never freed). Each
@@ -53,6 +73,17 @@ let array_types_order : (string * ty) list ref = ref []
 let string_pool : (string, int) Hashtbl.t = Hashtbl.create 16
 let string_pool_order : (string * int) list ref = ref []
 let string_pool_size = ref 0
+
+(* Names of `extern async fn` declarations. Used by the async lowering
+   to recognise calls that should compile to an SQE prep + submit
+   pattern, with the current frame as user_data. *)
+let async_externs : (string, unit) Hashtbl.t = Hashtbl.create 8
+
+let register_async_extern (name : string) =
+  Hashtbl.replace async_externs name ()
+
+let is_async_extern (name : string) : bool =
+  Hashtbl.mem async_externs name
 
 let register_string (s : string) : int =
   match Hashtbl.find_opt string_pool s with
@@ -96,14 +127,18 @@ let rec collect_ty (t : ty) : unit =
   | TyApp ("float", _) ->
       failwith "emit collect_ty: float takes no type arguments"
   | TyApp ("Task", [inner]) ->
-      (* Stage 3 phase 2: typing only — the concrete Task wrapper
-         struct + slot machinery are emitted in phase 4. For now we
-         walk the inner type so its dependencies are still collected. *)
-      collect_ty inner
+      (* Stage 3 phase 4: collect the inner element and register the
+         Task wrapper so c_type has a real C name to refer to. The
+         struct stays opaque for now — concrete fields land with
+         `spawn` (slot index + gen). Async-extern calls never read
+         this struct; they only need its name to live in signatures. *)
+      collect_ty inner;
+      register_task_wrapper (Mono.mangle_ty inner)
   | TyApp ("Task", _) ->
       failwith "emit collect_ty: Task with wrong arity"
   | TyApp ("Stream", [inner]) ->
-      collect_ty inner
+      collect_ty inner;
+      register_stream_wrapper (Mono.mangle_ty inner)
   | TyApp ("Stream", _) ->
       failwith "emit collect_ty: Stream with wrong arity"
   | TyApp (_, []) -> ()
@@ -195,9 +230,14 @@ let collect_program (prog : Check.T.program) : unit =
   fn_types_order := [];
   Hashtbl.clear array_types_seen;
   array_types_order := [];
+  Hashtbl.clear task_wrappers_seen;
+  task_wrappers_order := [];
+  Hashtbl.clear stream_wrappers_seen;
+  stream_wrappers_order := [];
   Hashtbl.clear string_pool;
   string_pool_order := [];
   string_pool_size := 0;
+  Hashtbl.clear async_externs;
   List.iter (fun td ->
     List.iter (fun v ->
       List.iter collect_ty v.arg_tys) td.variants) prog.types;
@@ -205,7 +245,8 @@ let collect_program (prog : Check.T.program) : unit =
     List.iter (fun (_, t) -> collect_ty t) rd.rec_fields) prog.records;
   List.iter (fun (e : Check.T.extern) ->
     List.iter (fun (_, t) -> collect_ty t) e.params;
-    collect_ty e.return_ty) prog.externs;
+    collect_ty e.return_ty;
+    if e.is_async then register_async_extern e.name) prog.externs;
   List.iter (fun (f : Check.T.func) ->
     List.iter (fun (_, t) -> collect_ty t) f.params;
     collect_ty f.return_ty;
@@ -260,6 +301,24 @@ let emit_array_forwards () : string list =
       "typedef struct { int slot; int offset; int len; int expected_gen; } %s;"
       mangled)
     !array_types_order
+
+(* Task[T] / Stream[T] opaque wrappers — one C struct per instantiation
+   so c_type has a name to refer to. Phase 4 (await) doesn't use the
+   contents; later phases (spawn / for-in stream) flesh them out. *)
+let emit_task_forwards () : string list =
+  let task_fwd =
+    List.rev_map (fun m ->
+      Printf.sprintf
+        "typedef struct { int slot; int gen; } Task_%s;" m)
+      !task_wrappers_order
+  in
+  let stream_fwd =
+    List.rev_map (fun m ->
+      Printf.sprintf
+        "typedef struct { int slot; int gen; } Stream_%s;" m)
+      !stream_wrappers_order
+  in
+  task_fwd @ stream_fwd
 
 (* Emit a call to the right drop function for a linear type. After mono,
    the type name carries its module mangling (`net__Socket`); the helper
@@ -1358,14 +1417,41 @@ and index_setup ctor_map arr_e idx_e elem_c =
 (* ---------- function emission ---------- *)
 
 let emit_extern_decl (e : Check.T.extern) : string =
-  let params_s =
-    if e.params = [] then "void"
-    else
-      String.concat ", "
-        (List.map (fun (x, t) ->
-          Printf.sprintf "%s %s" (c_type t) x) e.params)
-  in
-  Printf.sprintf "extern %s %s(%s);" (c_type e.return_ty) e.name params_s
+  if e.is_async then begin
+    (* `extern async fn f(args) -> T` — source signature is Task[T],
+       C-side glue takes (args..., void *user_data) and writes T into
+       the SQE buffer. The C function returns int (0 on success of
+       SQE preparation, < 0 if the ring was full). The actual result
+       arrives on the CQE and is written to the frame by the
+       dispatcher. *)
+    let task_inner = match e.return_ty with
+      | TyApp ("Task", [t]) -> t
+      | _ ->
+          failwith (Printf.sprintf
+            "emit: async extern %S has non-Task return type after check"
+            e.name)
+    in
+    let _ = task_inner in
+    let params_s =
+      let user_data = "void *orto_user_data" in
+      if e.params = [] then user_data
+      else
+        String.concat ", "
+          ((List.map (fun (x, t) ->
+            Printf.sprintf "%s %s" (c_type t) x) e.params)
+           @ [user_data])
+    in
+    Printf.sprintf "extern int %s(%s);" e.name params_s
+  end
+  else
+    let params_s =
+      if e.params = [] then "void"
+      else
+        String.concat ", "
+          (List.map (fun (x, t) ->
+            Printf.sprintf "%s %s" (c_type t) x) e.params)
+    in
+    Printf.sprintf "extern %s %s(%s);" (c_type e.return_ty) e.name params_s
 
 let emit_func_decl (f : Check.T.func) : string =
   let params_s =
@@ -1490,6 +1576,32 @@ let async_split_segments ctor_map (body : Check.T.expr) : (int * string list) li
       "orto_yield_suspend(fr);";
       "return 1;" ]
   in
+  (* Emit the SQE-prep + submit pattern for `await async_extern(args)`.
+     The async extern fills the SQE with `fr` as user_data; we then
+     trigger submit and suspend so the dispatcher resumes us when the
+     CQE arrives carrying the result in fr->last_res. *)
+  let emit_async_call name args next_state =
+    let arg_codes = List.map (emit_expr ctor_map) args in
+    List.iter (fun cv -> emit_into cv.stmts) arg_codes;
+    let arg_values = List.map (fun cv -> cv.value) arg_codes in
+    let all_args = arg_values @ ["fr"] in
+    emit_into [
+      Printf.sprintf "%s(%s);" name (String.concat ", " all_args);
+      "io_uring_submit(&ORTO_RING);";
+    ];
+    close_segment_with
+      [ Printf.sprintf "fr->state = %d;" next_state;
+        "return 1;" ]
+  in
+  (* Try to recognise `await async_extern(args)` — if the inner of an
+     await is a call to an async extern, that's the shape we lower.
+     Returns Some(name, args) when matched. *)
+  let match_async_extern_call (inner : expr) : (string * expr list) option =
+    match inner with
+    | TECall (TEFnRef (name, _, _), args, _) when is_async_extern name ->
+        Some (name, args)
+    | _ -> None
+  in
   let rec walk body =
     match body with
     | TELet (x, _, TEYield, b, _, _) ->
@@ -1502,11 +1614,31 @@ let async_split_segments ctor_map (body : Check.T.expr) : (int * string list) li
         if x <> "_" then
           emit_into [Printf.sprintf "fr->%s = 0;" x];
         walk b
+    | TELet (x, _, TEAwait (inner, _), b, _, _)
+      when (match match_async_extern_call inner with Some _ -> true | None -> false) ->
+        (* `let x = await async_extern(args);` — submit + suspend now;
+           when the CQE comes back, fr->last_res holds the result. *)
+        let (name, args) =
+          match match_async_extern_call inner with
+          | Some r -> r | None -> assert false
+        in
+        let next_state = !curr_state + 1 in
+        emit_async_call name args next_state;
+        curr_state := next_state;
+        curr_lines := [];
+        if x <> "_" then
+          emit_into [Printf.sprintf "fr->%s = fr->last_res;" x];
+        walk b
     | TELet (x, _, v, b, _, _) ->
         let cv = emit_expr ctor_map v in
         emit_into cv.stmts;
         if x <> "_" then
-          emit_into [Printf.sprintf "fr->%s = %s;" x cv.value];
+          emit_into [Printf.sprintf "fr->%s = %s;" x cv.value]
+        else
+          (* `let _ = expr;` — bind to wildcard. Emit the value as a
+             statement so any side-effects (function calls in
+             particular) actually happen. *)
+          emit_into [Printf.sprintf "(void)(%s);" cv.value];
         walk b
     | TEYield ->
         (* Tail yield: suspend then in the resumed state return 0. *)
@@ -1514,6 +1646,18 @@ let async_split_segments ctor_map (body : Check.T.expr) : (int * string list) li
         close_segment_with (suspend_to next_state);
         segments := (next_state,
           ["fr->return_value = 0;"; "return 0;"]) :: !segments
+    | TEAwait (inner, _)
+      when (match match_async_extern_call inner with Some _ -> true | None -> false) ->
+        (* Tail `await async_extern(args)` — submit, suspend; on resume
+           use last_res as the function's return value. *)
+        let (name, args) =
+          match match_async_extern_call inner with
+          | Some r -> r | None -> assert false
+        in
+        let next_state = !curr_state + 1 in
+        emit_async_call name args next_state;
+        segments := (next_state,
+          ["fr->return_value = fr->last_res;"; "return 0;"]) :: !segments
     | other ->
         let cv = emit_expr ctor_map other in
         close_segment_with
@@ -1540,6 +1684,7 @@ let emit_async_frame_struct (f : Check.T.func) : string =
   let header = [
     "    OrtoStepFn step;";
     "    int state;";
+    "    int last_res;";    (* dispatcher writes the CQE result here before resume *)
     Printf.sprintf "    %s return_value;" (c_type f.return_ty);
   ] in
   Printf.sprintf "typedef struct {\n%s\n} Frame_%s;"
@@ -1622,6 +1767,7 @@ let emit (prog : Check.T.program) : string =
   let adt_forwards = List.map emit_adt_forward prog.types in
   let rec_forwards = List.map emit_record_forward prog.records in
   let array_forwards = emit_array_forwards () in
+  let task_forwards = emit_task_forwards () in
   let array_drop_forwards = emit_array_drop_forwards () in
   let fn_typedefs  = emit_fn_typedefs () in
   let ordered_structs = topo_sort_structs prog.types prog.records in
@@ -1648,10 +1794,20 @@ let emit (prog : Check.T.program) : string =
     | Some f ->
         let rt =
           "/* Stage 3 async runtime: an io_uring ring, a tiny CQE-driven\n\
-           \ * dispatcher, and helpers for the lowered state machines. */\n\
+           \ * dispatcher, and helpers for the lowered state machines.\n\
+           \ * Every frame begins with this header so the dispatcher\n\
+           \ * can read step/state/last_res generically. */\n\
            #include <liburing.h>\n\
            typedef int (*OrtoStepFn)(void *frame_ptr);\n\
-           static struct io_uring ORTO_RING;\n\
+           typedef struct {\n\
+           \    OrtoStepFn step;\n\
+           \    int state;\n\
+           \    int last_res;\n\
+           } OrtoFrameHeader;\n\
+           /* ORTO_RING is intentionally non-static so user-side\n\
+            * async-extern glue (extern fn read/write/recv/...) can\n\
+            * submit SQEs directly into the same ring. */\n\
+           struct io_uring ORTO_RING;\n\
            static int ORTO_PENDING = 0;\n\
            \n\
            static void orto_yield_suspend(void *fr) {\n\
@@ -1666,10 +1822,10 @@ let emit (prog : Check.T.program) : string =
            \        struct io_uring_cqe *cqe;\n\
            \        int rc = io_uring_wait_cqe(&ORTO_RING, &cqe);\n\
            \        if (rc < 0) return rc;\n\
-           \        void *fr = io_uring_cqe_get_data(cqe);\n\
+           \        OrtoFrameHeader *fr = io_uring_cqe_get_data(cqe);\n\
+           \        fr->last_res = cqe->res;\n\
            \        io_uring_cqe_seen(&ORTO_RING, cqe);\n\
-           \        OrtoStepFn step = *(OrtoStepFn *)fr;\n\
-           \        int sr = step(fr);\n\
+           \        int sr = fr->step(fr);\n\
            \        if (sr == 0) ORTO_PENDING--;\n\
            \    }\n\
            \    return 0;\n\
@@ -1743,6 +1899,7 @@ let emit (prog : Check.T.program) : string =
      @ adt_forwards
      @ rec_forwards
      @ array_forwards
+     @ task_forwards
      @ fn_typedefs
      @ struct_defs
      @ async_decls

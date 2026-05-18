@@ -762,6 +762,9 @@ let parse_func st =
 
 let parse_extern st =
   expect st TExtern;
+  let is_async =
+    if peek st = TAsync then (advance st; true) else false
+  in
   expect st TFn;
   let name = match eat st with
     | TIdent s -> s
@@ -774,7 +777,8 @@ let parse_extern st =
   expect st TRParen;
   expect st TArrow;
   let return_ty = parse_ty st in
-  { ext_name = name; ext_params = params; ext_return_ty = return_ty }
+  { ext_name = name; ext_params = params; ext_return_ty = return_ty;
+    ext_is_async = is_async }
 
 (* ---------- type declarations ---------- *)
 

@@ -119,6 +119,10 @@ module T = struct
     name      : string;
     params    : (string * ty) list;
     return_ty : ty;
+    (* For `extern async fn f(...) -> T`: source signature is
+       Task[T], C-side glue takes the bare params + a hidden
+       user_data pointer. *)
+    is_async  : bool;
   }
 
   type program = {
@@ -667,7 +671,15 @@ let build_env
         List.map (fun (_, t) ->
           validate_ty type_env record_env [] t) e.ext_params
       in
-      let ret_ty = validate_ty type_env record_env [] e.ext_return_ty in
+      let declared_ret = validate_ty type_env record_env [] e.ext_return_ty in
+      (* `extern async fn f(...) -> T` is exposed to the source as a
+         function returning Task[T] — its result can only be consumed
+         through `await`. The C-side declaration keeps the bare T;
+         emit handles the indirection. *)
+      let ret_ty =
+        if e.ext_is_async then TyApp ("Task", [declared_ret])
+        else declared_ret
+      in
       (e.ext_name, ([], (param_tys, ret_ty)))) externs
   in
   let env = { types = type_env;
@@ -2362,7 +2374,8 @@ let check (prog : program) : T.program =
       let (_, (param_tys, ret_ty)) = List.assoc e.ext_name env.fns in
       { T.name = e.ext_name;
         T.params = List.combine (List.map fst e.ext_params) param_tys;
-        T.return_ty = ret_ty }) externs
+        T.return_ty = ret_ty;
+        T.is_async = e.ext_is_async }) externs
   in
   let resolved_types   = List.map snd env.types in
   let resolved_records = List.map snd env.records in
