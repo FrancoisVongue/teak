@@ -49,7 +49,12 @@ type expr =
   | ERecord of string * record_init_elem list
   | EField  of expr * string
   | EIf     of expr * expr * expr
-  | ELet    of string * ty option * expr * expr
+  | ELet    of string * bool * ty option * expr * expr
+                                          (* name, mut?, optional ascription, value, body *)
+  | EAssign of string * expr              (* x := v — requires x to be mut *)
+  | EWhile  of expr * expr                (* while cond { body } — result is int 0 *)
+  | EBreak                                (* break;    — valid only inside while *)
+  | EContinue                             (* continue; — valid only inside while *)
   | EMatch  of expr * (pat * expr) list
   | EArray  of expr * expr * expr         (* array(r, N, init) — allocate N slots in region r *)
   | EArrayLit of expr * expr list         (* array(r, [v0, v1, ...]) — allocate and initialize *)
@@ -186,11 +191,16 @@ let rec show_expr = function
   | EIf (c, t, e)   ->
       Printf.sprintf "if %s { %s } else { %s }"
         (show_expr c) (show_expr t) (show_expr e)
-  | ELet (x, None, v, b)  ->
-      Printf.sprintf "let %s = %s; %s" x (show_expr v) (show_expr b)
-  | ELet (x, Some ty, v, b)  ->
-      Printf.sprintf "let %s: %s = %s; %s"
-        x (show_ty ty) (show_expr v) (show_expr b)
+  | ELet (x, m, None, v, b)  ->
+      Printf.sprintf "let %s%s = %s; %s"
+        (if m then "mut " else "") x (show_expr v) (show_expr b)
+  | ELet (x, m, Some ty, v, b)  ->
+      Printf.sprintf "let %s%s: %s = %s; %s"
+        (if m then "mut " else "") x (show_ty ty) (show_expr v) (show_expr b)
+  | EAssign (x, v) -> Printf.sprintf "(%s := %s)" x (show_expr v)
+  | EWhile (c, b) -> Printf.sprintf "while %s { %s }" (show_expr c) (show_expr b)
+  | EBreak    -> "break"
+  | EContinue -> "continue"
   | EMatch (e, arms) ->
       let arm_strs = List.map (fun (p, body) ->
         Printf.sprintf "%s => %s" (show_pat p) (show_expr body))

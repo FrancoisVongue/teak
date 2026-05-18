@@ -183,12 +183,15 @@ let rec resolve_expr
       ERecord (resolve_name map locals name, elems)
   | EField (e, f) -> EField (r e, f)
   | EIf (c, t, el) -> EIf (r c, r t, r el)
-  | ELet (x, asc, v, body) ->
+  | ELet (x, m, asc, v, body) ->
       let v' = r v in
       let asc' = Option.map rt asc in
       let new_locals = if x = "_" then locals else x :: locals in
       let body' = resolve_expr map new_locals body in
-      ELet (x, asc', v', body')
+      ELet (x, m, asc', v', body')
+  | EAssign (x, v) -> EAssign (resolve_name map locals x, r v)
+  | EWhile (c, b) -> EWhile (r c, r b)
+  | EBreak | EContinue -> e
   | EMatch (s, arms) ->
       let s' = r s in
       let arms' = List.map (fun (p, body) ->

@@ -1,131 +1,136 @@
 // std::str — operations over Array[byte].
 //
-// All allocating functions take a Region as first argument. View
-// functions (eq, find, slice-based) take no Region — they return
-// slices or scalars that share the input's lifetime.
-
-fn bytes_eq_loop(a: Array[byte], b: Array[byte], i: int) -> bool {
-    if i >= len(a) { true }
-    else if a[i] == b[i] { bytes_eq_loop(a, b, i + 1) }
-    else { false }
-}
+// Allocating functions take a Region as first argument.
+// View functions (eq, find, slice-based) take no Region.
 
 fn bytes_eq(a: Array[byte], b: Array[byte]) -> bool {
-    if len(a) == len(b) { bytes_eq_loop(a, b, 0) } else { false }
-}
-
-fn index_of_loop(s: Array[byte], c: byte, i: int) -> int {
-    if i >= len(s) { 0 - 1 }
-    else if s[i] == c { i }
-    else { index_of_loop(s, c, i + 1) }
-}
-
-fn index_of(s: Array[byte], c: byte) -> int {
-    index_of_loop(s, c, 0)
-}
-
-fn parse_int_loop(s: Array[byte], i: int, acc: int) -> int {
-    if i >= len(s) { acc }
+    if len(a) != len(b) { false }
     else {
-        let n = to_int(s[i]);
-        if n >= 48 && n <= 57 {
-            parse_int_loop(s, i + 1, acc * 10 + (n - 48))
-        } else { acc }
+        let mut i = 0;
+        while i < len(a) {
+            if a[i] != b[i] { break }
+            i := i + 1;
+        }
+        i == len(a)
     }
 }
 
-fn parse_int(s: Array[byte]) -> int { parse_int_loop(s, 0, 0) }
+fn index_of(s: Array[byte], c: byte) -> int {
+    let mut i = 0;
+    while i < len(s) {
+        if s[i] == c { break }
+        i := i + 1;
+    }
+    if i == len(s) { 0 - 1 } else { i }
+}
+
+fn parse_int(s: Array[byte]) -> int {
+    let mut acc = 0;
+    let mut i = 0;
+    while i < len(s) {
+        let n = to_int(s[i]);
+        if n < 48 || n > 57 { break }
+        acc := acc * 10 + (n - 48);
+        i := i + 1;
+    }
+    acc
+}
 
 fn upper_byte(b: byte) -> byte {
     let n = to_int(b);
     if n >= 97 && n <= 122 { to_byte(n - 32) } else { b }
 }
 
-fn to_upper_loop(src: Array[byte], dst: Array[byte], i: int) -> int {
-    if i >= len(src) { 0 }
-    else { dst[i] := upper_byte(src[i]); to_upper_loop(src, dst, i + 1) }
-}
-
 fn to_upper(r: Region, s: Array[byte]) -> Array[byte] {
     let dst = array(r, len(s), to_byte(0));
-    to_upper_loop(s, dst, 0);
+    let mut i = 0;
+    while i < len(s) {
+        dst[i] := upper_byte(s[i]);
+        i := i + 1;
+    }
     dst
 }
 
-fn copy_into(dst: Array[byte], src: Array[byte], at: int, i: int) -> int {
-    if i >= len(src) { 0 }
-    else { dst[at + i] := src[i]; copy_into(dst, src, at, i + 1) }
+fn copy_into(dst: Array[byte], src: Array[byte], at: int) -> int {
+    let mut i = 0;
+    while i < len(src) {
+        dst[at + i] := src[i];
+        i := i + 1;
+    }
+    0
 }
 
 fn concat(r: Region, a: Array[byte], b: Array[byte]) -> Array[byte] {
     let dst = array(r, len(a) + len(b), to_byte(0));
-    copy_into(dst, a, 0, 0);
-    copy_into(dst, b, len(a), 0);
+    copy_into(dst, a, 0);
+    copy_into(dst, b, len(a));
     dst
 }
 
-// Sum of lengths across an Array[Array[byte]].
-fn total_len_loop(parts: Array[Array[byte]], i: int, acc: int) -> int {
-    if i >= len(parts) { acc }
-    else { total_len_loop(parts, i + 1, acc + len(parts[i])) }
-}
-
-// Variadic-style concat. Builds one buffer of the right size, writes
-// each part in order. Replaces chains of pairwise concat.
-fn concat_all_loop(dst: Array[byte], parts: Array[Array[byte]], i: int, at: int) -> int {
-    if i >= len(parts) { 0 }
-    else {
-        copy_into(dst, parts[i], at, 0);
-        concat_all_loop(dst, parts, i + 1, at + len(parts[i]))
+fn total_len(parts: Array[Array[byte]]) -> int {
+    let mut total = 0;
+    let mut i = 0;
+    while i < len(parts) {
+        total := total + len(parts[i]);
+        i := i + 1;
     }
+    total
 }
 
 fn concat_all(r: Region, parts: Array[Array[byte]]) -> Array[byte] {
-    let total = total_len_loop(parts, 0, 0);
-    let dst = array(r, total, to_byte(0));
-    concat_all_loop(dst, parts, 0, 0);
+    let dst = array(r, total_len(parts), to_byte(0));
+    let mut at = 0;
+    let mut i = 0;
+    while i < len(parts) {
+        copy_into(dst, parts[i], at);
+        at := at + len(parts[i]);
+        i := i + 1;
+    }
     dst
 }
 
 fn digits_count(n: int) -> int {
-    if n < 10 { 1 } else { 1 + digits_count(n / 10) }
-}
-
-fn write_digits(dst: Array[byte], n: int, pos: int) -> int {
-    if n < 10 { dst[pos] := to_byte(48 + n); 0 }
-    else {
-        dst[pos] := to_byte(48 + (n % 10));
-        write_digits(dst, n / 10, pos - 1)
+    let mut count = 1;
+    let mut x = n / 10;
+    while x > 0 {
+        count := count + 1;
+        x := x / 10;
     }
+    count
 }
 
 fn int_to_bytes(r: Region, n: int) -> Array[byte] {
     let k = digits_count(n);
     let dst = array(r, k, to_byte(0));
-    write_digits(dst, n, k - 1);
+    let mut pos = k - 1;
+    let mut x = n;
+    while pos >= 0 {
+        dst[pos] := to_byte(48 + (x % 10));
+        x := x / 10;
+        pos := pos - 1;
+    }
     dst
 }
 
 // Find "key=VALUE" in a comma-separated string. Returns a slice over
 // VALUE (or empty slice if not found). All slicing — no allocation.
-fn field_after(s: Array[byte], key: Array[byte], from: int) -> Array[byte] {
-    if from >= len(s) {
-        slice(s, 0, 0)
-    } else if from + len(key) + 1 <= len(s)
-              && bytes_eq(slice(s, from, from + len(key)), key)
-              && s[from + len(key)] == to_byte(61) {
-        let val_start = from + len(key) + 1;
-        let rest = slice(s, val_start, len(s));
-        let comma = index_of(rest, to_byte(44));
-        if comma == 0 - 1 { rest } else { slice(rest, 0, comma) }
-    } else {
+fn lookup(s: Array[byte], key: Array[byte]) -> Array[byte] {
+    let mut from = 0;
+    let mut result = slice(s, 0, 0);
+    while from < len(s) {
+        if from + len(key) + 1 <= len(s)
+           && bytes_eq(slice(s, from, from + len(key)), key)
+           && s[from + len(key)] == to_byte(61) {
+            let val_start = from + len(key) + 1;
+            let rest = slice(s, val_start, len(s));
+            let comma = index_of(rest, to_byte(44));
+            result := if comma < 0 { rest } else { slice(rest, 0, comma) };
+            break
+        }
         let rest = slice(s, from, len(s));
         let comma = index_of(rest, to_byte(44));
-        if comma == 0 - 1 { slice(s, 0, 0) }
-        else { field_after(s, key, from + comma + 1) }
+        if comma < 0 { break }
+        from := from + comma + 1;
     }
-}
-
-fn lookup(s: Array[byte], key: Array[byte]) -> Array[byte] {
-    field_after(s, key, 0)
+    result
 }

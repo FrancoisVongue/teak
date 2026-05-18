@@ -9,8 +9,12 @@ type token =
   (* keywords *)
   | TFn
   | TLet
+  | TMut          (* mut — `let mut x = ...;` for reassignable bindings *)
   | TIf
   | TElse
+  | TWhile        (* while cond { body } *)
+  | TBreak        (* break; — early exit from while *)
+  | TContinue     (* continue; — skip to next iteration *)
   | TTrue
   | TFalse
   | TIntTy
@@ -77,8 +81,12 @@ let show = function
   | TStringLit s  -> Printf.sprintf "STR(%S)" s
   | TFn           -> "FN"
   | TLet          -> "LET"
+  | TMut          -> "MUT"
   | TIf           -> "IF"
   | TElse         -> "ELSE"
+  | TWhile        -> "WHILE"
+  | TBreak        -> "BREAK"
+  | TContinue     -> "CONTINUE"
   | TTrue         -> "TRUE"
   | TFalse        -> "FALSE"
   | TIntTy        -> "INT_TY"

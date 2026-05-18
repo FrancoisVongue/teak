@@ -46,6 +46,10 @@
 - Ветки `if`/`match` обязаны сходиться в одном live-set.
 - Tail-position consume — bare имя в хвосте функции = move.
 - `else if` цепочки без вложенных скобок.
+- `if cond { ... }` без else допустим (implicit else = int 0).
+- `while cond { body }` — циклы. `break` / `continue` внутри.
+- `let mut x = ...; x := v;` — изменяемые биндинги. Запрещён `mut` для Region (избегаем утечек через reassign).
+- Trailing `;` перед `}` отбрасывает значение выражения, блок возвращает int 0.
 
 **Модули:**
 - Один файл = один модуль, имя из имени файла (`str.orto` → `str`).
@@ -83,13 +87,9 @@
 
 Эти не блокируют, но рано или поздно вылезут:
 
-- **Mutable bindings.** Сейчас `let x = ...` immutable. `let mut x = ...; x := ...` ввести? Влияет на:
-  - Циклы (нужны mut counter).
-  - Builder patterns.
-  - Performance-sensitive код.
-  - Возможно нужны вместе с loops.
+- **`for i in 0..n { ... }` цикл.** Сахар поверх `let mut i = 0; while i < n { ...; i := i + 1; }`. ~30 строк.
 
-- **Loops (`while`, `for`).** Сейчас только рекурсия. Хвостовая рекурсия в C от gcc оптимизируется в jump (TCO), но не везде. Loops были бы прямолинейнее.
+- **`return` ключевое слово для раннего выхода.** Сейчас функция возвращает last-expression; ранний выход требует flag-переменной. Не критично но удобно.
 
 - **Closures / lambdas.** Сейчас только именованные функции верхнего уровня. Closures открывают callbacks, higher-order patterns. Усложнение — capture analysis.
 

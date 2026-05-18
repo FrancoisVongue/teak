@@ -161,6 +161,9 @@ let rec collect_expr (e : Check.T.expr) : unit =
   | Check.T.TEIsNull p -> collect_expr p
   | Check.T.TEArrayData (a, t) -> collect_expr a; collect_ty t
   | Check.T.TEDeref (p, t) -> collect_expr p; collect_ty t
+  | Check.T.TEAssign (_, v, t) -> collect_expr v; collect_ty t
+  | Check.T.TEWhile (c, b) -> collect_expr c; collect_expr b
+  | Check.T.TEBreak | Check.T.TEContinue -> ()
 
 let collect_program (prog : Check.T.program) : unit =
   Hashtbl.clear fn_types_seen;
@@ -321,6 +324,11 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
     | TEIsNull p -> TEIsNull (rn env p)
     | TEArrayData (a, t) -> TEArrayData (rn env a, t)
     | TEDeref (p, t) -> TEDeref (rn env p, t)
+    | TEAssign (x, v, t) ->
+        let x' = try List.assoc x env with Not_found -> x in
+        TEAssign (x', rn env v, t)
+    | TEWhile (c, b) -> TEWhile (rn env c, rn env b)
+    | TEBreak | TEContinue -> e
   in
   let initial_env = List.map (fun (p, _) -> (p, p)) f.params in
   { f with body = rn initial_env f.body }
@@ -459,6 +467,9 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TEIsNull _ -> TyBool
   | Check.T.TEArrayData (_, t) -> t
   | Check.T.TEDeref (_, t) -> t
+  | Check.T.TEAssign (_, _, _) -> TyInt
+  | Check.T.TEWhile (_, _) -> TyInt
+  | Check.T.TEBreak | Check.T.TEContinue -> TyInt
 
 (* Release a Region's buffer (if it's heap-allocated), bump the
    generation, and push the slot back onto the free list. Stack
@@ -989,6 +1000,37 @@ let rec emit_expr
       let cp = emit_expr ctor_map p_e in
       { stmts = cp.stmts;
         value = Printf.sprintf "(*%s)" cp.value }
+
+  | Check.T.TEAssign (x, v_e, _) ->
+      let cv = emit_expr ctor_map v_e in
+      let stmts = cv.stmts @ [Printf.sprintf "%s = %s;" x cv.value] in
+      { stmts; value = "0" }
+
+  | Check.T.TEWhile (cond_e, body_e) ->
+      (* Emit cond at the top of each iteration. C's while requires a
+         pure expression in the head; if cond has side-effect stmts,
+         we move them inside the loop with a break-on-false pattern. *)
+      let cc = emit_expr ctor_map cond_e in
+      let cb = emit_expr ctor_map body_e in
+      let indent ss = List.map (fun s -> "    " ^ s) ss in
+      let stmts =
+        if cc.stmts = [] then
+          [Printf.sprintf "while (%s) {" cc.value]
+          @ indent cb.stmts
+          @ [Printf.sprintf "    (void)(%s);" cb.value]
+          @ ["}"]
+        else
+          ["while (1) {"]
+          @ indent cc.stmts
+          @ [Printf.sprintf "    if (!(%s)) break;" cc.value]
+          @ indent cb.stmts
+          @ [Printf.sprintf "    (void)(%s);" cb.value]
+          @ ["}"]
+      in
+      { stmts; value = "0" }
+
+  | Check.T.TEBreak    -> { stmts = ["break;"];    value = "0" }
+  | Check.T.TEContinue -> { stmts = ["continue;"]; value = "0" }
 
 (* Shared setup for a[i] and a[i] := v. Returns the array/index codes,
    fresh names, the array's C type, the abort-checks, and the C

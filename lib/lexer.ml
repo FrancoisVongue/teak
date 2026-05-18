@@ -19,8 +19,12 @@ let lower_ident_or_keyword s =
   match s with
   | "fn"    -> TFn
   | "let"   -> TLet
+  | "mut"   -> TMut
   | "if"    -> TIf
   | "else"  -> TElse
+  | "while" -> TWhile
+  | "break" -> TBreak
+  | "continue" -> TContinue
   | "true"  -> TTrue
   | "false" -> TFalse
   | "int"   -> TIntTy

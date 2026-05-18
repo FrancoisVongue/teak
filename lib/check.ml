@@ -74,6 +74,12 @@ module T = struct
                   (* array_data(a: Array[T]) -> TyPtr T *)
     | TEDeref  of expr * ty
                   (* p deref — second field is element type T *)
+    | TEAssign of string * expr * ty
+                  (* x := v — third field is the type of x *)
+    | TEWhile  of expr * expr
+                  (* while cond { body } — always int 0 *)
+    | TEBreak
+    | TEContinue
 
   type func = {
     name        : string;
@@ -146,6 +152,10 @@ let check_not_c_reserved (kind : string) (name : string) : unit =
 
 let meta_counter = ref 0
 let drop_name_counter = ref 0
+
+(* Depth of the current while loop nest. break/continue require > 0.
+   Reset at each function-body entry. *)
+let loop_depth = ref 0
 let fresh_meta () : meta =
   incr meta_counter;
   { id = !meta_counter; resolved = None }
@@ -743,6 +753,9 @@ let rec takes_consume (env : env) (x : string) (e : T.expr) : bool =
   | T.TEIsNull p -> takes_consume env x p
   | T.TEArrayData (a, _) -> takes_consume env x a
   | T.TEDeref (p, _) -> takes_consume env x p
+  | T.TEAssign (_, v, _) -> takes_consume env x v
+  | T.TEWhile (c, b) -> takes_consume env x c || takes_consume env x b
+  | T.TEBreak | T.TEContinue -> false
 
 (* tail_consume: does x reach the tail position of the expression? *)
 let rec tail_consume (x : string) (e : T.expr) : bool =
@@ -763,8 +776,9 @@ let rec tail_consume (x : string) (e : T.expr) : bool =
 let is_consumed (env : env) (x : string) (e : T.expr) : bool =
   takes_consume env x e || tail_consume x e
 
+(* vars carries (name, (type, is_mut)) so EAssign can verify mutability. *)
 let rec infer (env : env) (tparams : string list)
-  (vars : (string * ty) list) (e : expr)
+  (vars : (string * (ty * bool)) list) (e : expr)
   : T.expr * ty =
   match e with
   | EInt n  -> (T.TEInt n,  TyInt)
@@ -807,7 +821,7 @@ let rec infer (env : env) (tparams : string list)
 
   | EVar x ->
       (match List.assoc_opt x vars with
-       | Some t -> (T.TEVar (x, t), t)
+       | Some (t, _) -> (T.TEVar (x, t), t)
        | None ->
            (match List.assoc_opt x env.fns with
             | Some (fn_tparams, (params, ret)) ->
@@ -986,7 +1000,7 @@ let rec infer (env : env) (tparams : string list)
       unify tt_ty te_ty;
       (T.TEIf (tc, tt, te, tt_ty), tt_ty)
 
-  | ELet (x, ascription, value, body) ->
+  | ELet (x, is_mut, ascription, value, body) ->
       if x <> "_" then check_not_c_reserved "let-binding" x;
       let (tv, tv_ty) = infer env tparams vars value in
       (match ascription with
@@ -994,10 +1008,21 @@ let rec infer (env : env) (tparams : string list)
        | Some t ->
            let t = validate_ty_for_ascription env tparams t in
            unify tv_ty t);
+      (* Region must not be `mut` — reassigning would silently leak
+         the slot held by the previous value. *)
+      if is_mut then
+        (match prune tv_ty with
+         | TyApp ("Region", _) ->
+             raise (Type_error
+               (Printf.sprintf
+                  "let mut %s : Region is forbidden — \
+                   reassigning a Region binding would leak its slot. \
+                   Create a fresh let-binding instead."
+                  x))
+         | _ -> ());
       (* Region is a copyable handle, but each underlying slot must have
-         exactly one drop. The rule: a let-binding of Region type owns
-         its slot and drops at end of scope. Reject aliasing — `let r2 = r`
-         would silently create two owners pointing at the same slot. *)
+         exactly one drop. Reject aliasing — `let r2 = r` would silently
+         create two owners pointing at the same slot. *)
       (match prune tv_ty, tv with
        | TyApp ("Region", _), T.TEVar (src, _) ->
            raise (Type_error
@@ -1007,8 +1032,6 @@ let rec infer (env : env) (tparams : string list)
                  region(...) / stack_region(...) / aligned_region(...) call"
                 x src))
        | _ -> ());
-      (* `let _ = region(N)` is the explicit-drop form: rename to a
-         fresh slot so emit produces a visible free. *)
       let x_actual =
         if x = "_" then
           (match prune tv_ty with
@@ -1019,7 +1042,8 @@ let rec infer (env : env) (tparams : string list)
         else x
       in
       let body_vars =
-        if x_actual = "_" then vars else (x_actual, tv_ty) :: vars
+        if x_actual = "_" then vars
+        else (x_actual, (tv_ty, is_mut)) :: vars
       in
       let (tb, tb_ty) = infer env tparams body_vars body in
       let auto_drop =
@@ -1030,6 +1054,52 @@ let rec infer (env : env) (tparams : string list)
            | _ -> false)
       in
       (T.TELet (x_actual, tv_ty, tv, tb, tb_ty, auto_drop), tb_ty)
+
+  | EAssign (x, value) ->
+      let (tv, tv_ty) = infer env tparams vars value in
+      (match List.assoc_opt x vars with
+       | Some (xt, true) ->
+           (try unify xt tv_ty
+            with Type_error _ ->
+              raise (Type_error
+                (Printf.sprintf
+                   "assignment to %S: variable has type %s, value has type %s"
+                   x (show_ty (zonk xt)) (show_ty (zonk tv_ty)))));
+           (T.TEAssign (x, tv, xt), TyInt)
+       | Some (_, false) ->
+           raise (Type_error
+             (Printf.sprintf
+                "cannot assign to %S — declared without `mut`. \
+                 Use `let mut %s = ...` to make it reassignable."
+                x x))
+       | None ->
+           raise (Type_error
+             (Printf.sprintf "assignment to unknown variable %S" x)))
+
+  | EWhile (cond, body) ->
+      let (tc, tc_ty) = infer env tparams vars cond in
+      (try unify tc_ty TyBool
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "while condition must be bool, got %s"
+              (show_ty (zonk tc_ty)))));
+      incr loop_depth;
+      let (tb, _tb_ty) = infer env tparams vars body in
+      decr loop_depth;
+      (* while never produces a real value; we use int 0 as placeholder
+         for "unit" same as a[i] := v. *)
+      (T.TEWhile (tc, tb), TyInt)
+
+  | EBreak ->
+      if !loop_depth = 0 then
+        raise (Type_error "break used outside of a while loop");
+      (T.TEBreak, TyMeta (fresh_meta ()))
+
+  | EContinue ->
+      if !loop_depth = 0 then
+        raise (Type_error "continue used outside of a while loop");
+      (T.TEContinue, TyMeta (fresh_meta ()))
 
   | EMatch (scrut, arms) ->
       if arms = [] then
@@ -1070,7 +1140,7 @@ let rec infer (env : env) (tparams : string list)
               let inst_result = TyApp (info.ctor_owner, owner_args) in
               unify inst_result tscrut_ty;
               List.fold_left2 (fun acc v t ->
-                if v = "_" then acc else (v, t) :: acc)
+                if v = "_" then acc else (v, (t, false)) :: acc)
                 vars vs arg_tys
         in
         let (tbody, tbody_ty) = infer env tparams body_vars body in
@@ -1458,6 +1528,9 @@ let rec zonk_expr (e : T.expr) : T.expr =
   | T.TEIsNull e -> T.TEIsNull (zonk_expr e)
   | T.TEArrayData (a, t) -> T.TEArrayData (zonk_expr a, zonk_expect t)
   | T.TEDeref (p, t) -> T.TEDeref (zonk_expr p, zonk_expect t)
+  | T.TEAssign (x, v, t) -> T.TEAssign (x, zonk_expr v, zonk_expect t)
+  | T.TEWhile (c, b) -> T.TEWhile (zonk_expr c, zonk_expr b)
+  | T.TEBreak | T.TEContinue -> e
 
 and zonk_expect (t : ty) : ty =
   let t = zonk t in
@@ -1717,6 +1790,17 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       let (p', live) = check_moves_expr env live false p in
       (T.TEDeref (p', t), live)
 
+  | T.TEAssign (x, v, t) ->
+      let (v', live) = check_moves_expr env live false v in
+      (T.TEAssign (x, v', t), live)
+
+  | T.TEWhile (c, b) ->
+      let (c', live) = check_moves_expr env live false c in
+      let (b', live) = check_moves_expr env live false b in
+      (T.TEWhile (c', b'), live)
+
+  | T.TEBreak | T.TEContinue -> (e, live)
+
 and consume_arg (env : env) (live : ty SM.t) (e : T.expr)
   : T.expr * ty SM.t =
   let (e', live) = check_moves_expr env live false e in
@@ -1728,7 +1812,11 @@ and consume_arg (env : env) (live : ty SM.t) (e : T.expr)
 
 let check_func (env : env) (f : func) : T.func =
   let (_, (param_tys, ret_ty)) = List.assoc f.name env.fns in
-  let vars = List.combine (List.map fst f.params) param_tys in
+  loop_depth := 0;
+  let vars =
+    List.combine (List.map fst f.params)
+      (List.map (fun t -> (t, false)) param_tys)
+  in
   let tparams = f.type_params in
   let (tbody, tbody_ty) = infer env tparams vars f.body in
   (try unify ret_ty tbody_ty

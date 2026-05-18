@@ -120,7 +120,9 @@ let parse_binop_chain st (ops : (token * binop) list) lower =
 
 let rec parse_expr st = parse_assign st
 
-(* `:=` is only valid for array index assignment: `a[i] := v`. *)
+(* `:=` is allowed in two shapes:
+     `a[i] := v` — array slot assignment (always allowed)
+     `x := v`    — variable reassignment (requires `let mut x = ...`) *)
 and parse_assign st =
   let lhs = parse_or st in
   if peek st = TColonEq then begin
@@ -128,8 +130,9 @@ and parse_assign st =
     let rhs = parse_assign st in
     match lhs with
     | EIndex (arr, idx) -> EAssignIdx (arr, idx, rhs)
+    | EVar x -> EAssign (x, rhs)
     | _ -> raise (Parse_error
-        "`:=` is only allowed on array indexing: a[i] := v")
+        "`:=` requires a variable name or array indexing on the left")
   end else lhs
 
 and parse_or st =
@@ -246,7 +249,7 @@ and parse_atom st =
   | TInt _ | TTrue | TFalse | TLParen
   | TIdent _ | TCtorIdent _
   | TStringLit _
-  | TIf | TMatch
+  | TIf | TMatch | TWhile | TBreak | TContinue
   | TArray | TLen | TSlice
   | TToInt | TToByte
   | TCAlloc | TCFree | TNullPtr | TIsNull | TArrayData
@@ -280,6 +283,12 @@ and parse_atom_consume st =
        | _ -> ECtor (name, []))
   | TIf -> parse_if_after_kw st
   | TMatch -> parse_match_after_kw st
+  | TWhile ->
+      let cond = parse_expr st in
+      let body = parse_block st in
+      EWhile (cond, body)
+  | TBreak -> EBreak
+  | TContinue -> EContinue
   | TArray ->
       expect st TLParen;
       let r = parse_expr st in
@@ -400,18 +409,23 @@ and parse_atom_consume st =
 and parse_if_after_kw st =
   let cond = parse_expr st in
   let then_b = parse_block st in
-  expect st TElse;
-  (* Support `else if ... { ... }` as sugar for `else { if ... { ... } }`.
-     This is the only place the parser peeks past a keyword to special-case
-     a chain — without it, multi-arm conditionals nest visually. *)
-  let else_b =
-    if peek st = TIf then begin
-      advance st;
-      parse_if_after_kw st
-    end else
-      parse_block st
-  in
-  EIf (cond, then_b, else_b)
+  (* `else` is optional. When absent, the implicit else is int 0 —
+     both branches must then unify to int. This is the form used
+     inside loops: `if cond { break }`. *)
+  if peek st <> TElse then
+    EIf (cond, then_b, EInt 0)
+  else begin
+    advance st;
+    (* Support `else if ... { ... }` as sugar for nested if. *)
+    let else_b =
+      if peek st = TIf then begin
+        advance st;
+        parse_if_after_kw st
+      end else
+        parse_block st
+    in
+    EIf (cond, then_b, else_b)
+  end
 
 and parse_match_after_kw st =
   let scrut = parse_expr st in
@@ -476,6 +490,9 @@ and parse_block_body st =
   match peek st with
   | TLet ->
       advance st;
+      let is_mut =
+        if peek st = TMut then begin advance st; true end else false
+      in
       let name = match eat st with
         | TIdent s    -> s
         | TUnderscore -> "_"
@@ -493,22 +510,30 @@ and parse_block_body st =
       let value = parse_expr st in
       expect st TSemi;
       let body = parse_block_body st in
-      ELet (name, ascription, value, body)
+      ELet (name, is_mut, ascription, value, body)
   | _ ->
       let e = parse_expr st in
+      let is_block_like = match e with
+        | EIf _ | EMatch _ | EWhile _ -> true
+        | _ -> false
+      in
       if peek st = TSemi then begin
         advance st;
         if peek st = TRBrace then
-          (* trailing `;` before `}` — treat as expression-with-unit-result.
-             We have no unit, so allow this only if the expression is the
-             last thing and just discard the trailing semi. But since we
-             must produce SOME value as block result, this is an error. *)
-          raise (Parse_error
-            "block cannot end with `;` — last expression is the block's value")
+          (* Trailing `;` discards the last expression's value; the
+             block's result becomes int 0 (placeholder for unit). *)
+          ELet ("_", false, None, e, EInt 0)
         else
           let rest = parse_block_body st in
-          ELet ("_", None, e, rest)
-      end else e
+          ELet ("_", false, None, e, rest)
+      end
+      else if is_block_like && peek st <> TRBrace then
+        (* Block-like expression (if/match/while) followed by another
+           statement without a `;` between — treat the implicit boundary
+           as a discard. Same as Rust's optional-`;` rule after `}`. *)
+        let rest = parse_block_body st in
+        ELet ("_", false, None, e, rest)
+      else e
 
 (* ---------- functions ---------- *)
 

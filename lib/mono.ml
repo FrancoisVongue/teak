@@ -221,6 +221,11 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         Check.T.TEArrayData (rewrite_expr subst a, rt t)
     | Check.T.TEDeref (p, t) ->
         Check.T.TEDeref (rewrite_expr subst p, rt t)
+    | Check.T.TEAssign (x, v, t) ->
+        Check.T.TEAssign (x, rewrite_expr subst v, rt t)
+    | Check.T.TEWhile (c, b) ->
+        Check.T.TEWhile (rewrite_expr subst c, rewrite_expr subst b)
+    | Check.T.TEBreak | Check.T.TEContinue -> e
   in
 
   request_fn "main" [];
