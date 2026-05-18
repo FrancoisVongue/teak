@@ -34,9 +34,10 @@
 - Literal patterns: `42`, `-3`, `true`, `"hello"`.
 - Bind pattern: `x => body` биндит scrutinee к x (lowercase ident).
 - Or-patterns: `1 | 2 | 3 =>`, `Red | Green | Blue =>`.
+- Guards (non-ADT): `x if x > 0 => ...`. Guard не считает arm как "covering" — может быть тот же ctor/literal unguarded дальше.
 - Exhaustivity:
   - ADT — все ctor покрыты или catch-all.
-  - Bool — true и false или catch-all.
+  - Bool — true и false unguarded, или catch-all.
   - Int/Byte/Bytes — catch-all обязателен.
 
 **Типы:**
@@ -84,47 +85,41 @@
 
 ## → Дорога вперёд
 
+Базовая ось языка закрыта. Что осталось — это **stdlib** (это уже
+orto-код, не compiler) и крупные архитектурные шаги, требующие
+обсуждения с Francois.
+
 ### 1. Stdlib *(следующее)*
 
-Когда модули появятся:
-- `std::gen_arena` — generational arena поверх `Array[Slot[T]]`. Game-style handle tables, resource pools, evicting caches (где базовый Region — bump-only и не освобождает per-entry).
+Когда понадобится:
+- `std::gen_arena` — generational arena поверх `Array[Slot[T]]`. Handle tables, resource pools, evicting caches (где Region — bump-only).
 - `std::slab` — slab pool для homogeneous-size объектов.
 - `std::ring` — ring buffer / circular array для стримов.
-- `std::str` — операции над строками. Канонические: `bytes_copy(r, s)` (копирует Array[byte] в другой Region), `bytes_concat(r, [s...])` (склейка), `bytes_eq`, `bytes_find`, `parse_int`, `int_to_bytes(r, n)`, `starts_with`, `split`, etc.
+- `std::str` — расширить: `bytes_copy(r, s)`, `bytes_find`, `starts_with`, `ends_with`, `split`, etc.
+- `std::int` — `min`, `max`, `abs`.
+- `std::option` — `unwrap_or`, и (когда будут closures) `map`, `and_then`.
 
-Все — orto code, не compiler features.
-
-### 2. `try_at(a, i)` для defensive чтения
-
-Дефолтный `a[i]` остаётся abort-on-dangling (быстрый, для обычных случаев где регион гарантированно жив). Добавим safe-вариант:
-- `try_at(a, i)` → `Option[T]`.
-- `try_set(a, i, v)` → `Option[int]`.
-
-Программист выбирает по контексту. Hot loop — `a[i]`. Defensive код где Array мог пережить регион — `try_at`.
+Все — orto code, не compiler features. Сейчас `str.orto`, `io.orto`, `db.orto` в `examples/` — это прото-stdlib.
 
 ---
 
 ## ◯ Открытые дизайн-вопросы
 
-Эти не блокируют, но рано или поздно вылезут:
+Эти не блокируют. Каждый — серьёзная архитектурная работа, требующая обсуждения.
 
-- **`for i in 0..n { ... }` цикл.** Сахар поверх `let mut i = 0; while i < n { ...; i := i + 1; }`. ~30 строк.
+- **Closures / lambdas.** Сейчас только именованные функции. Closures открывают callbacks, higher-order patterns (`map`, `fold`, `filter`). Усложнение — capture analysis, runtime representation (fat pointer), interaction с linear типами.
 
-- **`return` ключевое слово для раннего выхода.** Сейчас функция возвращает last-expression; ранний выход требует flag-переменной. Не критично но удобно.
+- **Threading.** Region линейный = одно владение. Передача через channel-like API. Atomic gen-counter для копий handle'ов. Базовая модель не меняется, но дизайн сборки требует разговора.
 
-- **Closures / lambdas.** Сейчас только именованные функции верхнего уровня. Closures открывают callbacks, higher-order patterns. Усложнение — capture analysis.
+- **`format(r, "...", a, b, c)` variadic.** Текущее `concat_all(r, array(r, [...]))` многословно. Variadic + типизированные args существенно улучшат, но variadic — серьёзная фича.
 
-- **Pipeline `|>`.** Sugar для chains: `x |> f |> g` ≡ `g(f(x))`. Удобно для DSL-стиля. Не сложно реализовать.
+- **Nested patterns в match.** `Some(0) =>`, `Some(_) =>`. Сейчас `Some(x)` биндит x, литерал на месте не работает. Закроется guards (есть!) на 80%; nested cleaner но big refactor.
 
-- **Pattern or-arms.** `match x { 1 | 2 | 3 => ... }`. Token `TPipe` зарезервирован под это.
+- **Guards в ADT match.** Сейчас запрещены — пользователь пишет `if` внутри arm body. Чтобы разрешить, нужен `goto`-based fallthrough в ADT switch emit.
 
-- **Type aliases.** `type Bytes = Array[byte]`. `type` keyword уже зарезервирован. ~20 строк.
+- **Type-level alignment / sizes.** `Region[Page]` vs `Region[Default]` через тип. Сейчас alignment runtime через keyword.
 
-- **Error handling beyond Option/Result.** Effects? Try/catch? Скорее всего — нет, остаёмся на ADT.
-
-- **Threading.** Region линейный = одно владение. Передача через channel-like API. Atomic gen-counter для Ref. Базовая модель не меняется, но дизайн сборки требует обсуждения.
-
-- **Type-level alignment / sizes.** `Region[Page]` vs `Region[Default]` через тип. Сейчас alignment runtime через keyword. Если ошибки с alignment станут проблемой — добавим.
+- **Implicit allocator / `alloc fn`.** Обсуждалось — решено НЕ делать. Видимость аллокации (`r` параметр) — якорь философии orto.
 
 ---
 

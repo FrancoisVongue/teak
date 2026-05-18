@@ -370,9 +370,47 @@ concat_all(r, array(r, [a, b, c]))
 
 **Где будет больно при росте:**
 
-- Добавление любого нового линейного/resource-owning типа.
-- Добавление literal-patterns в match.
+- ~~Добавление любого нового линейного/resource-owning типа.~~ **Закрыто:**
+  `linear struct/enum` теперь первый-классная фича. Region — частный
+  случай. Чтобы добавить Socket/File/GpuTexture — пишешь
+  `linear struct + drop_T` и всё.
+- ~~Добавление literal-patterns в match.~~ **Закрыто:** scrutinee_kind
+  + pat_compatible_with_kind = единый dispatch. Добавление нового вида
+  скрутини (например `match` по `Array[int]`) — ~30 строк в одном месте.
 - Добавление еще одного интегрального типа (u16, u32, i64) — каждый
-  будет повторять путь byte.
+  будет повторять путь byte. Это остается.
 
-Эти три места — кандидаты на абстракцию, когда боль появится в практике.
+---
+
+## Ретроспективный cleanup (после унификации Region/linear)
+
+После того как `linear struct` стал первым-классной фичей, в compiler
+осталось много dead code из старой модели:
+
+**Удалено** (~195 строк):
+
+- `takes_consume`, `tail_consume`, `consumed_in_arg`, `is_consumed` —
+  параллельный move analysis. Работа уже делается в `check_moves_expr`.
+- `is_copyable`, `consume_arg` — после унификации все типы copyable
+  (alias-forbidden enforced separately). `not is_copyable` всегда false.
+- `T.func.param_drops` поле — всегда []. Linear params всегда borrowed.
+- `PWild` отдельный variant — унифицирован с `PBind "_"`.
+
+**Унифицировано:**
+
+- `drop_Region` теперь обычная C-функция в runtime, идентична по
+  структуре user-defined `drop_Socket`. Emit делает `<drop_fn>(x);`
+  единообразно.
+- `is_linear_name` set управляет всеми правилами linear: alias-rejection,
+  auto_drop, drop validation, data-position checking.
+
+**Что осталось как special case:**
+
+- `main` и externs не мангляются (вынужденно: C-linker).
+- Builtin Option захардкожен (на стороне check.ml). Уйдёт когда будет
+  ясно как делать первоклассный enum.
+- Region скипает emission struct/typedef (оно в runtime header). Это
+  правильное special-case для builtin'а.
+
+После cleanup compiler 6003 → 5808 строк OCaml. Без потери
+функциональности.
