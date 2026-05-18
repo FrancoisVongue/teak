@@ -272,9 +272,9 @@ Array_byte str__int_to_bytes(Region r, int n) {
 
 Array_db__Person db__search_by_name(Region r, Array_db__Person users, Array_byte needle) {
     int count_1 = 0;
-    int _for_hi_657985238_2 = users.len;
+    int _for_hi_486978719_2 = users.len;
     int i_3 = 0;
-    while ((i_3 < _for_hi_657985238_2)) {
+    while ((i_3 < _for_hi_486978719_2)) {
         Array_db__Person _a_1 = users;
         int _i_2 = i_3;
         if (ORTO_REGIONS[_a_1.slot].gen != _a_1.expected_gen) abort();
@@ -306,9 +306,9 @@ Array_db__Person db__search_by_name(Region r, Array_db__Person users, Array_byte
     Array_db__Person _arr_10 = ((Array_db__Person){ .slot = _r_5.slot, .offset = _off_7, .len = _n_6, .expected_gen = _r_5.expected_gen });
     Array_db__Person result_4 = _arr_10;
     int k_5 = 0;
-    int _for_hi_747847183_6 = users.len;
+    int _for_hi_723991699_6 = users.len;
     int j_7 = 0;
-    while ((j_7 < _for_hi_747847183_6)) {
+    while ((j_7 < _for_hi_723991699_6)) {
         Array_db__Person _a_11 = users;
         int _i_12 = j_7;
         if (ORTO_REGIONS[_a_11.slot].gen != _a_11.expected_gen) abort();
@@ -539,9 +539,9 @@ Array_db__Person db__all_users(Region r) {
     for (int _i_5 = 0; _i_5 < _n_2; _i_5++) _slots_4[_i_5] = ((db__Person){ .id = 0, .name = ((Array_byte){ .slot = 0, .offset = 3, .len = 0, .expected_gen = 1 }), .email = ((Array_byte){ .slot = 0, .offset = 3, .len = 0, .expected_gen = 1 }), .age = 0 });
     Array_db__Person _arr_6 = ((Array_db__Person){ .slot = _r_1.slot, .offset = _off_3, .len = _n_2, .expected_gen = _r_1.expected_gen });
     Array_db__Person result_2 = _arr_6;
-    int _for_hi_604309372_3 = rows_1.len;
+    int _for_hi_1012854813_3 = rows_1.len;
     int i_4 = 0;
-    while ((i_4 < _for_hi_604309372_3)) {
+    while ((i_4 < _for_hi_1012854813_3)) {
         Array_db_driver__Row _a_9 = rows_1;
         int _i_10 = i_4;
         if (ORTO_REGIONS[_a_9.slot].gen != _a_9.expected_gen) abort();
@@ -607,9 +607,9 @@ Array_byte address_book__format_person_list(Region r, Array_byte header, Array_d
     if (_i_10 < 0 || _i_10 >= _a_9.len) abort();
     ((Array_byte*)(ORTO_REGIONS[_a_9.slot].buffer + _a_9.offset))[_i_10] = ((Array_byte){ .slot = 0, .offset = 54, .len = 1, .expected_gen = 1 });
     (void)(0);
-    int _for_hi_779876575_2 = people.len;
+    int _for_hi_426395921_2 = people.len;
     int i_3 = 0;
-    while ((i_3 < _for_hi_779876575_2)) {
+    while ((i_3 < _for_hi_426395921_2)) {
         Array_db__Person _a_13 = people;
         int _i_14 = i_3;
         if (ORTO_REGIONS[_a_13.slot].gen != _a_13.expected_gen) abort();
@@ -890,9 +890,9 @@ Array_db_driver__Row db_driver__run_query(Region r, Array_byte _sql) {
 }
 
 Option_db__Person db__find_by_id(Array_db__Person users, int id) {
-    int _for_hi_657985238_1 = users.len;
+    int _for_hi_486978719_1 = users.len;
     int i_2 = 0;
-    while ((i_2 < _for_hi_657985238_1)) {
+    while ((i_2 < _for_hi_486978719_1)) {
         Array_db__Person _a_1 = users;
         int _i_2 = i_2;
         if (ORTO_REGIONS[_a_1.slot].gen != _a_1.expected_gen) abort();
@@ -949,9 +949,9 @@ int main(void) {
     _slots_6[6] = ((Array_byte){ .slot = 0, .offset = 359, .len = 19, .expected_gen = 1 });
     Array_Array_byte _arr_7 = ((Array_Array_byte){ .slot = _r_4.slot, .offset = _off_5, .len = 7, .expected_gen = _r_4.expected_gen });
     Array_Array_byte requests_3 = _arr_7;
-    int _for_hi_984410231_4 = requests_3.len;
+    int _for_hi_90256849_4 = requests_3.len;
     int i_5 = 0;
-    while ((i_5 < _for_hi_984410231_4)) {
+    while ((i_5 < _for_hi_90256849_4)) {
         int _n_8 = 8192;
         if (_n_8 < 0) abort();
         if (ORTO_REGION_FREE_HEAD < 0) abort();

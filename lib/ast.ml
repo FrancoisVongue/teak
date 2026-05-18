@@ -43,6 +43,7 @@ type unop = OpNeg | OpNot
 
 type expr =
   | EInt    of int
+  | EFloat  of float
   | EBool   of bool
   | EVar    of string
   | EStringLit of string                  (* "..." — byte literal in static region *)
@@ -71,8 +72,9 @@ type expr =
   | EAssignIdx of expr * expr * expr      (* a[i] := v — write element, returns int *)
   | ELen    of expr                       (* len(a) — array length *)
   | ESlice  of expr * expr * expr         (* slice(a, lo, hi) — sub-handle in same region *)
-  | EToInt  of expr                       (* to_int(b) — widen byte to int *)
+  | EToInt  of expr                       (* to_int(b|f) — byte→int or float→int truncate *)
   | EToByte of expr                       (* to_byte(n) — truncate int to byte *)
+  | EToFloat of expr                      (* to_float(n) — int → float *)
   | ECAlloc of ty * expr                  (* c_alloc[T](n) — malloc n*sizeof(T), returns *T *)
   | ECFree  of expr                       (* c_free(p) — free raw pointer *)
   | ENullPtr of ty                        (* null_ptr[T]() — typed NULL *)
@@ -186,6 +188,7 @@ let show_unop = function
 
 let rec show_expr = function
   | EInt n          -> string_of_int n
+  | EFloat f        -> Printf.sprintf "%g" f
   | EBool true      -> "true"
   | EBool false     -> "false"
   | EVar x          -> x
@@ -254,6 +257,7 @@ let rec show_expr = function
         (show_expr a) (show_expr lo) (show_expr hi)
   | EToInt e  -> Printf.sprintf "to_int(%s)"  (show_expr e)
   | EToByte e -> Printf.sprintf "to_byte(%s)" (show_expr e)
+  | EToFloat e -> Printf.sprintf "to_float(%s)" (show_expr e)
   | ECAlloc (t, n) ->
       Printf.sprintf "c_alloc[%s](%s)" (show_ty t) (show_expr n)
   | ECFree p -> Printf.sprintf "c_free(%s)" (show_expr p)

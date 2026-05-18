@@ -41,11 +41,15 @@
   - Int/Byte/Bytes — catch-all обязателен.
 
 **Типы:**
-- `int`, `bool`, `byte`, `struct`, `enum`, `fn(...) -> ...`.
+- `int`, `bool`, `byte`, `float`, `struct`, `enum`, `fn(...) -> ...`.
+- `float` — IEEE 754 double (C `double`). NaN/Infinity по IEEE: `x != x` ловит NaN.
 - Generics с параметрами `[T, U, ...]`.
 - Параметрический полиморфизм, monomorphization.
 - Запрет линейных типов в data position (поле, вариант, type-arg).
 - Запрет линейных типов в позиции generic параметра (Region не пройдёт через `[T]`).
+- `to_int(byte|float) -> int`, `to_byte(int) -> byte`, `to_float(int) -> float` — явные конверсии.
+- `+ - * /` работают для int и float (оба операнда того же типа). `%` — только int.
+- `match` на float запрещён (NaN/zero edge cases); используй `if` или bind+guard.
 
 **Строки:**
 - `Array[byte]` — единственный тип строки. Никаких String/&str/CString/Cow.

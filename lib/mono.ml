@@ -126,6 +126,10 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         TyApp ("byte", [])
     | TyApp ("byte", _) ->
         failwith "mono rewrite_ty: byte takes no type arguments"
+    | TyApp ("float", []) ->
+        TyApp ("float", [])
+    | TyApp ("float", _) ->
+        failwith "mono rewrite_ty: float takes no type arguments"
     | TyApp (n, args) ->
         let args = List.map (rewrite_ty subst) args in
         if is_record_name n then begin
@@ -147,7 +151,8 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
     (e : Check.T.expr) : Check.T.expr =
     let rt = rewrite_ty subst in
     match e with
-    | Check.T.TEInt _ | Check.T.TEBool _ | Check.T.TEStringLit _ -> e
+    | Check.T.TEInt _ | Check.T.TEFloat _ | Check.T.TEBool _
+    | Check.T.TEStringLit _ -> e
     | Check.T.TEVar (x, t) -> Check.T.TEVar (x, rt t)
 
     | Check.T.TEFnRef (name, ts, fn_ty) ->
@@ -236,6 +241,10 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         Check.T.TEToInt (rewrite_expr subst e)
     | Check.T.TEToByte e ->
         Check.T.TEToByte (rewrite_expr subst e)
+    | Check.T.TEToFloat e ->
+        Check.T.TEToFloat (rewrite_expr subst e)
+    | Check.T.TEToIntFromFloat e ->
+        Check.T.TEToIntFromFloat (rewrite_expr subst e)
     | Check.T.TECAlloc (et, n, rt_) ->
         Check.T.TECAlloc (rt et, rewrite_expr subst n, rt rt_)
     | Check.T.TECFree p ->

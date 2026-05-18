@@ -3,6 +3,7 @@
 type token =
   (* literals *)
   | TInt of int
+  | TFloat of float
   | TIdent of string
   | TCtorIdent of string
   | TStringLit of string   (* "..." — byte string literal *)
@@ -23,6 +24,8 @@ type token =
   | TIntTy
   | TBoolTy
   | TByteTy       (* byte — 1-byte unsigned primitive *)
+  | TFloatTy      (* float — IEEE 754 double-precision *)
+  | TToFloat      (* to_float(n) — int → float *)
   | TType
   | TMatch
   | TExtern
@@ -83,6 +86,7 @@ type token =
 
 let show = function
   | TInt n        -> Printf.sprintf "INT(%d)" n
+  | TFloat f      -> Printf.sprintf "FLOAT(%g)" f
   | TIdent s      -> Printf.sprintf "IDENT(%s)" s
   | TCtorIdent s  -> Printf.sprintf "CTOR(%s)" s
   | TStringLit s  -> Printf.sprintf "STR(%S)" s
@@ -102,6 +106,8 @@ let show = function
   | TIntTy        -> "INT_TY"
   | TBoolTy       -> "BOOL_TY"
   | TByteTy       -> "BYTE_TY"
+  | TFloatTy      -> "FLOAT_TY"
+  | TToFloat      -> "TO_FLOAT"
   | TType         -> "TYPE"
   | TMatch        -> "MATCH"
   | TExtern       -> "EXTERN"

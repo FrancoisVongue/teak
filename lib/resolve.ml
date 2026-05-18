@@ -177,7 +177,7 @@ let rec resolve_expr
   let r = resolve_expr map locals in
   let rt = resolve_ty map locals in
   match e with
-  | EInt _ | EBool _ | EStringLit _ -> e
+  | EInt _ | EFloat _ | EBool _ | EStringLit _ -> e
   | EVar x -> EVar (resolve_name map locals x)
   | EBinop (op, a, b) -> EBinop (op, r a, r b)
   | EUnop  (op, a)    -> EUnop  (op, r a)
@@ -236,6 +236,7 @@ let rec resolve_expr
   | ESlice (a, lo, hi) -> ESlice (r a, r lo, r hi)
   | EToInt e -> EToInt (r e)
   | EToByte e -> EToByte (r e)
+  | EToFloat e -> EToFloat (r e)
   | ECAlloc (t, n) -> ECAlloc (rt t, r n)
   | ECFree p -> ECFree (r p)
   | ENullPtr t -> ENullPtr (rt t)
@@ -336,7 +337,7 @@ let expand_in_expr (aliases : (string * ty) list) (e : expr) : expr =
   let xt t = expand_alias_ty aliases [] t in
   let rec ex e =
     match e with
-    | EInt _ | EBool _ | EStringLit _ | EVar _
+    | EInt _ | EFloat _ | EBool _ | EStringLit _ | EVar _
     | EBreak | EContinue -> e
     | EBinop (op, a, b) -> EBinop (op, ex a, ex b)
     | EUnop (op, a) -> EUnop (op, ex a)
@@ -366,6 +367,7 @@ let expand_in_expr (aliases : (string * ty) list) (e : expr) : expr =
     | ESlice (a, lo, hi) -> ESlice (ex a, ex lo, ex hi)
     | EToInt e -> EToInt (ex e)
     | EToByte e -> EToByte (ex e)
+    | EToFloat e -> EToFloat (ex e)
     | ECAlloc (t, n) -> ECAlloc (xt t, ex n)
     | ECFree p -> ECFree (ex p)
     | ENullPtr t -> ENullPtr (xt t)

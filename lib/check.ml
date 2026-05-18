@@ -63,6 +63,12 @@ module T = struct
                   (* to_int(b) — widen byte to int *)
     | TEToByte of expr
                   (* to_byte(n) — truncate int to byte *)
+    | TEToFloat of expr
+                  (* to_float(n) — int → float *)
+    | TEFloat  of float
+                  (* float literal *)
+    | TEToIntFromFloat of expr
+                  (* to_int(f) when f : float — truncate-toward-zero *)
     | TECAlloc of ty * expr * ty
                   (* c_alloc[T](n) — elem type T, count, result type TyPtr T *)
     | TECFree  of expr
@@ -117,11 +123,14 @@ end
 
 type op_typing =
   | OpFixed of ty * ty     (* operand type, result type *)
-  | OpEqual                (* both operands same type; type must be int or bool *)
+  | OpEqual                (* both operands same type; must be int/bool/byte/float *)
+  | OpNumeric              (* both operands same numeric (int or float); result same *)
+  | OpComparison           (* both operands same numeric (int or float); result bool *)
 
 let binop_typing = function
-  | OpAdd | OpSub | OpMul | OpDiv | OpMod -> OpFixed (TyInt, TyInt)
-  | OpLt | OpGt | OpLe | OpGe              -> OpFixed (TyInt, TyBool)
+  | OpAdd | OpSub | OpMul | OpDiv          -> OpNumeric
+  | OpMod                                   -> OpFixed (TyInt, TyInt)  (* C: only int *)
+  | OpLt | OpGt | OpLe | OpGe              -> OpComparison
   | OpAnd | OpOr                            -> OpFixed (TyBool, TyBool)
   | OpEq | OpNeq                            -> OpEqual
 
@@ -394,6 +403,15 @@ let rec validate_ty
                "byte takes no type arguments, got %d"
                (List.length args)));
         TyApp ("byte", [])
+      end else if n = "float" then begin
+        (* float — IEEE 754 double, 8 bytes. NaN / Infinity behave per
+           IEEE: NaN != NaN, comparisons with NaN are false. *)
+        if List.length args <> 0 then
+          raise (Type_error
+            (Printf.sprintf
+               "float takes no type arguments, got %d"
+               (List.length args)));
+        TyApp ("float", [])
       end else
         (match List.assoc_opt n type_env with
          | Some td ->
@@ -679,6 +697,11 @@ let scrutinee_kind (env : env) (t : ty) : scrut_kind =
   | TyInt  -> SK_Int
   | TyBool -> SK_Bool
   | TyApp ("byte", []) -> SK_Byte
+  | TyApp ("float", []) ->
+      raise (Type_error
+        "match on float is not supported — NaN / signed-zero edge cases \
+         break exhaustivity. Use `if`/`else if` chain or a bind pattern \
+         with a guard (`x if x > 0.5 => ...`).")
   | TyApp ("Array", [inner]) ->
       (match prune inner with
        | TyApp ("byte", []) -> SK_Bytes
@@ -817,6 +840,7 @@ let rec infer (env : env) (tparams : string list)
   : T.expr * ty =
   match e with
   | EInt n  -> (T.TEInt n,  TyInt)
+  | EFloat f -> (T.TEFloat f, TyApp ("float", []))
   | EBool b -> (T.TEBool b, TyBool)
   | EStringLit s ->
       (* "..." : Array[byte] — bytes live in the static region forever.
@@ -827,6 +851,17 @@ let rec infer (env : env) (tparams : string list)
   | EBinop (op, a, b) ->
       let (ta, ta_ty) = infer env tparams vars a in
       let (tb, tb_ty) = infer env tparams vars b in
+      let require_numeric_operand t =
+        match prune t with
+        | TyInt -> ()
+        | TyApp ("float", []) -> ()
+        | TyMeta _ -> unify t TyInt   (* default to int *)
+        | t ->
+            raise (Type_error
+              (Printf.sprintf
+                 "%s requires int or float operands, got %s"
+                 (show_binop op) (show_ty (zonk t))))
+      in
       let result_ty =
         match binop_typing op with
         | OpFixed (operand_ty, result_ty) ->
@@ -838,12 +873,21 @@ let rec infer (env : env) (tparams : string list)
             (match prune ta_ty with
              | TyInt | TyBool -> ()
              | TyApp ("byte", []) -> ()
-             | TyMeta _ -> unify ta_ty TyInt   (* default to int *)
+             | TyApp ("float", []) -> ()
+             | TyMeta _ -> unify ta_ty TyInt
              | t ->
                  raise (Type_error
                    (Printf.sprintf
-                      "%s requires int, bool, or byte operands, got %s"
+                      "%s requires int, bool, byte, or float operands, got %s"
                       (show_binop op) (show_ty (zonk t)))));
+            TyBool
+        | OpNumeric ->
+            unify ta_ty tb_ty;
+            require_numeric_operand ta_ty;
+            ta_ty
+        | OpComparison ->
+            unify ta_ty tb_ty;
+            require_numeric_operand ta_ty;
             TyBool
       in
       (T.TEBinop (op, ta, tb, result_ty), result_ty)
@@ -1447,13 +1491,18 @@ let rec infer (env : env) (tparams : string list)
 
   | EToInt sub_e ->
       let (ts, ts_ty) = infer env tparams vars sub_e in
-      (try unify ts_ty (TyApp ("byte", []))
-       with Type_error _ ->
-         raise (Type_error
-           (Printf.sprintf
-              "to_int expects byte, got %s"
-              (show_ty (zonk ts_ty)))));
-      (T.TEToInt ts, TyInt)
+      (match prune ts_ty with
+       | TyApp ("byte", []) -> (T.TEToInt ts, TyInt)
+       | TyApp ("float", []) -> (T.TEToIntFromFloat ts, TyInt)
+       | TyMeta _ ->
+           (* default to byte for backward compatibility *)
+           unify ts_ty (TyApp ("byte", []));
+           (T.TEToInt ts, TyInt)
+       | t ->
+           raise (Type_error
+             (Printf.sprintf
+                "to_int expects byte or float, got %s"
+                (show_ty (zonk t)))))
 
   | EToByte sub_e ->
       let (ts, ts_ty) = infer env tparams vars sub_e in
@@ -1464,6 +1513,16 @@ let rec infer (env : env) (tparams : string list)
               "to_byte expects int, got %s"
               (show_ty (zonk ts_ty)))));
       (T.TEToByte ts, TyApp ("byte", []))
+
+  | EToFloat sub_e ->
+      let (ts, ts_ty) = infer env tparams vars sub_e in
+      (try unify ts_ty TyInt
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "to_float expects int, got %s"
+              (show_ty (zonk ts_ty)))));
+      (T.TEToFloat ts, TyApp ("float", []))
 
   | ECAlloc (elem_t, n_e) ->
       let elem_t = validate_ty_for_ascription env tparams elem_t in
@@ -1594,7 +1653,7 @@ and validate_ty_for_ascription
 
 let rec zonk_expr (e : T.expr) : T.expr =
   match e with
-  | T.TEInt _ | T.TEBool _ | T.TEStringLit _ -> e
+  | T.TEInt _ | T.TEFloat _ | T.TEBool _ | T.TEStringLit _ -> e
   | T.TEVar (x, t) -> T.TEVar (x, zonk_expect t)
   | T.TEFnRef (name, ts, fn_ty) ->
       T.TEFnRef (name, List.map zonk_expect ts, zonk_expect fn_ty)
@@ -1643,6 +1702,8 @@ let rec zonk_expr (e : T.expr) : T.expr =
       T.TESlice (zonk_expr a, zonk_expr lo, zonk_expr hi, zonk_expect t)
   | T.TEToInt e  -> T.TEToInt (zonk_expr e)
   | T.TEToByte e -> T.TEToByte (zonk_expr e)
+  | T.TEToFloat e -> T.TEToFloat (zonk_expr e)
+  | T.TEToIntFromFloat e -> T.TEToIntFromFloat (zonk_expr e)
   | T.TECAlloc (et, n, rt) ->
       T.TECAlloc (zonk_expect et, zonk_expr n, zonk_expect rt)
   | T.TECFree e -> T.TECFree (zonk_expr e)
@@ -1696,7 +1757,7 @@ module SM = Map.Make (String)
 let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.expr)
   : T.expr * ty SM.t =
   match e with
-  | T.TEInt _ | T.TEBool _ | T.TEStringLit _ | T.TEFnRef _ -> (e, live)
+  | T.TEInt _ | T.TEFloat _ | T.TEBool _ | T.TEStringLit _ | T.TEFnRef _ -> (e, live)
 
   | T.TEVar (x, t) ->
       if not (SM.mem x live) then
@@ -1907,6 +1968,14 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
   | T.TEToByte sub ->
       let (sub', live) = check_moves_expr env live false sub in
       (T.TEToByte sub', live)
+
+  | T.TEToFloat sub ->
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TEToFloat sub', live)
+
+  | T.TEToIntFromFloat sub ->
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TEToIntFromFloat sub', live)
 
   | T.TECAlloc (et, n, rt) ->
       let (n', live) = check_moves_expr env live false n in

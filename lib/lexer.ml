@@ -33,6 +33,8 @@ let lower_ident_or_keyword s =
   | "int"   -> TIntTy
   | "bool"  -> TBoolTy
   | "byte"  -> TByteTy
+  | "float" -> TFloatTy
+  | "to_float" -> TToFloat
   | "type"  -> TType
   | "struct" -> TStruct
   | "enum"  -> TEnum
@@ -184,7 +186,40 @@ let lex (src : string) : token list =
           Buffer.add_char buf src.[!i];
           incr i
         done;
-        push (TInt (int_of_string (Buffer.contents buf)))
+        (* Float literal if the integer part is followed by '.' + digit
+           or by 'e'/'E' (scientific). Plain `3.` is rejected — require
+           an explicit `3.0` to avoid ambiguity with method calls later. *)
+        let is_float =
+          (!i + 1 < n && src.[!i] = '.' && is_digit src.[!i + 1])
+          || (!i < n && (src.[!i] = 'e' || src.[!i] = 'E'))
+        in
+        if is_float then begin
+          if !i < n && src.[!i] = '.' then begin
+            Buffer.add_char buf '.';
+            incr i;
+            while !i < n && is_digit src.[!i] do
+              Buffer.add_char buf src.[!i];
+              incr i
+            done
+          end;
+          if !i < n && (src.[!i] = 'e' || src.[!i] = 'E') then begin
+            Buffer.add_char buf src.[!i];
+            incr i;
+            if !i < n && (src.[!i] = '+' || src.[!i] = '-') then begin
+              Buffer.add_char buf src.[!i];
+              incr i
+            end;
+            if not (!i < n && is_digit src.[!i]) then
+              raise (Lex_error
+                ("malformed float exponent — digits required after `e`", !i));
+            while !i < n && is_digit src.[!i] do
+              Buffer.add_char buf src.[!i];
+              incr i
+            done
+          end;
+          push (TFloat (float_of_string (Buffer.contents buf)))
+        end else
+          push (TInt (int_of_string (Buffer.contents buf)))
 
     | c when is_lower_ident_start c ->
         Buffer.clear buf;

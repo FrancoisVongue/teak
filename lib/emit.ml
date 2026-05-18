@@ -91,6 +91,10 @@ let rec collect_ty (t : ty) : unit =
       (* byte is a primitive; maps directly to uint8_t in C. *)
   | TyApp ("byte", _) ->
       failwith "emit collect_ty: byte takes no type arguments"
+  | TyApp ("float", []) -> ()
+      (* float is a primitive; maps directly to double in C. *)
+  | TyApp ("float", _) ->
+      failwith "emit collect_ty: float takes no type arguments"
   | TyApp (_, []) -> ()
   | TyApp (n, _) ->
       failwith (Printf.sprintf "emit collect_ty: %S still has args" n)
@@ -107,7 +111,7 @@ let rec collect_ty (t : ty) : unit =
 
 let rec collect_expr (e : Check.T.expr) : unit =
   match e with
-  | Check.T.TEInt _ | Check.T.TEBool _ -> ()
+  | Check.T.TEInt _ | Check.T.TEFloat _ | Check.T.TEBool _ -> ()
   | Check.T.TEStringLit s ->
       let _ = register_string s in
       (* String literal materialises as an Array[byte] handle — make
@@ -157,6 +161,8 @@ let rec collect_expr (e : Check.T.expr) : unit =
       collect_expr a; collect_expr lo; collect_expr hi; collect_ty t
   | Check.T.TEToInt e  -> collect_expr e
   | Check.T.TEToByte e -> collect_expr e
+  | Check.T.TEToFloat e -> collect_expr e
+  | Check.T.TEToIntFromFloat e -> collect_expr e
   | Check.T.TECAlloc (et, n, t) -> collect_ty et; collect_expr n; collect_ty t
   | Check.T.TECFree p -> collect_expr p
   | Check.T.TENullPtr t -> collect_ty t
@@ -198,6 +204,7 @@ let rec c_type (t : ty) : string =
   | TyInt -> "int"
   | TyBool -> "int"
   | TyApp ("byte", []) -> "uint8_t"
+  | TyApp ("float", []) -> "double"
   | TyApp ("Array", [inner]) -> mangle_array_name inner
   | TyApp ("Region", []) -> "Region"
   | TyApp (n, []) -> n
@@ -268,7 +275,7 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
   let rec rn (env : (string * string) list) (e : Check.T.expr) : Check.T.expr =
     let open Check.T in
     match e with
-    | TEInt _ | TEBool _ | TEStringLit _ | TEFnRef _ -> e
+    | TEInt _ | TEFloat _ | TEBool _ | TEStringLit _ | TEFnRef _ -> e
     | TEVar (x, t) ->
         let x' = try List.assoc x env with Not_found -> x in
         TEVar (x', t)
@@ -332,6 +339,8 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
         TESlice (rn env a, rn env lo, rn env hi, t)
     | TEToInt e  -> TEToInt (rn env e)
     | TEToByte e -> TEToByte (rn env e)
+    | TEToFloat e -> TEToFloat (rn env e)
+    | TEToIntFromFloat e -> TEToIntFromFloat (rn env e)
     | TECAlloc (et, n, t) -> TECAlloc (et, rn env n, t)
     | TECFree p -> TECFree (rn env p)
     | TENullPtr t -> TENullPtr t
@@ -454,6 +463,7 @@ let build_ctor_map (types : type_decl list)
    node carries its result type. *)
 let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TEInt _ -> TyInt
+  | Check.T.TEFloat _ -> TyApp ("float", [])
   | Check.T.TEBool _ -> TyBool
   | Check.T.TEStringLit _ -> TyApp ("Array", [TyApp ("byte", [])])
   | Check.T.TEVar (_, t) -> t
@@ -478,6 +488,8 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TESlice (_, _, _, t) -> t
   | Check.T.TEToInt _  -> TyInt
   | Check.T.TEToByte _ -> TyApp ("byte", [])
+  | Check.T.TEToFloat _ -> TyApp ("float", [])
+  | Check.T.TEToIntFromFloat _ -> TyInt
   | Check.T.TECAlloc (_, _, t) -> t
   | Check.T.TECFree _ -> TyInt
   | Check.T.TENullPtr t -> t
@@ -518,6 +530,17 @@ let rec emit_expr
   (e : Check.T.expr) : c_code =
   match e with
   | Check.T.TEInt n      -> { stmts = []; value = string_of_int n }
+  | Check.T.TEFloat f    ->
+      (* Use enough digits to round-trip a double exactly. Force a
+         decimal point so `1.0` doesn't emit as `1` (which C parses
+         as int and then `1 / 0` truncates instead of producing NaN). *)
+      let s = Printf.sprintf "%.17g" f in
+      let needs_dot =
+        not (String.contains s '.' || String.contains s 'e'
+             || String.contains s 'E' || String.contains s 'n')
+      in
+      let s = if needs_dot then s ^ ".0" else s in
+      { stmts = []; value = s }
   | Check.T.TEBool true  -> { stmts = []; value = "1" }
   | Check.T.TEBool false -> { stmts = []; value = "0" }
   | Check.T.TEStringLit s ->
@@ -1074,6 +1097,17 @@ let rec emit_expr
       let cs = emit_expr ctor_map sub in
       { stmts = cs.stmts;
         value = Printf.sprintf "((uint8_t)(%s))" cs.value }
+
+  | Check.T.TEToFloat sub ->
+      let cs = emit_expr ctor_map sub in
+      { stmts = cs.stmts;
+        value = Printf.sprintf "((double)(%s))" cs.value }
+
+  | Check.T.TEToIntFromFloat sub ->
+      let cs = emit_expr ctor_map sub in
+      (* C cast double->int truncates toward zero. *)
+      { stmts = cs.stmts;
+        value = Printf.sprintf "((int)(%s))" cs.value }
 
   | Check.T.TECAlloc (et, n_e, _result_ty) ->
       let cn = emit_expr ctor_map n_e in

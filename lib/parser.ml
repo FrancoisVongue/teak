@@ -42,6 +42,7 @@ let rec parse_ty st =
   | TIntTy        -> TyInt
   | TBoolTy       -> TyBool
   | TByteTy       -> TyApp ("byte", [])
+  | TFloatTy      -> TyApp ("float", [])
   | TStar         ->
       (* *T — raw C pointer. Prefix only; infix * is multiplication. *)
       let inner = parse_ty st in
@@ -265,12 +266,12 @@ and parse_args st =
 
 and parse_atom st =
   match peek st with
-  | TInt _ | TTrue | TFalse | TLParen
+  | TInt _ | TFloat _ | TTrue | TFalse | TLParen
   | TIdent _ | TCtorIdent _
   | TStringLit _
   | TIf | TMatch | TWhile | TBreak | TContinue | TFor | TReturn
   | TArray | TLen | TSlice
-  | TToInt | TToByte
+  | TToInt | TToByte | TToFloat
   | TCAlloc | TCFree | TNullPtr | TIsNull | TArrayData | TTryAt | TDrop
   | TRegion | TStackRegion | TAlignedRegion -> parse_atom_consume st
   | t -> raise (Parse_error
@@ -279,6 +280,7 @@ and parse_atom st =
 and parse_atom_consume st =
   match eat st with
   | TInt n      -> EInt n
+  | TFloat f    -> EFloat f
   | TTrue       -> EBool true
   | TFalse      -> EBool false
   | TStringLit s -> EStringLit s
@@ -399,6 +401,11 @@ and parse_atom_consume st =
       let e = parse_expr st in
       expect st TRParen;
       EToByte e
+  | TToFloat ->
+      expect st TLParen;
+      let e = parse_expr st in
+      expect st TRParen;
+      EToFloat e
   | TCAlloc ->
       expect st TLBracket;
       let t = parse_ty st in
