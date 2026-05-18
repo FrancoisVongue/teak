@@ -1395,6 +1395,204 @@ let emit_func_def ctor_map (f : Check.T.func) : string =
     (c_type f.return_ty) f.name params_s
     (String.concat "\n" indented)
 
+(* ---------- Stage 3 phase 4b/5 — async lowering for `main` ----------
+
+   MVP scope: only `main` may suspend, and the only suspension point
+   is `yield`. The runtime spins up an io_uring ring, dispatches CQEs,
+   and yield is implemented as a NOP SQE. Frames live in caller stack
+   memory for now — a proper slot pool comes with `spawn`. *)
+
+(* Collect every TELet binding name + type along the top-level let
+   spine. We rewrite those references to `fr->name` so they survive
+   across suspension points. Nested lets inside non-let expressions
+   never cross a yield in the MVP (the static checker only allows
+   yield at top-level positions), so they don't need the fr-> rewrite. *)
+let rec async_collect_locals (body : Check.T.expr) : (string * ty) list =
+  let open Check.T in
+  match body with
+  | TELet ("_", _, _, b, _, _) -> async_collect_locals b
+  | TELet (x, t, _, b, _, _) -> (x, t) :: async_collect_locals b
+  | _ -> []
+
+(* Rewrite TEVar(x) → TEVar("fr->" ^ x) and TEAssign(x, ...) likewise,
+   for every x present in `frame_set`. Names produced by alpha_rename
+   are globally unique, so this is just a string-keyed substitution. *)
+let async_rewrite_to_frame
+  (frame_set : (string, unit) Hashtbl.t)
+  (e : Check.T.expr) : Check.T.expr =
+  let open Check.T in
+  let in_frame x = Hashtbl.mem frame_set x in
+  let rename x = if in_frame x then "fr->" ^ x else x in
+  let rec go e =
+    match e with
+    | TEInt _ | TEFloat _ | TEBool _ | TEStringLit _ | TEFnRef _
+    | TEBreak | TEContinue | TEYield | TENullPtr _ -> e
+    | TEVar (x, t) -> TEVar (rename x, t)
+    | TECall (f, args, t) -> TECall (go f, List.map go args, t)
+    | TEBinop (op, a, b, t) -> TEBinop (op, go a, go b, t)
+    | TEUnop (op, a, t) -> TEUnop (op, go a, t)
+    | TECtor (c, ts, args, t) -> TECtor (c, ts, List.map go args, t)
+    | TERecord (n, ts, fields, t) ->
+        TERecord (n, ts, List.map (fun (fn, e) -> (fn, go e)) fields, t)
+    | TEField (e, fn, t) -> TEField (go e, fn, t)
+    | TEIf (c, th, el, t) -> TEIf (go c, go th, go el, t)
+    | TELet (x, vt, v, b, bt, ad) ->
+        (* Don't rename the binder itself — the let still introduces
+           a name; the rewrite makes its uses go through fr->.
+           Storing into fr->x is handled below in the segment walker. *)
+        TELet (x, vt, go v, go b, bt, ad)
+    | TEMatch (s, st, arms, rt) ->
+        let arms' =
+          List.map (fun (p, g, b) -> (p, Option.map go g, go b)) arms
+        in
+        TEMatch (go s, st, arms', rt)
+    | TEArray (r, n, v, t) -> TEArray (go r, go n, go v, t)
+    | TEArrayLit (r, es, t) -> TEArrayLit (go r, List.map go es, t)
+    | TERegion (n, t) -> TERegion (go n, t)
+    | TEStackRegion (n, t) -> TEStackRegion (go n, t)
+    | TEAlignedRegion (n, a, t) -> TEAlignedRegion (go n, go a, t)
+    | TEIndex (a, i, t) -> TEIndex (go a, go i, t)
+    | TEAssignIdx (a, i, v, t) -> TEAssignIdx (go a, go i, go v, t)
+    | TELen (e, t) -> TELen (go e, t)
+    | TESlice (a, lo, hi, t) -> TESlice (go a, go lo, go hi, t)
+    | TEToInt e -> TEToInt (go e)
+    | TEToByte e -> TEToByte (go e)
+    | TEToFloat e -> TEToFloat (go e)
+    | TEToIntFromFloat e -> TEToIntFromFloat (go e)
+    | TECAlloc (et, n, rt) -> TECAlloc (et, go n, rt)
+    | TECFree e -> TECFree (go e)
+    | TEIsNull e -> TEIsNull (go e)
+    | TEArrayData (a, t) -> TEArrayData (go a, t)
+    | TEDeref (p, t) -> TEDeref (go p, t)
+    | TEAssign (x, v, t) -> TEAssign (rename x, go v, t)
+    | TEWhile (c, b) -> TEWhile (go c, go b)
+    | TEReturn (v, t) -> TEReturn (go v, t)
+    | TETryAt (a, i, t) -> TETryAt (go a, go i, t)
+    | TEDrop (e, t) -> TEDrop (go e, t)
+    | TEAwait (e, t) -> TEAwait (go e, t)
+    | TESpawn (e, t) -> TESpawn (go e, t)
+  in go e
+
+(* Walk the top-level let-spine and split into state segments at every
+   `yield`. Returns a list of (state_id, body_lines). State 0 is the
+   entry; subsequent states are CQE-resume points. *)
+let async_split_segments ctor_map (body : Check.T.expr) : (int * string list) list =
+  let open Check.T in
+  let segments = ref [] in
+  let curr_state = ref 0 in
+  let curr_lines = ref [] in
+  let emit_into ss = curr_lines := !curr_lines @ ss in
+  let close_segment_with stmts =
+    segments := (!curr_state, !curr_lines @ stmts) :: !segments
+  in
+  let suspend_to next_state =
+    [ Printf.sprintf "fr->state = %d;" next_state;
+      "orto_yield_suspend(fr);";
+      "return 1;" ]
+  in
+  let rec walk body =
+    match body with
+    | TELet (x, _, TEYield, b, _, _) ->
+        (* yield as a let-rhs: suspend now; on resume the bound int is
+           the value of `yield` (always 0 — nop SQE result). *)
+        let next_state = !curr_state + 1 in
+        close_segment_with (suspend_to next_state);
+        curr_state := next_state;
+        curr_lines := [];
+        if x <> "_" then
+          emit_into [Printf.sprintf "fr->%s = 0;" x];
+        walk b
+    | TELet (x, _, v, b, _, _) ->
+        let cv = emit_expr ctor_map v in
+        emit_into cv.stmts;
+        if x <> "_" then
+          emit_into [Printf.sprintf "fr->%s = %s;" x cv.value];
+        walk b
+    | TEYield ->
+        (* Tail yield: suspend then in the resumed state return 0. *)
+        let next_state = !curr_state + 1 in
+        close_segment_with (suspend_to next_state);
+        segments := (next_state,
+          ["fr->return_value = 0;"; "return 0;"]) :: !segments
+    | other ->
+        let cv = emit_expr ctor_map other in
+        close_segment_with
+          (cv.stmts @
+           [ Printf.sprintf "fr->return_value = %s;" cv.value;
+             "return 0;" ])
+  in
+  walk body;
+  List.rev !segments
+
+(* Emit a Frame struct for an async function — first field is the
+   step pointer (so the dispatcher can extract it generically),
+   followed by state, the return-value slot, params and locals. *)
+let emit_async_frame_struct (f : Check.T.func) : string =
+  let locals = async_collect_locals f.body in
+  let params_lines =
+    List.map (fun (p, t) ->
+      Printf.sprintf "    %s %s;" (c_type t) p) f.params
+  in
+  let local_lines =
+    List.map (fun (x, t) ->
+      Printf.sprintf "    %s %s;" (c_type t) x) locals
+  in
+  let header = [
+    "    OrtoStepFn step;";
+    "    int state;";
+    Printf.sprintf "    %s return_value;" (c_type f.return_ty);
+  ] in
+  Printf.sprintf "typedef struct {\n%s\n} Frame_%s;"
+    (String.concat "\n" (header @ params_lines @ local_lines))
+    f.name
+
+(* Emit the step function for an async function. *)
+let emit_async_step ctor_map (f : Check.T.func) : string =
+  reset_counter ();
+  let locals = async_collect_locals f.body in
+  let frame_set = Hashtbl.create (List.length locals + List.length f.params) in
+  List.iter (fun (x, _) -> Hashtbl.add frame_set x ()) locals;
+  List.iter (fun (p, _) -> Hashtbl.add frame_set p ()) f.params;
+  let body' = async_rewrite_to_frame frame_set f.body in
+  let segments = async_split_segments ctor_map body' in
+  let case_lines =
+    List.concat_map (fun (state, lines) ->
+      let indented = List.map (fun s -> "        " ^ s) lines in
+      (Printf.sprintf "    case %d: {" state)
+      :: indented
+      @ ["    }"]
+    ) segments
+  in
+  Printf.sprintf
+    "static int %s_step(void *frp) {\n\
+     \    Frame_%s *fr = (Frame_%s *)frp;\n\
+     \    switch (fr->state) {\n\
+     %s\n\
+     \    }\n\
+     \    return 0;\n\
+     }"
+    f.name f.name f.name
+    (String.concat "\n" case_lines)
+
+(* Emit `main` as a C-level wrapper that owns the ring, allocates the
+   frame on the stack, kicks state 0, and drains the dispatcher. *)
+let emit_async_main_wrapper (f : Check.T.func) : string =
+  Printf.sprintf
+    "int %s(void) {\n\
+     \    if (io_uring_queue_init(64, &ORTO_RING, 0) < 0) return 1;\n\
+     \    Frame_%s fr;\n\
+     \    fr.step = %s_step;\n\
+     \    fr.state = 0;\n\
+     \    ORTO_PENDING = 1;\n\
+     \    int rc = %s_step(&fr);\n\
+     \    if (rc == 0) ORTO_PENDING = 0;\n\
+     \    else orto_dispatch();\n\
+     \    int result = fr.return_value;\n\
+     \    io_uring_queue_exit(&ORTO_RING);\n\
+     \    return result;\n\
+     }"
+    f.name f.name f.name f.name
+
 (* Render the static byte pool as a C array literal. Every "..." literal
    from the program ends up in this buffer at its assigned offset. The
    buffer is never freed; its gen stays at 1 forever. *)
@@ -1431,9 +1629,57 @@ let emit (prog : Check.T.program) : string =
     | DAdt td -> emit_adt_definition td
     | DRec rd -> emit_record_definition rd) ordered_structs in
   let extern_decls = List.map emit_extern_decl prog.externs in
-  let decls        = List.map emit_func_decl prog.funcs in
+  let async_main =
+    List.find_opt
+      (fun (f : Check.T.func) -> f.name = "main" && f.is_async)
+      prog.funcs
+  in
+  let sync_funcs =
+    List.filter
+      (fun (f : Check.T.func) -> not (f.name = "main" && f.is_async))
+      prog.funcs
+  in
+  let decls        = List.map emit_func_decl sync_funcs in
   let array_drop_defs = emit_array_drop_defs () in
-  let defs         = List.map (emit_func_def ctor_map) prog.funcs in
+  let defs         = List.map (emit_func_def ctor_map) sync_funcs in
+  let async_runtime, async_decls, async_defs =
+    match async_main with
+    | None -> ("", [], [])
+    | Some f ->
+        let rt =
+          "/* Stage 3 async runtime: an io_uring ring, a tiny CQE-driven\n\
+           \ * dispatcher, and helpers for the lowered state machines. */\n\
+           #include <liburing.h>\n\
+           typedef int (*OrtoStepFn)(void *frame_ptr);\n\
+           static struct io_uring ORTO_RING;\n\
+           static int ORTO_PENDING = 0;\n\
+           \n\
+           static void orto_yield_suspend(void *fr) {\n\
+           \    struct io_uring_sqe *sqe = io_uring_get_sqe(&ORTO_RING);\n\
+           \    io_uring_prep_nop(sqe);\n\
+           \    io_uring_sqe_set_data(sqe, fr);\n\
+           \    io_uring_submit(&ORTO_RING);\n\
+           }\n\
+           \n\
+           static int orto_dispatch(void) {\n\
+           \    while (ORTO_PENDING > 0) {\n\
+           \        struct io_uring_cqe *cqe;\n\
+           \        int rc = io_uring_wait_cqe(&ORTO_RING, &cqe);\n\
+           \        if (rc < 0) return rc;\n\
+           \        void *fr = io_uring_cqe_get_data(cqe);\n\
+           \        io_uring_cqe_seen(&ORTO_RING, cqe);\n\
+           \        OrtoStepFn step = *(OrtoStepFn *)fr;\n\
+           \        int sr = step(fr);\n\
+           \        if (sr == 0) ORTO_PENDING--;\n\
+           \    }\n\
+           \    return 0;\n\
+           }"
+        in
+        let frame = emit_async_frame_struct f in
+        let step  = emit_async_step ctor_map f in
+        let main_wrap = emit_async_main_wrapper f in
+        (rt, [frame], [step; main_wrap])
+  in
   let static_bytes = emit_static_bytes_array () in
   let header = Printf.sprintf
     "/* generated by orto */\n\
@@ -1493,13 +1739,16 @@ let emit (prog : Check.T.program) : string =
   in
   String.concat "\n\n"
     ([header]
+     @ (if async_runtime = "" then [] else [async_runtime])
      @ adt_forwards
      @ rec_forwards
      @ array_forwards
      @ fn_typedefs
      @ struct_defs
+     @ async_decls
      @ extern_decls
      @ decls
      @ array_drop_forwards
      @ array_drop_defs
-     @ defs)
+     @ defs
+     @ async_defs)

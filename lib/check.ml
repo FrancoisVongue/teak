@@ -2376,6 +2376,18 @@ let check (prog : program) : T.program =
          raise (Type_error "`main` must take no parameters");
        if f.T.return_ty <> TyInt then
          raise (Type_error "`main` must return int"));
+  (* Stage 3 MVP (phase 4b): suspension points are wired up only for
+     `main` for now — calling an async function from another async
+     function needs `spawn` / `await call`, which arrive in later
+     phases. Reject non-main async to make the cliff explicit. *)
+  List.iter (fun (f : T.func) ->
+    if f.T.is_async && f.T.name <> "main" then
+      raise (Type_error
+        (Printf.sprintf
+           "Stage 3 phase-4 MVP: %S contains `await` or `yield` but is \
+            not `main`. Suspension in non-main functions needs `spawn` \
+            / `await call` (later phases). See STAGE3_ASYNC.md §13."
+           f.T.name))) typed_funcs;
   { T.types   = resolved_types;
     T.records = resolved_records;
     T.funcs   = typed_funcs;
