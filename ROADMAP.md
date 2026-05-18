@@ -80,9 +80,10 @@
   - Фаза 4b/5 MVP (есть): `yield`-only async `main` через io_uring nop. State-machine lowering, диспетчер, frame на стеке.
   - Фаза 4c (есть): `await` на `extern async fn` — реальный I/O через ring.
   - Фаза 4d (есть): `yield`/`await` внутри `if`/`while`/`break`/`continue`. State splits через `for(;;) switch`.
-  - Фаза 4e (в работе): `spawn` + slot pool + non-main async — задачи могут вызывать друг друга, parent ждёт через `await task`.
+  - Фаза 4e (есть): `spawn` + slot pool (TigerBeetle стиль) + non-main async. Joinable + detached задачи. Chained awaits через dispatcher loop.
   - Фаза 6: `Stream[T]` + `for x in stream` (multishot SQE: ACCEPT_MULTISHOT, RECV_MULTISHOT).
   - Фаза 7: ошибки CQE как `Result[T]` обёртка над `await`.
+  - Долги фазы 4e (см. STAGE3_ASYNC §16): drop Task → cancel, не-int результаты задач, спавн из sync-контекста, await all { } через tuples.
   - v2 (после v1): многоядерность shared-nothing, IORING_OP_ASYNC_CANCEL для drop Task, IOCP-бэкенд (Windows).
 
 **Управление:**

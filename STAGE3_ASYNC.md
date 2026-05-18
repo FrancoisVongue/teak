@@ -361,9 +361,11 @@ CQE несёт `res` — результат, может быть `-errno`. `awai
 - **Фаза 4b/5-MVP** — `yield`-only async `main` через io_uring nop. ✅
 - **Фаза 4c** — `await` на `extern async fn` (реальный I/O). ✅
 - **Фаза 4d** — `yield`/`await` внутри `if`/`while`/`break`/`continue`. ✅
-- **Фаза 4e** — `spawn` + slot pool + non-main async (в работе).
+- **Фаза 4e** — `spawn` + slot pool + non-main async, joinable + detached. ✅
 - **Фаза 6** — `Stream[T]` + `for x in stream { ... }` (multishot).
 - **Фаза 7** — ошибки CQE как `Result`-обёртка над `await`.
+- **Долги/follow-ups** (см. §16): drop `Task` → cancel, non-`int`
+  возвраты задач, спавн из sync-контекста, `await all { ... }`.
 
 ### Фаза 1 — синтаксис (parser + AST)
 
@@ -446,6 +448,30 @@ C-рантайм: пул, цикл диспетчера, интеграция с
 - **Линейные типы — закон, не каталог**. Правило `Ref не пересекает
   spawn` — следствие общего «Ref не может пережить scope владельца», не
   специальное правило.
+
+---
+
+## 16. Долги (после фазы 4e)
+
+1. **`drop Task` → cancel.** Сейчас Task — линейный, но без
+   `drop_Task`: брошенный `Task` чей slot в `DONE_NO_WAITER` живёт
+   до конца программы. Спека §8 хочет
+   `IORING_OP_ASYNC_CANCEL`; v1 может ограничиться «дождаться
+   синхронно, освободить слот» — но нужен реальный drop-хук.
+2. **Не-`int` результаты `Task[T]`.** `slot.result` — `int`.
+   `Task[Region]`, `Task[Array[byte]]`, struct-результаты не
+   переживают slot pipe. Чистое решение — расширить `return_value`
+   в header'е до `long long` и копировать оттуда на completion,
+   с приведением на стороне ожидателя.
+3. **Спавн из sync-контекста.** В sync-функции `spawn worker(args)`
+   падает через старый emit_expr failwith. Нужно вытянуть spawn в
+   emit_expr с локальным `orto_dispatch()` drain'ом.
+4. **Sync caller of async fn.** Симметрия к (3): вызов async
+   функции из non-async — должен аллоцировать slot и drain'ить
+   локально.
+5. **`await all { ... }`.** Статическая форма требует tuples. С
+   spawn + await на месте динамическая форма (`await all coll`)
+   уже становится цикл-трансформацией.
 
 ---
 
