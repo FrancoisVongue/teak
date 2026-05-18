@@ -73,8 +73,17 @@
 - Stage 1 (есть): synchronous façade — один SQE submit + один CQE wait per call. `examples/file_io_uring.orto` показывает.
 - Stage 2 (есть): batched submit + multiple in-flight ops. `examples/iouring_batch.orto`.
 - Stage 3 (в работе): ring-native completion-based concurrency. `await`, `await all { }`, `spawn`, `yield`, `Stream[T]`. Без `async`-раскраски, без `Future`/`Pin`. См. `STAGE3_ASYNC.md`.
-  - Фаза 1 (есть): синтаксис — лексер/парсер/AST принимают `await`/`await all`/`spawn`/`yield`. Чекер бросает «not yet implemented».
-  - Фазы 2–7: типизация, индуцированная линейность контейнеров (`Array[Task]`), стейт-машина, рантайм-диспетчер, multishot streams, yield/cancel.
+  - Фаза 1 (есть): синтаксис — `await` / `await all` / `spawn` / `yield`. `async` модификатор для `extern fn`.
+  - Фаза 2 (есть): типизация `Task[T]` и `Stream[T]` как builtin linear; induced linearity (Task[Region] валиден).
+  - Фаза 3 (есть): `Array[T]` где T линейный → линейный массив; cascade drop (drop_Array_T).
+  - Фаза 4a (есть): async-детектор по AST.
+  - Фаза 4b/5 MVP (есть): `yield`-only async `main` через io_uring nop. State-machine lowering, диспетчер, frame на стеке.
+  - Фаза 4c (есть): `await` на `extern async fn` — реальный I/O через ring.
+  - Фаза 4d (есть): `yield`/`await` внутри `if`/`while`/`break`/`continue`. State splits через `for(;;) switch`.
+  - Фаза 4e (в работе): `spawn` + slot pool + non-main async — задачи могут вызывать друг друга, parent ждёт через `await task`.
+  - Фаза 6: `Stream[T]` + `for x in stream` (multishot SQE: ACCEPT_MULTISHOT, RECV_MULTISHOT).
+  - Фаза 7: ошибки CQE как `Result[T]` обёртка над `await`.
+  - v2 (после v1): многоядерность shared-nothing, IORING_OP_ASYNC_CANCEL для drop Task, IOCP-бэкенд (Windows).
 
 **Управление:**
 - Всё — выражения. `if`/`match`/`let` возвращают значения.
