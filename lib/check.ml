@@ -108,6 +108,11 @@ module T = struct
     params      : (string * ty) list;
     return_ty   : ty;
     body        : expr;
+    (* Stage 3: true iff this function body contains a suspension
+       point reachable directly (await or yield not inside a nested
+       spawn). Such functions are lowered into a stackless state
+       machine in phase 4; ordinary functions emit unchanged. *)
+    is_async    : bool;
   }
 
   type extern = {
@@ -2203,6 +2208,73 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
 
 (* ---------- check a function ---------- *)
 
+(* True if the typed body contains an `await` or `yield` reachable
+   directly — i.e. NOT inside a nested `spawn`. spawn establishes a
+   new frame whose body is its own state machine; its internal
+   await/yield don't promote the surrounding function to async.
+
+   The walk only inspects child nodes that share the same frame —
+   it stops at TESpawn boundaries. *)
+let rec body_has_suspension (e : T.expr) : bool =
+  let open T in
+  match e with
+  | TEAwait _ | TEYield -> true
+  | TESpawn _ -> false
+  | TEInt _ | TEFloat _ | TEBool _ | TEStringLit _
+  | TEVar _ | TEFnRef _ | TEBreak | TEContinue -> false
+  | TENullPtr _ -> false
+  | TECall (f, args, _) ->
+      body_has_suspension f || List.exists body_has_suspension args
+  | TEBinop (_, a, b, _) ->
+      body_has_suspension a || body_has_suspension b
+  | TEUnop (_, a, _) -> body_has_suspension a
+  | TECtor (_, _, args, _) -> List.exists body_has_suspension args
+  | TERecord (_, _, fields, _) ->
+      List.exists (fun (_, e) -> body_has_suspension e) fields
+  | TEField (e, _, _) -> body_has_suspension e
+  | TEIf (c, t, e, _) ->
+      body_has_suspension c
+      || body_has_suspension t || body_has_suspension e
+  | TELet (_, _, v, b, _, _) ->
+      body_has_suspension v || body_has_suspension b
+  | TEMatch (s, _, arms, _) ->
+      body_has_suspension s
+      || List.exists (fun (_, g, b) ->
+           (match g with None -> false | Some g -> body_has_suspension g)
+           || body_has_suspension b) arms
+  | TEArray (r, n, v, _) ->
+      body_has_suspension r
+      || body_has_suspension n || body_has_suspension v
+  | TEArrayLit (r, es, _) ->
+      body_has_suspension r || List.exists body_has_suspension es
+  | TERegion (n, _) -> body_has_suspension n
+  | TEStackRegion (n, _) -> body_has_suspension n
+  | TEAlignedRegion (n, a, _) ->
+      body_has_suspension n || body_has_suspension a
+  | TEIndex (a, i, _) ->
+      body_has_suspension a || body_has_suspension i
+  | TEAssignIdx (a, i, v, _) ->
+      body_has_suspension a
+      || body_has_suspension i || body_has_suspension v
+  | TELen (e, _) -> body_has_suspension e
+  | TESlice (a, lo, hi, _) ->
+      body_has_suspension a
+      || body_has_suspension lo || body_has_suspension hi
+  | TEToInt e | TEToByte e | TEToFloat e | TEToIntFromFloat e ->
+      body_has_suspension e
+  | TECAlloc (_, n, _) -> body_has_suspension n
+  | TECFree e -> body_has_suspension e
+  | TEIsNull e -> body_has_suspension e
+  | TEArrayData (a, _) -> body_has_suspension a
+  | TEDeref (p, _) -> body_has_suspension p
+  | TEAssign (_, v, _) -> body_has_suspension v
+  | TEWhile (c, b) ->
+      body_has_suspension c || body_has_suspension b
+  | TEReturn (v, _) -> body_has_suspension v
+  | TETryAt (a, i, _) ->
+      body_has_suspension a || body_has_suspension i
+  | TEDrop (e, _) -> body_has_suspension e
+
 let check_func (env : env) (f : func) : T.func =
   let (_, (param_tys, ret_ty)) = List.assoc f.name env.fns in
   loop_depth := 0;
@@ -2238,7 +2310,8 @@ let check_func (env : env) (f : func) : T.func =
     T.params = List.combine
       (List.map fst f.params) param_tys;
     T.return_ty = ret_ty;
-    T.body = body_with_moves }
+    T.body = body_with_moves;
+    T.is_async = body_has_suspension body_with_moves }
 
 (* ---------- top-level entry ---------- *)
 

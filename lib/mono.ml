@@ -329,6 +329,7 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
           params      = new_params;
           return_ty   = new_ret;
           body        = new_body;
+          is_async    = orig.is_async;
         } in
         Hashtbl.replace mono_fns mono.name mono
       done;
