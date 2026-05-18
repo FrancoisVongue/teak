@@ -85,6 +85,20 @@ let register_async_extern (name : string) =
 let is_async_extern (name : string) : bool =
   Hashtbl.mem async_externs name
 
+(* Map of async-function names to their parameter list. Populated in
+   collect_program for every monomorphised function whose body is
+   async (i.e. lowered into a Frame_<name> + <name>_step). The spawn
+   site reads this to know which fields to initialise on the new
+   frame. *)
+let async_func_params : (string, (string * ty) list) Hashtbl.t =
+  Hashtbl.create 8
+
+let register_async_func (name : string) (params : (string * ty) list) =
+  Hashtbl.replace async_func_params name params
+
+let is_async_func (name : string) : bool =
+  Hashtbl.mem async_func_params name
+
 let register_string (s : string) : int =
   match Hashtbl.find_opt string_pool s with
   | Some off -> off
@@ -238,6 +252,7 @@ let collect_program (prog : Check.T.program) : unit =
   string_pool_order := [];
   string_pool_size := 0;
   Hashtbl.clear async_externs;
+  Hashtbl.clear async_func_params;
   List.iter (fun td ->
     List.iter (fun v ->
       List.iter collect_ty v.arg_tys) td.variants) prog.types;
@@ -250,7 +265,8 @@ let collect_program (prog : Check.T.program) : unit =
   List.iter (fun (f : Check.T.func) ->
     List.iter (fun (_, t) -> collect_ty t) f.params;
     collect_ty f.return_ty;
-    collect_expr f.body) prog.funcs
+    collect_expr f.body;
+    if f.is_async then register_async_func f.name f.params) prog.funcs
 
 (* ---------- rendering C types ---------- *)
 
@@ -1723,6 +1739,109 @@ let async_split_segments ctor_map (body : Check.T.expr) : (int * string list) li
         Some (name, args)
     | _ -> None
   in
+  let spawn_counter = ref 0 in
+  let fresh_spawn () =
+    incr spawn_counter; Printf.sprintf "_sp_%d" !spawn_counter
+  in
+  let await_counter = ref 0 in
+  let fresh_await () =
+    incr await_counter; Printf.sprintf "_aw_%d" !await_counter
+  in
+  (* Emit synchronous frame init + kick for `spawn worker(args)`.
+     `detached` selects between joinable (Task survives until awaited)
+     and detached (slot self-frees on completion). The resulting Task
+     value is returned as a string for the caller to store. *)
+  let emit_spawn_setup (worker : string) (args : expr list)
+                       (detached : bool) : string * string =
+    let arg_codes = List.map (emit_expr ctor_map) args in
+    List.iter (fun cv -> emit_into cv.stmts) arg_codes;
+    let arg_values = List.map (fun cv -> cv.value) arg_codes in
+    let params =
+      try Hashtbl.find async_func_params worker
+      with Not_found ->
+        failwith (Printf.sprintf
+          "emit: spawn target %S is not a known async function" worker)
+    in
+    if List.length params <> List.length arg_values then
+      failwith (Printf.sprintf
+        "emit: spawn %S: arg/param count mismatch" worker);
+    let id = fresh_spawn () in
+    let slot_v = id ^ "_slot" in
+    let fr_v   = id ^ "_fr" in
+    let rc_v   = id ^ "_rc" in
+    let gen_v  = id ^ "_gen" in
+    let init_status =
+      if detached then "ORTO_SLOT_DETACHED" else "ORTO_SLOT_RUNNING"
+    in
+    let param_inits =
+      List.map2 (fun (p, _) v ->
+        Printf.sprintf "%s->%s = %s;" fr_v p v) params arg_values
+    in
+    emit_into ([
+      Printf.sprintf "int %s = orto_slot_alloc();" slot_v;
+      Printf.sprintf "Frame_%s *%s = (Frame_%s*)&ORTO_SLOTS[%s].frame;"
+        worker fr_v worker slot_v;
+      Printf.sprintf "%s->step = %s_step;" fr_v worker;
+      Printf.sprintf "%s->state = 0;" fr_v;
+      Printf.sprintf "%s->last_res = 0;" fr_v;
+      Printf.sprintf "%s->return_value = 0;" fr_v;
+      Printf.sprintf "%s->_orto_slot = %s;" fr_v slot_v;
+      Printf.sprintf "ORTO_SLOTS[%s].status = %s;" slot_v init_status;
+      Printf.sprintf "ORTO_SLOTS[%s].waiter = NULL;" slot_v;
+      Printf.sprintf "int %s = ORTO_SLOTS[%s].gen;" gen_v slot_v;
+    ] @ param_inits @ [
+      Printf.sprintf "int %s = %s_step((void*)%s);" rc_v worker fr_v;
+      Printf.sprintf "if (%s == 1) ORTO_PENDING++;" rc_v;
+      Printf.sprintf "else ORTO_PENDING -= orto_complete((OrtoFrameHeader*)%s);" fr_v;
+    ]);
+    (slot_v, gen_v)
+  in
+  (* Decompose the inner of `TESpawn` to (worker_name, args, is_async).
+     `inner` is the bare call expression. A sync target is still
+     spawnable — it just runs to completion inline at the spawn site. *)
+  let match_spawn_inner (inner : expr) : (string * expr list * bool) option =
+    match inner with
+    | TECall (TEFnRef (name, _, _), args, _) ->
+        Some (name, args, is_async_func name)
+    | _ -> None
+  in
+  (* Sync spawn site: run the call inline, stash the result on the
+     slot (joinable) or just discard it (detached). Mirrors the async
+     path's contract — `int slot_v, gen_v` get defined so the caller
+     can build the Task. *)
+  let emit_spawn_sync (worker : string) (args : expr list)
+                      (detached : bool) : (string * string) option =
+    let arg_codes = List.map (emit_expr ctor_map) args in
+    List.iter (fun cv -> emit_into cv.stmts) arg_codes;
+    let arg_values = List.map (fun cv -> cv.value) arg_codes in
+    let call_expr =
+      Printf.sprintf "%s(%s)" worker (String.concat ", " arg_values)
+    in
+    if detached then begin
+      emit_into [Printf.sprintf "(void)%s;" call_expr];
+      None
+    end else begin
+      let id = fresh_spawn () in
+      let slot_v = id ^ "_slot" in
+      let gen_v  = id ^ "_gen" in
+      emit_into [
+        Printf.sprintf "int %s = orto_slot_alloc();" slot_v;
+        Printf.sprintf "int %s = ORTO_SLOTS[%s].gen;" gen_v slot_v;
+        Printf.sprintf "ORTO_SLOTS[%s].result = (int)(%s);" slot_v call_expr;
+        Printf.sprintf "ORTO_SLOTS[%s].status = ORTO_SLOT_DONE_NO_WAITER;" slot_v;
+      ];
+      Some (slot_v, gen_v)
+    end
+  in
+  (* Detect that the inner of an await is a bare Task[T] variable.
+     After alpha_rename + async_rewrite_to_frame, the variable name
+     is `fr->t` — we return it verbatim along with T (we need the C
+     type of the Task wrapper at the await site). *)
+  let match_await_task (inner : expr) : (string * ty) option =
+    match inner with
+    | TEVar (x, (TyApp ("Task", [t]))) -> Some (x, t)
+    | _ -> None
+  in
   (* Stack of (continue-state, break-state) for nested async while
      loops, so break/continue inside an async-aware loop body do the
      right state transitions instead of leaking out of the switch. *)
@@ -1770,6 +1889,69 @@ let async_split_segments ctor_map (body : Check.T.expr) : (int * string list) li
         async_call_then_state name args n;
         start_segment n;
         store_at dst "fr->last_res"
+    | TEAwait (inner, _)
+      when (match match_await_task inner with Some _ -> true | None -> false) ->
+        (* await on a Task[T] variable: check the slot's state. If the
+           child already finished synchronously, deliver inline; else
+           register us as the waiter and suspend. Either path resumes
+           at state N, where the result lives in fr->last_res. *)
+        let (task_var, inner_ty) = match match_await_task inner with
+          | Some r -> r | None -> assert false in
+        let task_c = c_type (TyApp ("Task", [inner_ty])) in
+        let n = alloc_state () in
+        let id = fresh_await () in
+        let task_v = id ^ "_task" in
+        emit_into [
+          Printf.sprintf "%s %s = %s;" task_c task_v task_var;
+          Printf.sprintf "if (ORTO_SLOTS[%s.slot].gen != %s.gen) abort();"
+            task_v task_v;
+          Printf.sprintf "if (ORTO_SLOTS[%s.slot].status == ORTO_SLOT_DONE_NO_WAITER) {"
+            task_v;
+          Printf.sprintf "    fr->last_res = ORTO_SLOTS[%s.slot].result;" task_v;
+          Printf.sprintf "    orto_slot_free(%s.slot);" task_v;
+          Printf.sprintf "    fr->state = %d;" n;
+          Printf.sprintf "    continue;";
+          "}";
+          Printf.sprintf "ORTO_SLOTS[%s.slot].waiter = (OrtoFrameHeader*)fr;" task_v;
+          Printf.sprintf "ORTO_SLOTS[%s.slot].waiter_state = %d;" task_v n;
+        ];
+        finish_segment [
+          Printf.sprintf "fr->state = %d;" n;
+          "return 1;";
+        ];
+        start_segment n;
+        store_at dst "fr->last_res"
+    | TESpawn (inner, spawn_ty)
+      when (match match_spawn_inner inner with Some _ -> true | None -> false) ->
+        let (name, args, is_async) = match match_spawn_inner inner with
+          | Some r -> r | None -> assert false in
+        (* Discard target → detached: slot self-frees on completion;
+           Local/Return target → joinable: caller holds a Task. *)
+        let detached = (match dst with D.Discard -> true | _ -> false) in
+        let slot_pair =
+          if is_async then Some (emit_spawn_setup name args detached)
+          else emit_spawn_sync name args detached
+        in
+        (match slot_pair, detached with
+         | None, true ->
+             (* Detached sync: call was discarded. Emit a no-op value
+                so the wrapping store_at D.Discard has something to
+                consume. *)
+             emit_into ["(void)0;"]
+         | None, false ->
+             failwith "emit: sync joinable spawn returned no slot"
+         | Some (slot_v, gen_v), false ->
+             let task_c = c_type spawn_ty in
+             let task_lit =
+               Printf.sprintf "((%s){ .slot = %s, .gen = %s })"
+                 task_c slot_v gen_v
+             in
+             store_at dst task_lit
+         | Some _, true ->
+             (* Detached async: emit_spawn_setup already returned a
+                slot pair, but we ignore it — detached state self-frees
+                on completion. *)
+             emit_into ["(void)0;"])
     | TELet (x, _, v, b, _, _) ->
         (* Bind v, then walk b. v may suspend — walk recursively
            with destination = the binder. *)
@@ -1843,9 +2025,13 @@ let async_split_segments ctor_map (body : Check.T.expr) : (int * string list) li
   walk D.Return body;
   List.rev !segments
 
-(* Emit a Frame struct for an async function — first field is the
-   step pointer (so the dispatcher can extract it generically),
-   followed by state, the return-value slot, params and locals. *)
+(* Emit a Frame struct for an async function. Layout matches
+   OrtoFrameHeader exactly for the first five fields so the dispatcher
+   can read them generically through a header pointer:
+     step, state, last_res, return_value, _orto_slot
+   `_orto_slot` is the index of the slot this frame lives in, or -1
+   if the frame lives on the caller's C stack (the sync wrapper
+   path — `main` and the top of a sync->async call). *)
 let emit_async_frame_struct (f : Check.T.func) : string =
   let locals = async_collect_locals f.body in
   let params_lines =
@@ -1860,7 +2046,8 @@ let emit_async_frame_struct (f : Check.T.func) : string =
     "    OrtoStepFn step;";
     "    int state;";
     "    int last_res;";    (* dispatcher writes the CQE result here before resume *)
-    Printf.sprintf "    %s return_value;" (c_type f.return_ty);
+    "    int return_value;"; (* step writes this before `return 0` *)
+    "    int _orto_slot;";   (* slot index, or -1 if frame is stack-owned *)
   ] in
   Printf.sprintf "typedef struct {\n%s\n} Frame_%s;"
     (String.concat "\n" (header @ params_lines @ local_lines))
@@ -1903,6 +2090,9 @@ let emit_async_main_wrapper (f : Check.T.func) : string =
      \    Frame_%s fr;\n\
      \    fr.step = %s_step;\n\
      \    fr.state = 0;\n\
+     \    fr.last_res = 0;\n\
+     \    fr.return_value = 0;\n\
+     \    fr._orto_slot = -1;\n\
      \    ORTO_PENDING = 1;\n\
      \    int rc = %s_step(&fr);\n\
      \    if (rc == 0) ORTO_PENDING = 0;\n\
@@ -1912,6 +2102,45 @@ let emit_async_main_wrapper (f : Check.T.func) : string =
      \    return result;\n\
      }"
     f.name f.name f.name f.name
+
+(* Emit a sync C wrapper for a non-main async function. It builds the
+   frame on the C stack with _orto_slot = -1, runs the step, and if the
+   step suspends, drains the local dispatcher. Returns the unwrapped int
+   so sync callers can use an async function without ever seeing Task.
+   The function's source-visible signature is `fn name(params) -> int`,
+   so we just emit it as such. *)
+let emit_async_sync_wrapper (f : Check.T.func) : string =
+  let params_s =
+    if f.params = [] then "void"
+    else
+      String.concat ", "
+        (List.map (fun (x, t) ->
+          Printf.sprintf "%s %s" (c_type t) x) f.params)
+  in
+  let param_inits =
+    List.map (fun (p, _) ->
+      Printf.sprintf "    fr.%s = %s;" p p) f.params
+  in
+  Printf.sprintf
+    "%s %s(%s) {\n\
+     \    Frame_%s fr;\n\
+     \    fr.step = %s_step;\n\
+     \    fr.state = 0;\n\
+     \    fr.last_res = 0;\n\
+     \    fr.return_value = 0;\n\
+     \    fr._orto_slot = -1;\n\
+     %s\n\
+     \    int rc = %s_step(&fr);\n\
+     \    if (rc == 1) {\n\
+     \        ORTO_PENDING++;\n\
+     \        orto_dispatch();\n\
+     \    }\n\
+     \    return fr.return_value;\n\
+     }"
+    (c_type f.return_ty) f.name params_s
+    f.name f.name
+    (String.concat "\n" param_inits)
+    f.name
 
 (* Render the static byte pool as a C array literal. Every "..." literal
    from the program ends up in this buffer at its assigned offset. The
@@ -1950,40 +2179,144 @@ let emit (prog : Check.T.program) : string =
     | DAdt td -> emit_adt_definition td
     | DRec rd -> emit_record_definition rd) ordered_structs in
   let extern_decls = List.map emit_extern_decl prog.externs in
-  let async_main =
-    List.find_opt
-      (fun (f : Check.T.func) -> f.name = "main" && f.is_async)
-      prog.funcs
+  let async_funcs =
+    List.filter (fun (f : Check.T.func) -> f.is_async) prog.funcs
   in
   let sync_funcs =
-    List.filter
-      (fun (f : Check.T.func) -> not (f.name = "main" && f.is_async))
-      prog.funcs
+    List.filter (fun (f : Check.T.func) -> not f.is_async) prog.funcs
   in
   let decls        = List.map emit_func_decl sync_funcs in
+  (* Non-main async functions also expose a sync C symbol (forward
+     decl matches the sync wrapper's signature: `T name(params)`). *)
+  let async_decls_sync =
+    List.filter_map (fun (f : Check.T.func) ->
+      if f.name = "main" then None
+      else Some (emit_func_decl f)) async_funcs
+  in
   let array_drop_defs = emit_array_drop_defs () in
   let defs         = List.map (emit_func_def ctor_map) sync_funcs in
   let async_runtime, async_decls, async_defs =
-    match async_main with
-    | None -> ("", [], [])
-    | Some f ->
-        let rt =
+    if async_funcs = [] then ("", [], [])
+    else begin
+      (* A union over every Frame_<X> sized so the slot's inline byte
+         buffer fits the largest async frame in the program. We don't
+         have to do the sizeof math in OCaml — C does it. *)
+      let frame_union =
+        if async_funcs = [] then ""
+        else
+          let fields =
+            List.mapi (fun i (f : Check.T.func) ->
+              Printf.sprintf "    Frame_%s f%d;" f.name i) async_funcs
+          in
+          Printf.sprintf
+            "typedef union {\n%s\n} OrtoSlotFrames;"
+            (String.concat "\n" fields)
+      in
+      let rt =
+        Printf.sprintf
           "/* Stage 3 async runtime: an io_uring ring, a tiny CQE-driven\n\
-           \ * dispatcher, and helpers for the lowered state machines.\n\
-           \ * Every frame begins with this header so the dispatcher\n\
-           \ * can read step/state/last_res generically. */\n\
+           \ * dispatcher, helpers for the lowered state machines, and a\n\
+           \ * fixed-slab slot pool that owns every spawned frame.\n\
+           \ *\n\
+           \ * The header layout below matches the prefix of every\n\
+           \ * Frame_<X> struct (step / state / last_res / return_value\n\
+           \ * / _orto_slot), so the dispatcher reads and writes those\n\
+           \ * fields generically through an OrtoFrameHeader pointer. */\n\
            #include <liburing.h>\n\
-           typedef int (*OrtoStepFn)(void *frame_ptr);\n\
            typedef struct {\n\
            \    OrtoStepFn step;\n\
            \    int state;\n\
            \    int last_res;\n\
+           \    int return_value;\n\
+           \    int _orto_slot;   /* slot index in ORTO_SLOTS, -1 if stack-owned */\n\
            } OrtoFrameHeader;\n\
            /* ORTO_RING is intentionally non-static so user-side\n\
             * async-extern glue (extern fn read/write/recv/...) can\n\
             * submit SQEs directly into the same ring. */\n\
            struct io_uring ORTO_RING;\n\
            static int ORTO_PENDING = 0;\n\
+           \n\
+           %s\n\
+           \n\
+           /* Slot pool — TigerBeetle-style fixed slab. Spawned frames\n\
+            * live inside `.frame`; ORTO_SLOT_FREE marks a free entry,\n\
+            * ORTO_SLOT_RUNNING a joinable frame still running,\n\
+            * ORTO_SLOT_DETACHED a fire-and-forget frame (drop slot on\n\
+            * completion), ORTO_SLOT_DONE_NO_WAITER a finished joinable\n\
+            * frame whose result hasn't been picked up yet. */\n\
+           #define ORTO_SLOT_COUNT 256\n\
+           #define ORTO_SLOT_FREE 0\n\
+           #define ORTO_SLOT_RUNNING 1\n\
+           #define ORTO_SLOT_DETACHED 2\n\
+           #define ORTO_SLOT_DONE_NO_WAITER 3\n\
+           typedef struct {\n\
+           \    int gen;\n\
+           \    int next_free;\n\
+           \    int status;\n\
+           \    int waiter_state;\n\
+           \    int result;\n\
+           \    OrtoFrameHeader *waiter;\n\
+           \    OrtoSlotFrames frame;\n\
+           } OrtoSlot;\n\
+           static OrtoSlot ORTO_SLOTS[ORTO_SLOT_COUNT];\n\
+           static int ORTO_SLOT_FREE_HEAD = -1;\n\
+           \n\
+           static int orto_slot_alloc(void) {\n\
+           \    if (ORTO_SLOT_FREE_HEAD < 0) abort();\n\
+           \    int i = ORTO_SLOT_FREE_HEAD;\n\
+           \    ORTO_SLOT_FREE_HEAD = ORTO_SLOTS[i].next_free;\n\
+           \    ORTO_SLOTS[i].next_free = -1;\n\
+           \    ORTO_SLOTS[i].status = ORTO_SLOT_RUNNING;\n\
+           \    ORTO_SLOTS[i].waiter = NULL;\n\
+           \    ORTO_SLOTS[i].waiter_state = 0;\n\
+           \    ORTO_SLOTS[i].result = 0;\n\
+           \    return i;\n\
+           }\n\
+           \n\
+           static void orto_slot_free(int i) {\n\
+           \    ORTO_SLOTS[i].gen++;  /* invalidate dangling Task handles */\n\
+           \    ORTO_SLOTS[i].status = ORTO_SLOT_FREE;\n\
+           \    ORTO_SLOTS[i].waiter = NULL;\n\
+           \    ORTO_SLOTS[i].next_free = ORTO_SLOT_FREE_HEAD;\n\
+           \    ORTO_SLOT_FREE_HEAD = i;\n\
+           }\n\
+           \n\
+           /* A frame just returned 0 from its step. Either deliver the\n\
+            * result to the waiter (and re-enter it, possibly chaining)\n\
+            * or stash it in the slot for a later await. Detached frames\n\
+            * just release their slot. Returns 0 if no further pending\n\
+            * adjustment is needed beyond the caller's own --, or the\n\
+            * number of extra `ORTO_PENDING--`s the caller should apply\n\
+            * because re-entered waiters also completed.\n\
+            *\n\
+            * Re-entry is a loop, not recursion, so an arbitrarily long\n\
+            * await-of-await chain stays O(1) on the C stack. */\n\
+           static int orto_complete(OrtoFrameHeader *fr) {\n\
+           \    int extra_done = 0;\n\
+           \    for (;;) {\n\
+           \        if (fr->_orto_slot < 0) return extra_done;\n\
+           \        int si = fr->_orto_slot;\n\
+           \        int rv = fr->return_value;\n\
+           \        OrtoSlot *s = &ORTO_SLOTS[si];\n\
+           \        s->result = rv;\n\
+           \        if (s->status == ORTO_SLOT_DETACHED) {\n\
+           \            orto_slot_free(si);\n\
+           \            return extra_done;\n\
+           \        }\n\
+           \        if (s->waiter == NULL) {\n\
+           \            s->status = ORTO_SLOT_DONE_NO_WAITER;\n\
+           \            return extra_done;\n\
+           \        }\n\
+           \        OrtoFrameHeader *w = s->waiter;\n\
+           \        w->last_res = rv;\n\
+           \        w->state = s->waiter_state;\n\
+           \        orto_slot_free(si);\n\
+           \        int wr = w->step(w);\n\
+           \        if (wr == 1) return extra_done;  /* waiter still pending */\n\
+           \        extra_done++;\n\
+           \        fr = w;  /* chain: deliver this waiter's result, too */\n\
+           \    }\n\
+           }\n\
            \n\
            static void orto_yield_suspend(void *fr) {\n\
            \    struct io_uring_sqe *sqe = io_uring_get_sqe(&ORTO_RING);\n\
@@ -2001,15 +2334,36 @@ let emit (prog : Check.T.program) : string =
            \        fr->last_res = cqe->res;\n\
            \        io_uring_cqe_seen(&ORTO_RING, cqe);\n\
            \        int sr = fr->step(fr);\n\
-           \        if (sr == 0) ORTO_PENDING--;\n\
+           \        if (sr == 0) {\n\
+           \            ORTO_PENDING--;\n\
+           \            ORTO_PENDING -= orto_complete(fr);\n\
+           \        }\n\
            \    }\n\
            \    return 0;\n\
+           }\n\
+           \n\
+           static void orto_init_slots(void) __attribute__((constructor));\n\
+           static void orto_init_slots(void) {\n\
+           \    for (int i = 0; i < ORTO_SLOT_COUNT; i++) {\n\
+           \        ORTO_SLOTS[i].gen = 1;\n\
+           \        ORTO_SLOTS[i].next_free = i + 1;\n\
+           \        ORTO_SLOTS[i].status = ORTO_SLOT_FREE;\n\
+           \        ORTO_SLOTS[i].waiter = NULL;\n\
+           \    }\n\
+           \    ORTO_SLOTS[ORTO_SLOT_COUNT - 1].next_free = -1;\n\
+           \    ORTO_SLOT_FREE_HEAD = 0;\n\
            }"
-        in
-        let frame = emit_async_frame_struct f in
-        let step  = emit_async_step ctor_map f in
-        let main_wrap = emit_async_main_wrapper f in
-        (rt, [frame], [step; main_wrap])
+          frame_union
+      in
+      let frames = List.map emit_async_frame_struct async_funcs in
+      let steps  = List.map (emit_async_step ctor_map) async_funcs in
+      let wrappers =
+        List.map (fun (f : Check.T.func) ->
+          if f.name = "main" then emit_async_main_wrapper f
+          else emit_async_sync_wrapper f) async_funcs
+      in
+      (rt, frames, steps @ wrappers)
+    end
   in
   let static_bytes = emit_static_bytes_array () in
   let header = Printf.sprintf
@@ -2068,18 +2422,24 @@ let emit (prog : Check.T.program) : string =
      }"
     static_bytes
   in
+  let async_prelude =
+    if async_funcs = [] then []
+    else ["typedef int (*OrtoStepFn)(void *frame_ptr);"]
+  in
   String.concat "\n\n"
     ([header]
-     @ (if async_runtime = "" then [] else [async_runtime])
      @ adt_forwards
      @ rec_forwards
      @ array_forwards
      @ task_forwards
      @ fn_typedefs
      @ struct_defs
+     @ async_prelude
      @ async_decls
+     @ (if async_runtime = "" then [] else [async_runtime])
      @ extern_decls
      @ decls
+     @ async_decls_sync
      @ array_drop_forwards
      @ array_drop_defs
      @ defs

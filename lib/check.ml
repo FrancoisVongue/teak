@@ -1198,8 +1198,17 @@ let rec infer (env : env) (tparams : string list)
         (match prune tv_ty with
          | TyMeta _ -> unify tv_ty TyInt
          | _ -> ());
+      (* Stage 3 §8.1: an unbound (`_`) Task[T] is detach, not drop —
+         the spawned worker keeps running and frees its slot itself.
+         Don't synthesise a _drop_N for it. Stream[T] follows the
+         same rule (fire-and-forget multishot source). *)
+      let is_task_or_stream =
+        match prune tv_ty with
+        | TyApp ("Task", _) | TyApp ("Stream", _) -> true
+        | _ -> false
+      in
       let x_actual =
-        if x = "_" && is_linear_ty tv_ty then begin
+        if x = "_" && is_linear_ty tv_ty && not is_task_or_stream then begin
           incr drop_name_counter;
           Printf.sprintf "_drop_%d" !drop_name_counter
         end else x
@@ -2389,18 +2398,10 @@ let check (prog : program) : T.program =
          raise (Type_error "`main` must take no parameters");
        if f.T.return_ty <> TyInt then
          raise (Type_error "`main` must return int"));
-  (* Stage 3 MVP (phase 4b): suspension points are wired up only for
-     `main` for now — calling an async function from another async
-     function needs `spawn` / `await call`, which arrive in later
-     phases. Reject non-main async to make the cliff explicit. *)
-  List.iter (fun (f : T.func) ->
-    if f.T.is_async && f.T.name <> "main" then
-      raise (Type_error
-        (Printf.sprintf
-           "Stage 3 phase-4 MVP: %S contains `await` or `yield` but is \
-            not `main`. Suspension in non-main functions needs `spawn` \
-            / `await call` (later phases). See STAGE3_ASYNC.md §13."
-           f.T.name))) typed_funcs;
+  (* Stage 3 phase 4e: non-main async functions are allowed; they
+     get lowered into a Frame + step + sync wrapper just like main
+     and are reachable via `spawn` (or a direct sync call, which
+     drains the dispatcher locally). *)
   { T.types   = resolved_types;
     T.records = resolved_records;
     T.funcs   = typed_funcs;
