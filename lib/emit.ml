@@ -294,7 +294,13 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
           List.map (fun (p, body) ->
             match p with
             | PWild -> (p, rn env body)
-            | POr _ -> (p, rn env body)   (* or-patterns bind no names *)
+            | POr _ -> (p, rn env body)
+            | PInt _ | PBool _ | PStr _ -> (p, rn env body)
+            | PBind x when x = "_" -> (p, rn env body)
+            | PBind x ->
+                let x' = fresh x in
+                let env' = (x, x') :: env in
+                (PBind x', rn env' body)
             | PCtor (c, names) ->
                 let pairs =
                   List.map (fun n ->
@@ -483,6 +489,10 @@ let ty_of_expr : Check.T.expr -> ty = function
    regions skip the free — their storage is reclaimed when the
    surrounding C function returns. Used by let-scope auto_drop and
    function-end param drops. *)
+let is_catchall_pat_emit = function
+  | PWild | PBind _ -> true
+  | _ -> false
+
 let drop_region_stmt (name : string) : string =
   Printf.sprintf
     "if (ORTO_REGIONS[%s.slot].gen == %s.expected_gen) { \
@@ -659,62 +669,143 @@ let rec emit_expr
       let result_decl =
         Printf.sprintf "%s %s;" (c_type result_ty) result_var
       in
-      let emit_arm (pat, body) =
-        let bindings = match pat with
-          | PWild -> []
-          | POr _ -> []   (* no bindings inside or-patterns *)
-          | PCtor (c, vs) ->
-              let (_, v, _) = Hashtbl.find ctor_map c in
-              List.filter_map (fun ((var, t), i) ->
-                if var = "_" then None
-                else
-                  Some (Printf.sprintf
-                    "    %s %s = %s.as.%s.f%d;"
-                    (c_type t) var scrut_var c i))
-              (List.mapi (fun i x -> (x, i))
-                (List.combine vs v.arg_tys))
+      (* Dispatch by scrutinee shape. After mono, an ADT shows up as
+         TyApp(name, []) where name is in the ADT environment, i.e.
+         present in ctor_map under at least one ctor name. We detect
+         the four non-ADT scrutinee shapes by structural type. *)
+      let is_adt_scrut =
+        match scrut_ty with
+        | TyInt | TyBool -> false
+        | TyApp ("byte", []) -> false
+        | TyApp ("Array", _) -> false
+        | TyApp _ -> true
+        | _ -> true
+      in
+      if is_adt_scrut then begin
+        let emit_arm (pat, body) =
+          let bindings = match pat with
+            | PWild -> []
+            | POr _ -> []
+            | PBind x when x <> "_" ->
+                [Printf.sprintf "    %s %s = %s;" (c_type scrut_ty) x scrut_var]
+            | PBind _ -> []
+            | PCtor (c, vs) ->
+                let (_, v, _) = Hashtbl.find ctor_map c in
+                List.filter_map (fun ((var, t), i) ->
+                  if var = "_" then None
+                  else
+                    Some (Printf.sprintf
+                      "    %s %s = %s.as.%s.f%d;"
+                      (c_type t) var scrut_var c i))
+                (List.mapi (fun i x -> (x, i))
+                  (List.combine vs v.arg_tys))
+            | _ -> []
+          in
+          let cb = emit_expr ctor_map body in
+          let body_lines =
+            (List.map (fun s -> "    " ^ s) cb.stmts)
+            @ [Printf.sprintf "    %s = %s;" result_var cb.value]
+            @ ["    break;"]
+          in
+          match pat with
+          | PWild | PBind _ ->
+              ["default: {"] @ bindings @ body_lines @ ["}"]
+          | PCtor (c, _) ->
+              let (_, _, tag) = Hashtbl.find ctor_map c in
+              [Printf.sprintf "case %d: { /* %s */" tag c]
+              @ bindings @ body_lines @ ["}"]
+          | POr pats ->
+              let labels = List.map (function
+                | PCtor (c, _) ->
+                    let (_, _, tag) = Hashtbl.find ctor_map c in
+                    Printf.sprintf "case %d: /* %s */" tag c
+                | _ -> failwith "emit: malformed ADT or-pattern") pats
+              in
+              labels @ ["{"] @ bindings @ body_lines @ ["}"]
+          | _ -> failwith "emit: literal pattern in ADT match"
         in
-        let cb = emit_expr ctor_map body in
-        let body_lines =
-          (List.map (fun s -> "    " ^ s) cb.stmts)
-          @ [Printf.sprintf "    %s = %s;" result_var cb.value]
-          @ ["    break;"]
+        let arm_blocks = List.concat_map emit_arm arms in
+        let has_catchall = List.exists (fun (p, _) ->
+          match p with PWild | PBind _ -> true | _ -> false) arms in
+        let trailing =
+          if has_catchall then []
+          else ["default: abort();"]
         in
-        match pat with
-        | PWild ->
-            ["default: {"] @ bindings @ body_lines @ ["}"]
-        | PCtor (c, _) ->
-            let (_, _, tag) = Hashtbl.find ctor_map c in
-            [Printf.sprintf "case %d: { /* %s */" tag c]
-            @ bindings @ body_lines @ ["}"]
-        | POr pats ->
-            let labels = List.map (function
-              | PCtor (c, _) ->
-                  let (_, _, tag) = Hashtbl.find ctor_map c in
-                  Printf.sprintf "case %d: /* %s */" tag c
-              | _ -> failwith "emit: malformed or-pattern") pats
-            in
-            labels @ ["{"] @ bindings @ body_lines @ ["}"]
-      in
-      let arm_blocks = List.concat_map emit_arm arms in
-      let has_wild = List.exists (fun (p, _) ->
-        match p with PWild -> true | _ -> false) arms in
-      let trailing =
-        if has_wild then []
-        else ["default: abort();"]
-      in
-      let switch_lines =
-        [Printf.sprintf "switch (%s.tag) {" scrut_var]
-        @ (List.map (fun s -> "    " ^ s) arm_blocks)
-        @ (List.map (fun s -> "    " ^ s) trailing)
-        @ ["}"]
-      in
-      let stmts =
-        cs.stmts
-        @ [scrut_decl; result_decl]
-        @ switch_lines
-      in
-      { stmts; value = result_var }
+        let switch_lines =
+          [Printf.sprintf "switch (%s.tag) {" scrut_var]
+          @ (List.map (fun s -> "    " ^ s) arm_blocks)
+          @ (List.map (fun s -> "    " ^ s) trailing)
+          @ ["}"]
+        in
+        let stmts =
+          cs.stmts
+          @ [scrut_decl; result_decl]
+          @ switch_lines
+        in
+        { stmts; value = result_var }
+      end else begin
+        (* Non-ADT scrutinee: int, bool, byte, or Array[byte]. Emit a
+           chain of `if (cond) { ... } else if (cond) { ... } ... else
+           { /* catch-all */ }`. *)
+        let pat_test pat =
+          let rec single = function
+            | PInt n  -> Printf.sprintf "%s == %d" scrut_var n
+            | PBool b -> Printf.sprintf "%s == %d" scrut_var (if b then 1 else 0)
+            | PStr s ->
+                (* Compare by length first, then bytes. We register
+                   the string in the pool so we can memcmp against the
+                   static buffer at a known offset. *)
+                let off = register_string s in
+                let len = String.length s in
+                Printf.sprintf
+                  "(%s).len == %d && memcmp(ORTO_REGIONS[(%s).slot].buffer + (%s).offset, ORTO_STATIC_BYTES + %d, %d) == 0"
+                  scrut_var len scrut_var scrut_var off len
+            | POr ps -> String.concat " || " (List.map single ps)
+            | PWild | PBind _ -> "1"
+            | PCtor _ -> failwith "emit: ctor pattern in non-ADT match"
+          in
+          single pat
+        in
+        let emit_arm idx (pat, body) =
+          let cb = emit_expr ctor_map body in
+          let is_catchall = is_catchall_pat_emit pat in
+          let bind_stmt = match pat with
+            | PBind x when x <> "_" ->
+                [Printf.sprintf "    %s %s = %s;" (c_type scrut_ty) x scrut_var]
+            | _ -> []
+          in
+          let body_lines =
+            bind_stmt
+            @ (List.map (fun s -> "    " ^ s) cb.stmts)
+            @ [Printf.sprintf "    %s = %s;" result_var cb.value]
+          in
+          let head =
+            if idx = 0 then
+              if is_catchall then "if (1) {"
+              else Printf.sprintf "if (%s) {" (pat_test pat)
+            else if is_catchall then "else {"
+            else Printf.sprintf "else if (%s) {" (pat_test pat)
+          in
+          [head] @ body_lines @ ["}"]
+        in
+        let chain = List.concat (List.mapi emit_arm arms) in
+        let has_catchall = List.exists (fun (p, _) -> is_catchall_pat_emit p) arms in
+        let safety =
+          if has_catchall then []
+          else
+            (* Should be unreachable for bool that covers both; for
+               int/byte/bytes check.ml requires a catch-all so we never
+               reach here. Defensive abort just in case. *)
+            ["else { abort(); }"]
+        in
+        let stmts =
+          cs.stmts
+          @ [scrut_decl; result_decl]
+          @ chain
+          @ safety
+        in
+        { stmts; value = result_var }
+      end
 
   | Check.T.TEArray (region_e, size_e, init_e, result_ty) ->
       (* Bump-allocate N*sizeof(T) inside the region's buffer. Returns
@@ -1214,6 +1305,7 @@ let emit (prog : Check.T.program) : string =
      #include <stdlib.h>\n\
      #include <stddef.h>\n\
      #include <stdint.h>\n\
+     #include <string.h>\n\
      \n\
      /* Region runtime: a global slab of region slots. Each slot is\n\
       * reused after its region is dropped (gen bumps so old handles\n\

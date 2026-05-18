@@ -533,6 +533,17 @@ and parse_single_pat st =
         PCtor (c, vars)
       end else
         PCtor (c, [])
+  | TIdent x -> PBind x
+  | TInt n -> PInt n
+  | TMinus ->
+      (match eat st with
+       | TInt n -> PInt (- n)
+       | t -> raise (Parse_error
+         (Printf.sprintf "expected integer literal after `-` in pattern, got %s"
+            (Token.show t))))
+  | TTrue  -> PBool true
+  | TFalse -> PBool false
+  | TStringLit s -> PStr s
   | t -> raise (Parse_error
     (Printf.sprintf "expected pattern, got %s" (Token.show t)))
 

@@ -605,32 +605,101 @@ let check_no_recursive_types
   List.iter (fun (n, _) -> visit n n [n]) type_env;
   List.iter (fun (n, _) -> visit n n [n]) record_env
 
-(* ---------- pattern checking ---------- *)
+(* ---------- pattern checking ----------
 
+   The scrutinee's type decides what kinds of patterns are allowed,
+   and what exhaustivity means. Centralised so each branch is short
+   and follows from a single rule. *)
+
+type scrut_kind =
+  | SK_Adt   of string             (* ADT — match by ctor *)
+  | SK_Int                         (* int — literal patterns, default required *)
+  | SK_Byte                        (* byte — same rules as int *)
+  | SK_Bool                        (* bool — true/false, exhaustive if both covered *)
+  | SK_Bytes                       (* Array[byte] — string literal patterns *)
+
+let scrutinee_kind (env : env) (t : ty) : scrut_kind =
+  match prune t with
+  | TyInt  -> SK_Int
+  | TyBool -> SK_Bool
+  | TyApp ("byte", []) -> SK_Byte
+  | TyApp ("Array", [inner]) ->
+      (match prune inner with
+       | TyApp ("byte", []) -> SK_Bytes
+       | _ ->
+           raise (Type_error
+             (Printf.sprintf
+                "match scrutinee must be int, bool, byte, Array[byte], or an ADT, got %s"
+                (show_ty (zonk t)))))
+  | TyApp (n, _) when List.mem_assoc n env.types -> SK_Adt n
+  | _ ->
+      raise (Type_error
+        (Printf.sprintf
+           "match scrutinee must be int, bool, byte, Array[byte], or an ADT, got %s"
+           (show_ty (zonk t))))
+
+let is_catchall_pat = function
+  | PWild | PBind _ -> true
+  | _ -> false
+
+(* Reject patterns that don't belong on this scrutinee kind. Also
+   reject malformed or-patterns. Doesn't enforce exhaustivity — that's
+   the next step. *)
+let rec pat_compatible_with_kind kind p =
+  match kind, p with
+  | _, PWild | _, PBind _ -> true
+  | SK_Adt _, PCtor _ -> true
+  | SK_Int, PInt _ | SK_Byte, PInt _ -> true
+  | SK_Bool, PBool _ -> true
+  | SK_Bytes, PStr _ -> true
+  | _, POr pats -> List.for_all (pat_compatible_with_kind kind) pats
+  | _, _ -> false
+
+let pat_kind_name = function
+  | SK_Adt n -> Printf.sprintf "ADT %s" n
+  | SK_Int -> "int"
+  | SK_Byte -> "byte"
+  | SK_Bool -> "bool"
+  | SK_Bytes -> "Array[byte]"
+
+(* Walk arms left-to-right enforcing:
+     - patterns suit the scrutinee kind
+     - or-pattern sub-arms suit the kind too, and forbid bindings
+     - ADT-specific: ctor exists in the ADT
+     - no arm after a catch-all *)
 let check_match_arms_structure
   (env : env)
-  (type_name : string)
+  (kind : scrut_kind)
   (arms : (pat * 'a) list) : unit =
-  let td = List.assoc type_name env.types in
-  let all_ctors = List.map (fun v -> v.ctor_name) td.variants in
-  let seen = Hashtbl.create 8 in
-  let has_wildcard = ref false in
+  let all_ctors = match kind with
+    | SK_Adt name ->
+        let td = List.assoc name env.types in
+        List.map (fun v -> v.ctor_name) td.variants
+    | _ -> []
+  in
+  let seen_ctors = Hashtbl.create 8 in
+  let catchall_seen = ref false in
   let register_ctor c =
-    if Hashtbl.mem seen c then
+    if Hashtbl.mem seen_ctors c then
       raise (Type_error
         (Printf.sprintf "duplicate pattern %S in match" c));
     if not (List.mem c all_ctors) then
       raise (Type_error
         (Printf.sprintf
-           "constructor %S does not belong to type %S"
-           c type_name));
-    Hashtbl.add seen c ()
+           "constructor %S does not belong to %s"
+           c (pat_kind_name kind)));
+    Hashtbl.add seen_ctors c ()
   in
   List.iter (fun (p, _) ->
-    if !has_wildcard then
-      raise (Type_error "unreachable pattern after wildcard");
-    match p with
-    | PWild -> has_wildcard := true
+    if !catchall_seen then
+      raise (Type_error "unreachable pattern after wildcard or bind");
+    if not (pat_compatible_with_kind kind p) then
+      raise (Type_error
+        (Printf.sprintf
+           "pattern %s is not valid for a %s scrutinee"
+           (show_pat p) (pat_kind_name kind)));
+    if is_catchall_pat p then catchall_seen := true
+    else match p with
     | PCtor (c, _) -> register_ctor c
     | POr pats ->
         List.iter (function
@@ -638,22 +707,48 @@ let check_match_arms_structure
               if vs <> [] then
                 raise (Type_error
                   (Printf.sprintf
-                     "or-pattern arm %S(...) must not bind variables — \
-                      or-patterns cannot introduce names"
+                     "or-pattern arm %S(...) must not bind variables"
                      c));
               register_ctor c
+          | PInt _ | PBool _ | PStr _ -> ()
           | _ ->
               raise (Type_error
-                "or-patterns may only contain bare constructor names")) pats
+                "or-pattern arms must be constructors or literals, with no bindings"))
+          pats
+    | PInt _ | PBool _ | PStr _ -> ()
+    | _ -> ()
   ) arms;
-  if not !has_wildcard then begin
-    let missing =
-      List.filter (fun c -> not (Hashtbl.mem seen c)) all_ctors
-    in
-    if missing <> [] then
-      raise (Type_error
-        (Printf.sprintf "non-exhaustive match: missing %s"
-           (String.concat ", " missing)))
+  (* Exhaustivity. Only ADT and Bool can be exhaustive without a
+     catch-all — Int / Byte / Bytes always need one. *)
+  if not !catchall_seen then begin
+    match kind with
+    | SK_Adt _ ->
+        let missing =
+          List.filter (fun c -> not (Hashtbl.mem seen_ctors c)) all_ctors
+        in
+        if missing <> [] then
+          raise (Type_error
+            (Printf.sprintf "non-exhaustive match: missing %s"
+               (String.concat ", " missing)))
+    | SK_Bool ->
+        let bool_present b =
+          List.exists (fun (p, _) ->
+            let rec check = function
+              | PBool b' -> b' = b
+              | POr ps -> List.exists check ps
+              | _ -> false
+            in check p) arms
+        in
+        if not (bool_present true && bool_present false) then
+          raise (Type_error
+            "non-exhaustive bool match: must cover both `true` and `false`, \
+             or include a wildcard arm")
+    | _ ->
+        raise (Type_error
+          (Printf.sprintf
+             "non-exhaustive %s match: a wildcard (`_`) or bind arm is required \
+              because the value domain is not enumerable"
+             (pat_kind_name kind)))
   end
 
 (* ---------- copyability ----------
@@ -752,7 +847,9 @@ let rec takes_consume (env : env) (x : string) (e : T.expr) : bool =
         let shadowed = match p with
           | PWild -> false
           | PCtor (_, names) -> List.mem x names
-          | POr _ -> false  (* or-patterns bind nothing *)
+          | POr _ -> false
+          | PInt _ | PBool _ | PStr _ -> false
+          | PBind y -> y = x
         in
         not shadowed && takes_consume env x body) arms
   | T.TEArray (r, n, v, _) ->
@@ -800,7 +897,9 @@ let rec tail_consume (x : string) (e : T.expr) : bool =
         let shadowed = match p with
           | PWild -> false
           | PCtor (_, names) -> List.mem x names
-          | POr _ -> false  (* or-patterns bind nothing *)
+          | POr _ -> false
+          | PInt _ | PBool _ | PStr _ -> false
+          | PBind y -> y = x
         in
         not shadowed && tail_consume x body) arms
   | _ -> false   (* any other terminal: int, ctor, call result, ... — not x *)
@@ -1159,21 +1258,18 @@ let rec infer (env : env) (tparams : string list)
       if arms = [] then
         raise (Type_error "match must have at least one arm");
       let (tscrut, tscrut_ty) = infer env tparams vars scrut in
-      let scrut_ty_now = prune tscrut_ty in
-      let type_name =
-        match scrut_ty_now with
-        | TyApp (n, _) when List.mem_assoc n env.types -> n
-        | _ ->
-            raise (Type_error
-              (Printf.sprintf
-                 "match scrutinee must have an ADT type, got %s"
-                 (show_ty (zonk tscrut_ty))))
-      in
-      check_match_arms_structure env type_name arms;
+      let kind = scrutinee_kind env tscrut_ty in
+      check_match_arms_structure env kind arms;
       let typed_arms = List.map (fun (pat, body) ->
         let body_vars =
           match pat with
           | PWild -> vars
+          | PBind x ->
+              if x = "_" then vars
+              else begin
+                check_not_c_reserved "pattern bind" x;
+                (x, (tscrut_ty, false)) :: vars
+              end
           | PCtor (c, vs) ->
               let info = List.assoc c env.ctors in
               if List.length vs <> List.length info.ctor_args then
@@ -1197,10 +1293,11 @@ let rec infer (env : env) (tparams : string list)
                 if v = "_" then acc else (v, (t, false)) :: acc)
                 vars vs arg_tys
           | POr pats ->
-              (* All sub-patterns are PCtor with no bindings (checked by
-                 check_match_arms_structure). Unify scrut type against
-                 the first ctor's owner; the others must match the same
-                 ADT by structural rule. *)
+              (* For ADT or-patterns: unify scrut with first ctor's
+                 owner; structural check has already verified all arms
+                 belong to the same ADT. For literal or-patterns
+                 (PInt/PBool/PStr): scrut type already constrained by
+                 scrutinee_kind, no extra unify needed. *)
               (match pats with
                | PCtor (c, _) :: _ ->
                    let info = List.assoc c env.ctors in
@@ -1215,6 +1312,7 @@ let rec infer (env : env) (tparams : string list)
                    unify inst_result tscrut_ty
                | _ -> ());
               vars
+          | PInt _ | PBool _ | PStr _ -> vars
         in
         let (tbody, tbody_ty) = infer env tparams body_vars body in
         ((pat, tbody), tbody_ty)) arms
@@ -1760,7 +1858,10 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       let arm_data = List.map (fun (pat, body) ->
         let names_tys = match pat with
           | PWild -> []
-          | POr _ -> []   (* or-patterns bind nothing *)
+          | POr _ -> []
+          | PInt _ | PBool _ | PStr _ -> []
+          | PBind x when x = "_" -> []
+          | PBind x -> [(x, scrut_ty)]
           | PCtor (c, vs) ->
               let info = List.assoc c env.ctors in
               let scrut_now = prune scrut_ty in

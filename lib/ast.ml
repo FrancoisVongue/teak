@@ -29,6 +29,10 @@ type pat =
   | PWild
   | PCtor of string * string list
   | POr   of pat list                    (* a | b | c — all must be PCtor with no bindings *)
+  | PInt  of int                         (* literal int pattern *)
+  | PBool of bool                        (* literal bool pattern *)
+  | PStr  of string                      (* literal Array[byte] pattern *)
+  | PBind of string                      (* lowercase ident — binds scrutinee to name *)
 
 type binop =
   | OpAdd | OpSub | OpMul | OpDiv | OpMod
@@ -161,6 +165,10 @@ let rec show_pat = function
       Printf.sprintf "%s(%s)" c (String.concat ", " vs)
   | POr pats ->
       String.concat " | " (List.map show_pat pats)
+  | PInt n  -> string_of_int n
+  | PBool b -> if b then "true" else "false"
+  | PStr s  -> Printf.sprintf "%S" s
+  | PBind x -> x
 
 let show_binop = function
   | OpAdd -> "+"  | OpSub -> "-"

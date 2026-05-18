@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 /* Region runtime: a global slab of region slots. Each slot is
 * reused after its region is dropped (gen bumps so old handles
