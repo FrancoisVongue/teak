@@ -1,366 +1,450 @@
-# Stage 3: async I/O в orto — варианты для обсуждения
+# Stage 3: конкурентность и I/O в orto — финальная спецификация
 
-Stage 1 (sync façade) и Stage 2 (manual batched submit/wait) показали
-что io_uring API работоспособен через stdlib. Stage 3 — это **языковая
-поддержка async-style кода**, который под капотом эксплуатирует
-io_uring батчинг и параллелизм.
+**Статус**: спецификация зафиксирована. Реализация по фазам (см. §13).
 
-Это **архитектурный** шаг. Документ не выбирает один путь — он
-формулирует выбор и его последствия. Решение за тобой.
+Stage 1 (sync façade над io_uring) и Stage 2 (batched submit/wait через
+stdlib) показали что io_uring работоспособен как библиотека. Stage 3 —
+это **языковой** шаг: completion-based I/O становится частью модели
+языка, а не одной из библиотек.
+
+Документ описывает что мы строим, чего сознательно НЕ строим, и в
+каком порядке.
 
 ---
 
-## Проблема
+## 0. Решение: какой путь
 
-Сейчас в `iouring_batch.orto` чтобы запустить 3 параллельные
-операции:
+Из шести рассмотренных путей выбран **Path 6 — ring-native /
+completion-native**. Пути 1–5 отклонены:
+
+| # | Путь | Почему отклонён |
+|---|---|---|
+| 1 | Чистая stdlib (status quo) | Нет эргономики — программист руками лепит state machine. |
+| 2 | Стекфул, Go-стиль | Прячет старую модель, не отрицает её; стеки 2–8 KB на задачу. |
+| 3 | Стеклесс, Rust-стиль | Раскраска функций; `Future`/`Pin`/`poll` наружу; кадры на куче. |
+| 4 | Алгебраические эффекты | ~1500+ LOC компилятора, нет ROI на текущей стадии. |
+| 5 | Гибрид без `async` | Наследует минусы пути 2 без его эргономики. |
+| **6** | **Ring-native / completion-native** | **Принят.** |
+
+Path 6 строится вокруг completion-модели как **языковой** модели, а не
+бэкенда. Никакой язык так не сделал — это сознательный выбор быть
+первыми.
+
+---
+
+## 1. Философия
+
+Старые async-модели (Go, Rust, JS) выросли на readiness-моделях
+(epoll/kqueue): «сокет готов» — а само I/O ты делаешь блокирующим
+сисколлом. Чтобы изобразить «операция в полёте», язык вынужден держать
+стек корутины (стекфул) или строить стейт-машину наружу (стеклесс).
+
+Completion-модель (io_uring) меняет это: ядро само держит операцию в
+полёте и присылает результат. Часть машинерии async/await при
+completion-модели **дублирует то, что уже делает ядро**.
+
+Главный принцип: **поверхность языка выражает намерение, компилятор
+выбирает механизм**. Программист пишет линейный, синхронно выглядящий
+код. Слова SQE, CQE, IO_LINK, multishot не встречаются в синтаксисе —
+они живут только в бэкенде компилятора.
+
+---
+
+## 2. Поверхность языка
+
+Финальный набор конструкций:
+
+- **`await expr`** — единственная точка приостановки. Ждёт результат
+  одной операции. Это единственный «особый» токен.
+- **`await all { e1, e2, e3 }`** — конкурентный блок. Все ветки
+  стартуют разом, блок ждёт все, возвращает кортеж. (Бывший `par`.)
+  Имя выбрано так, чтобы `await` оставался единственным словом
+  помечающим приостановку: `await x` — одно, `await all { ... }` —
+  всё.
+- **`await all <iterable>`** — динамическая версия: одно-типные
+  задачи в коллекции.
+- **`for x in stream { ... }`** — итерация по `Stream[T]` (multishot
+  источник событий).
+- **`spawn f(args)`** — запустить обработчик, не ждать. Возвращает
+  `Task[T]` (линейный хэндл, см. §8).
+- **`yield`** — добровольно отдать ход диспетчеру (для длинного CPU,
+  см. §9).
+
+Пайпов (`|>` как async-конструкция) нет. Зависимая последовательность
+выражается обычными подряд идущими `await` — компилятор видит
+зависимость по данным из порядка кода:
 
 ```orto
-submit_read(ring, fd1, buf1, 0, 101);
-submit_read(ring, fd2, buf2, 0, 102);
-submit_read(ring, fd3, buf3, 0, 103);
-flush(ring);
-while completed < 3 {
-    let c = wait_one(ring);
-    ...
+let fd = await open(ring, path, o_rdonly());
+let n  = await read(ring, fd, buf, 0);
+await close(ring, fd);
+```
+
+Linked SQE (`IOSQE_IO_LINK`) — это **опциональная внутренняя
+оптимизация** компилятора, а не синтаксис. В v1 не делаем; на семантику
+не влияет, только на число сисколлов.
+
+Функции **не цветные**. Никакого `async` префикса. Любая функция зовёт
+любую. Компилятор сам решает по наличию `await` внутри, нужна ли
+трансформация в стейт-машину.
+
+### 2.1. Канонический пример — веб-сервер
+
+```orto
+fn handle_conn(ring: Ring, conn: Fd) {
+    let buf = buffer(4096);
+    let n   = await recv(ring, conn, buf);   // пауза 1
+    let out = build_response(buf, n);         // CPU, на потоке
+    await send(ring, conn, out);              // пауза 2
+    close(conn);
+}
+
+fn main() {
+    let ring   = ring_new(256);
+    let server = listen("0.0.0.0:8080");
+    for conn in accept_stream(ring, server) {  // multishot Stream
+        spawn handle_conn(ring, conn);
+    }
 }
 ```
 
-Программист видит SQE/CQE концепции, тэгает completion по id, сам
-бойлерплейтит. Прямая инструкция компьютеру.
-
-Хотим:
+### 2.2. `await all` — статический и динамический
 
 ```orto
-let (a, b, c) = await_all(
-    read_file(ring, "/tmp/a"),
-    read_file(ring, "/tmp/b"),
-    read_file(ring, "/tmp/c"),
-);
+// статический, разнотипные ветки → кортеж
+let (a, b, c) = await all {
+    read_size(ring, "/a"),
+    read_size(ring, "/b"),
+    read_size(ring, "/c"),
+};
+
+// динамический, однотипные → массив
+let tasks = map(paths, |p| spawn read_size(ring, p));  // Array[Task[int]]
+let sizes = await all tasks;                            // Array[int]
 ```
-
-Или ещё проще:
-
-```orto
-async fn read_file(ring: Ring, path: Array[byte]) -> Array[byte] { ... }
-
-let bytes = await read_file(ring, "/etc/hostname");
-```
-
-Программист пишет линейный код. Compiler/runtime управляет
-parallelism. io_uring под капотом submit'ит параллельно.
 
 ---
 
-## Пять путей (от наименее инвазивного к наиболее)
+## 3. Что делает компилятор
 
-### Путь 1. Pure stdlib — без language changes (Go-libuv стиль)
+### 3.1. Уровень программы
 
-Stage 2 уже это есть. Дальше — лучшие helpers, conventions, может
-быть `for_each_completion(ring) { ... }`.
+Компилятор анализирует граф вызовов от `main`:
 
-- **Pro**: ноль изменений компилятора.
-- **Con**: программист пишет state machine руками. Composing two
-  parallel ops в одну операцию требует boilerplate.
-- **Linear types через await**: программист сам moves into frames.
+- **Нет ни одного `await`/ring-op во всём графе** → обычный `main`:
+  пролог, код, эпилог, `exit`. **Ноль рантайма, ноль кольца** —
+  бинарник ведёт себя как обычная C-программа.
+- **Есть хотя бы один `await`** → `main` оборачивается в драйвер
+  кольца (§4).
 
-В современных языках только C/Zig/Rust-без-tokio пишут так. Не
-эргономично at scale.
+Это не тумблер. Это **выводится** из наличия `await`, как тип
+выводится из выражения.
 
-### Путь 2. Stackful coroutines (Go-style green threads)
+### 3.2. Уровень функции
 
-`spawn(f)` создаёт coroutine на своём стеке. `yield_on_io()` отдаёт
-управление scheduler-у. Scheduler выбирает другой coroutine.
+- **Нет `await` внутри** → компилируется как есть.
+- **Есть `await` внутри** → трансформация в стеклесс стейт-машину:
 
-```orto
-linear struct Task { handle: *byte }
-fn drop_Task(t: Task) -> int { task_wait(t.handle); 0 }
+  1. Функция режется по точкам `await`. **N точек → N+1 состояний**.
+     Каждое состояние — прямой кусок кода между двумя паузами.
+  2. Генерируется **кадр** — структура: тег `state` + переменные,
+     живые через границу `await`. Переменные не пересекающие ни одно
+     `await` в кадр не попадают — живут в регистрах / нативном стеке.
+     Кадр крошечный (десятки–сотни байт).
+  3. На каждом `await`: заполнить SQE, проставить `user_data` = индекс
+     слота кадра, отправить в кольцо, выйти из функции.
 
-fn spawn(f: fn() -> int) -> Task { ... }
+Стейт-машина здесь — это **нужное и минимальное** представление паузы,
+не то, что делает Rust болезненным. Боль Rust — `Pin`, трейт `Future`,
+`.poll()`, раскраска, борьба borrow-checker'а с самоссылающимися
+кадрами. orto оставляет стейт-машину как **внутреннее** представление и
+выкидывает всю эту церемонию.
 
-fn read_file(ring: Ring, path: Array[byte]) -> Array[byte] {
-    let fd = await uring_open(ring, path, ...);
-    // ...
+---
+
+## 4. Рантайм
+
+Рантайм **зашит**, не сменный. Обоснование: Rust держит сменный
+рантайм потому что целится в три несовместимых домена (МК без ОС,
+ядро, сервер) и платит за это расколом экосистемы. У orto домен один —
+completion-based I/O. Зашитый рантайм — это то же решение, что зашитая
+модель памяти (арена + поколенческие ячейки).
+
+Ядро рантайма — крошечный цикл-диспетчер, ~20–30 строк C:
+
+```c
+while (in_flight > 0) {
+    wait_cqe(&cqe);
+    Frame *f = pool[cqe->user_data];
+    f->state = cqe->res;       // или resume_with(f, cqe->res)
+    resume(f);                 // прыжок на f->state, выполнять дальше
+    cqe_seen(cqe);
 }
 ```
 
-`await` обращается к scheduler-у; для io_uring — submit + park
-coroutine; CQE wakes it.
+Это **event loop**, не планировщик. Планировщик принимает решения
+(какая задача на каком потоке, балансировка, вытеснение). Диспетчер не
+принимает решений — он реагирует: «CQE пришёл → разбуди того, кто его
+ждал». Нет work-stealing, нет вытеснения, нет пула потоков для I/O.
 
-- **Pro**: код выглядит как sync. Любая функция может await. Нет
-  function coloring (нет split async/non-async).
-- **Pro**: эргономично, привычно для пользователей Go.
-- **Con**: каждая coroutine имеет свой стек (минимум 4-8 KB).
-  Growth с many tasks. 10k coroutines = 40-80 MB.
-- **Con**: implementation — scheduler в runtime, stack switching
-  (ucontext или custom asm на x86-64).
-- **Con**: stack growth — segmented stacks или contiguous reallocs.
-  Сложно с linear типами на стеке.
-- **Linear types**: живут в coroutine stack. Move across yield —
-  работает естественно. Pin issue — value на стеке не должен
-  перемещаться (linear types есть указатели в Region slab — не
-  переезжают).
-
-**Языки**: Go, Lua coroutines, Ruby fibers, Elixir/Erlang processes.
-
-Размер работы в orto: scheduler ~500 строк C + stack switching
-~100 строк ASM + `spawn`/`await` language primitives ~150 строк
-compiler. Total ~750 строк.
-
-### Путь 3. Stackless coroutines / state machines (Rust-style)
-
-`async fn name(...) -> T` — компилятор раскрывает в struct + step
-function. `await` это suspension point — функция возвращает
-`Future` сейчас, продолжает позже.
-
-```orto
-async fn read_file(ring: Ring, path: Array[byte]) -> Array[byte] {
-    let fd = await uring_open(ring, path, ...);
-    let buf = array(...);
-    let n = await uring_read(ring, fd, buf, 0);
-    await uring_close(ring, fd);
-    slice(buf, 0, n)
-}
-```
-
-Compiler видит:
-1. Frame struct с локальными между await:
-   ```c
-   struct read_file_frame {
-       int state;
-       Ring ring;
-       Array_byte path;
-       int fd;
-       Array_byte buf;
-       int n;
-   };
-   ```
-2. `step` function — state machine, переключается по `state`.
-3. Each await — set state, submit io_uring, return frame to runtime.
-4. Runtime polls CQEs, resumes по completion.
-
-- **Pro**: zero-cost runtime — нет stacks per task. Frame size
-  known at compile time. Прямой mapping на io_uring SQE/CQE.
-- **Pro**: каждая Future — linear handle, single owner, drop = cancel.
-  Натуральный fit с нашими linear types.
-- **Con**: **function coloring**. `async fn` отличается от `fn`.
-  Non-async не могут await. Распространяется по call graph.
-- **Con**: compiler сложность — transformation в state machine
-  значительная. Tricky для линейных типов которые crossing await.
-- **Con**: nested awaits в loops — frame size может быть большим.
-
-**Языки**: Rust, JavaScript, C#, Python, Zig (был, removed in 0.11).
-
-Размер в orto: state machine transformation ~400 строк compiler +
-runtime scheduler ~300 строк C + Future type ~50 строк stdlib +
-extension к check для async tracking ~150 строк. Total ~900 строк.
-
-### Путь 4. Algebraic effects / continuations
-
-`perform Read(fd, buf)` — это effect. Handler ловит и resumes.
-
-```orto
-handle Read with (fd, buf) {
-    // ...submit to ring, wait, resume(result)...
-} in {
-    let n = perform Read(fd, buf);
-}
-```
-
-- **Pro**: ортогональнее всего. Эффекты композируются. Нет coloring.
-- **Pro**: один механизм для async, error handling, generators.
-- **Con**: **серьёзный** language feature. First-class continuations.
-  Нужны delimited control operators.
-- **Con**: runtime cost — каждый perform allocates frame для
-  resumption.
-- **Con**: пользователи менее знакомы — это OCaml 5, Koka, Effekt.
-
-**Языки**: OCaml 5, Koka, Effekt.
-
-Размер: огромный. ~2000+ строк compiler + runtime.
-
-### Путь 5. Hybrid — explicit Task without `async` syntax
-
-`linear struct Task[T]` — opaque coroutine handle. Spawned с
-function pointer + initial args. No state machine generation;
-runtime provides cooperative scheduling.
-
-```orto
-linear struct Task { handle: *byte }
-fn drop_Task(t: Task) -> int { ... }
-
-fn spawn(f: fn(Ring) -> Array[byte], ring: Ring) -> Task { ... }
-fn join(t: Task) -> Array[byte] { ... }
-
-let t1 = spawn(read_a, ring);
-let t2 = spawn(read_b, ring);
-let a = join(t1);
-let b = join(t2);
-```
-
-Под капотом — stackful coroutines, но без `await` syntax.
-Программист передаёт function pointer (для функций без closures).
-
-- **Pro**: меньше compiler change — нет state machine generation,
-  нет `async` keyword.
-- **Pro**: linear Task — handles natural fit.
-- **Con**: function pointers только — closure-less. Капчуринг state
-  через struct (программист пишет вручную).
-- **Con**: всё ещё нужен scheduler + stack switching.
-
-Размер: ~600 строк (без compiler transform).
+**Многоядерность** (v2): N экземпляров одного и того же диспетчера, по
+одному на ядро, модель **shared-nothing** (как воркеры nginx). У
+каждого своё кольцо, своя память, ничего не разделяется. Это просто
+параметр запуска. **Это единственная настоящая ручка** для пользователя.
 
 ---
 
-## Сравнение
+## 5. Память
 
-| Аспект | 1. Stdlib | 2. Stackful | 3. Stackless | 4. Effects | 5. Hybrid |
-|---|---|---|---|---|---|
-| Эргономика | Низкая | Высокая | Высокая | Очень высокая | Средняя |
-| Function coloring | Нет | Нет | **Да** | Нет | Частично |
-| Memory per task | 0 | 4-8 KB stack | Frame size | Frame per perform | 4-8 KB stack |
-| Linear через suspend | Ручной | Авто (stack) | Compiler сохраняет в frame | Через frame | Ручной |
-| Compiler сложность | 0 | ~150 строк | ~550 строк | ~1500+ строк | ~50 строк |
-| Runtime сложность | 0 | ~600 строк C | ~300 строк C | ~500 строк C | ~550 строк C |
-| Знакомость пользователю | Низкая | Высокая (Go) | Высокая (Rust/JS) | Низкая | Средняя |
-| Cancellation | Ручной | Через scheduler | Drop Future | Через handler | Ручной |
-| Тысячи tasks | Дёшево | Дорого (memory) | Дёшево | Зависит | Дорого |
+Кадры стейт-машин живут в **статическом пуле слотов** (идея из
+TigerBeetle). Пул — массив выделенный один раз при старте: N слотов,
+каждый размером с самый большой кадр обработчика. `user_data` = индекс
+слота. **Нет аллокатора в горячем I/O-пути** (реальный грех Rust —
+`Box` на каждый future).
 
----
-
-## Что меняется в orto при каждом
-
-### Linear types через suspend
-
-Самый тонкий момент. Линейный value на стеке между двух await — что
-с ним?
-
-- **Stackful**: live на coroutine stack. Pin natural если slab-based
-  resources (Region, Fd) — указатели не меняются.
-- **Stackless**: компилятор спиллит в Future frame. Linear move в
-  field, restore из field на resume. Compiler tracks ownership через
-  suspend points.
-- **Effects**: похоже на stackless — frame stores linear.
-
-В **stackless** случае compiler должен ввести правило: "linear value
-live across await — moves в frame, restoring on resume". Это
-расширение move analysis.
-
-### Function coloring (path 3)
-
-`fn` нельзя вызывать `async fn` потому что `async fn` не
-синхронный return. Это распространяется через call graph — любая
-функция использующая I/O становится async.
-
-Mitigation: автоматический lift. Если функция `f` вызывает только
-`fn`, она `fn`. Если хотя бы одна `async fn` — `f` становится `async fn`
-автоматически. Но это требует whole-program analysis или
-function-level inference (не локально).
-
-В Rust coloring явный и пользователь раздражается. В Zig был
-неявный, но потом удалили.
-
-### Region и await
-
-Region — slab handle. Может жить через suspend без issues
-(handle stable). Linear rule auto_drop в creator scope = creator
-scope продолжается after await. Семантически чисто.
-
-### Drop при await cancel
-
-Future cancelled до завершения — нужно drop'нуть все linear values
-в frame. Stackless подход: cancellation function знает frame layout,
-drops fields. Compiler genererates this.
+Это ложится на принятую модель памяти orto. Пул слотов — частный
+случай арены. Поколенческий индекс из «ячеек арены» прямо применим:
+`Task` ссылается на слот N поколения G; слот переиспользован →
+поколение инкрементится → устаревший `Task`-хэндл детектируется
+(use-after-free на хэндлах — невозможен).
 
 ---
 
-## Сравнение с известными системами
+## 6. Бэкенд и портируемость
 
-**Go**: stackful, scheduler в runtime. Каждая goroutine ≈ 4 KB. 10k
-goroutines = 40 MB. Pragmatic but memory-hungry.
+io_uring — основной, но не единственный мыслимый бэкенд. Модель
+называется **completion-based I/O**, а не «io_uring».
 
-**Rust + tokio**: stackless. `async fn` + Pin + lifetime gymnastics.
-Compose works perfectly. Coloring — известный pain point.
+- Windows IOCP — completion-модель (старше io_uring на ~20 лет).
+- macOS/BSD kqueue — readiness, оборачивается в completion-эмуляцию.
 
-**JavaScript + Node**: stackless single-threaded event loop. Простой.
-Function coloring явный.
+Парадокс: completion-модель портируется на Windows **лучше**, чем
+readiness, потому что у Windows никогда не было хорошего readiness-API.
 
-**C# / Python**: stackless. Похоже на JS.
-
-**Zig**: попробовал stackless, удалили в 0.11. Сейчас просто
-explicit `async`-libraries.
-
-**Lua coroutines / Ruby fibers**: stackful, легковесные. Но один-в-один
-с ОС-потоком (cooperative).
-
-**Erlang/BEAM**: stackful + own scheduler + immutable data + actor
-model. Очень специфичный — preempt safe потому что нет shared state.
+Решение: **не зашивать io_uring-специфику в семантику языка**.
+Абстракция бэкенда. В v1 — только io_uring; граница абстракции
+существует с самого начала (внутренний интерфейс backend в OCaml
+emit/runtime).
 
 ---
 
-## Моя рекомендация (НЕ окончательная, обсуждение)
+## 7. Линейные типы — взаимодействие
 
-**Путь 2 (Stackful) лучше всего матчится с философией orto:**
+Это было открытой дырой. Закрыто:
 
-1. **No function coloring** — это `catalog of rules`. Любая функция
-   I/O или CPU — одинаковые. Орт.
-2. **Linear types через stack** — натурально. Не требует compiler
-   spill into frame.
-3. **Эргономика** — sync-style writing, async behavior. Низкий barrier.
-4. **Compiler сложность мала** — `spawn`, `await`, `yield` это
-   stdlib primitives + минимальная language поддержка.
-5. **Известность Go-стиля** — пользователи понимают.
-
-Минусы:
-- Memory per task — но для типичных workloads (1000 in-flight ops
-  максимум) 4 KB * 1000 = 4 MB. Acceptable.
-- Stack switching — есть `ucontext_t` в glibc, можно использовать
-  для начала. Custom asm позже для perf.
-
-**Путь 3 (Stackless / state machines):**
-
-Лучшая perf и memory characteristics. Но **function coloring** —
-это catalog of rules. Любая функция должна быть помечена `async`
-если когда-либо вызывает I/O. Это distorts code organization
-вокруг I/O — что противоречит orto принципу "никаких ad-hoc
-distinctions".
-
-Также — compiler transformation в state machine значительно
-усложнит emit.
-
-**Путь 4 (Effects):**
-
-Орто-философски лучше всего. Но размер работы — нереалистичен сейчас.
-Потенциальная цель на 2-3 года когда базовый язык стабилен.
-
-**Путь 1 (только stdlib):**
-
-Уже есть. Не закрывает эргономику.
-
-**Путь 5 (Hybrid):**
-
-Компромисс stackful без `async`. OK как proof of concept но
-теряет эргономику линейного кода.
+- **Линейное значение, живое через `await`** — спиливается в кадр
+  стейт-машины. Кадр владеет им на время паузы. Особого случая нет.
+- **`spawn f(owned)`** — захват owned-линейного значения в spawn это
+  **move в кадр порождённой задачи**. Корректно.
+- **`Ref[T]` через границу `spawn`** — **запрещено**. Заимствованная
+  ссылка утёкшая в порождённую задачу несостоятельна: родительский
+  scope может закончиться раньше. Компилятор проверяет: `Ref` не
+  пересекает границу `spawn`; owned — может (move). ~30 LOC в чекере.
+- **`await all { ... }`** — каждая ветка независима; блок собирает N
+  owned-результатов. Линейная система уже запрещает делить и мутировать
+  одно линейное значение между ветками — этого достаточно.
+- **`Stream[T]`** — линейный, single-owner. Кто-то один владеет
+  (отмена/закрытие — его ответственность).
+- **`Array[Task]`** — нужен. В динамическом `await all` (spawn в цикле,
+  N задач) нужна коллекция `Task`. Сейчас `Task` линейный, `Array` нет,
+  линейное в data-position запрещено. Решение: **линейный параметр-тип
+  индуцирует линейность контейнера** — `Array[Task[T]]` автоматически
+  линеен. Это расширение типсистемы, но без него динамическая
+  конкурентность калечится. **Приоритет**, не «потом».
 
 ---
 
-## Open questions для тебя
+## 8. spawn и Task
 
-1. **Function coloring приемлемо?** Если да — Stackless рассматриваем.
-   Если нет — Stackful.
+`spawn f(...)` возвращает `Task[T]` (линейный хэндл).
 
-2. **Memory per task — критично?** Если 10k+ concurrent I/O ops
-   — stackful дорог. Если 100-1000 — пофиг.
+- `await task` — забирает результат, потребляет хэндл.
+- Drop `Task` (явный или scope-end) — **отмена** через
+  `IORING_OP_ASYNC_CANCEL`.
 
-3. **Cancellation через `drop(task)` или через explicit `cancel()`?**
-   Linear style → drop.
+### 8.1. Detached-задачи (закрытый вопрос)
 
-4. **Кто owns Region через task boundaries?** Spawn task с Region
-   borrow → parent owns. Spawn задача создает свой Region → task
-   owns, drops at completion. Обе варианты.
+В серверном цикле `for conn in ... { spawn handle_conn(...) }` хэндл
+не нужен — fire-and-forget.
 
-5. **Когда нужно?** Если Piano (твой проект) сейчас не требует —
-   можно отложить и продолжать сейчас другие фичи.
+**Правило** (зафиксировано):
 
-Скажи, обсудим конкретно. Не пишу код Stage 3 до решения по
-направлению.
+- `spawn f(...)` возвращает `Task[T]` как результат-выражение.
+- Если результат **не связан и не использован** — задача **detached**,
+  доживает до конца сама. Её кадр держится в пуле, пока обработчик не
+  вернётся.
+- Если результат связан (`let t = spawn ...;`) — `t` это обычный
+  линейный `Task[T]`: либо `await t` (получить результат), либо drop
+  (отмена).
+
+Технически это работает потому что в orto `spawn f(...)` как statement
+без `let`/использования это **выражение-результат отброшенный**, что
+для линейного типа норма-ошибка. **Исключение для `Task[T]`**: отброс
+эквивалентен «detach», не drop. ~10 LOC в чекере.
+
+Альтернатива: явный `detach(spawn f(...))` — отвергнут как лишний
+церемониал; шаблон `spawn x(...)` в for-цикле без bind — настолько
+частый, что требовать обёртки не стоит.
+
+---
+
+## 9. CPU и yield
+
+Длинный CPU-счёт между двумя `await` блокирует разгребание кольца —
+диспетчер не крутится пока выполняется кадр. Для серверов нормально
+(I/O перемежается). Для тяжёлого счёта:
+
+- **`yield`** — добровольная точка кооперации. Технически:
+  представляется в стейт-машине как обычное `await` на nop-SQE
+  (`IORING_OP_NOP`). Кадр уходит в пул, CQE на nop возвращает
+  немедленно, диспетчер успевает разгрести очередь и возобновить.
+  Стоит один заход в ядро (бесплатно для редких вызовов).
+- v2: офлоад на пул рабочих потоков для регулярного тяжёлого счёта.
+
+Спроектировано осознанно как явная точка выхода, не оставлено как баг.
+
+---
+
+## 10. Ошибки
+
+CQE несёт `res` — результат, может быть `-errno`. `await` поднимает
+это как штатный error-тип языка.
+
+**Шаблон**: `await op(...)` возвращает результат типа `Result[T]` (или
+эквивалент после введения Result в stdlib). Положительный `res` →
+`Ok(res)`. Отрицательный → `Err(-res)` как errno.
+
+**Для `await all`** в v1: если одна ветка упала — **не отменять**
+остальные автоматически (проще). Дождаться все, вернуть по-веточный
+результат. Решение об отмене сиблингов — на программисте. Авто-отмена
+сиблингов — возможная фича v2.
+
+---
+
+## 11. Что явно НЕ делаем
+
+- Пайпы `|>` как async-конструкция — нет.
+- Раскраска функций, `async`-префикс — нет.
+- `Future` / `Pin` / `poll` наружу — нет.
+- Сменный рантайм — нет.
+- Work-stealing планировщик — нет; вместо него shared-nothing по ядрам.
+- Стекфул-корутины, стеки 2–8 KB на задачу — нет, всё стеклесс.
+- Вытеснение (preemption) — нет, кооперативно.
+- Каналы с `select` — отложить (libmill потратил ~1500 LOC только на
+  это); в v1 — прямой `await`.
+- Растущие стеки — неприменимо (стеклесс).
+
+---
+
+## 12. Сводка ключевых слов и типов
+
+**Ключевые слова**: `await`, `all` (только после `await`), `spawn`,
+`yield`, `for ... in ...` (уже есть, расширяется на `Stream[T]`).
+
+**Типы**: `Ring`, `Fd` (уже есть в sys.orto), `Task[T]`, `Stream[T]`.
+
+**Чего нет**: `async`, `Future`, `Pin`, `Poll`, `|>` для async-целей.
+
+---
+
+## 13. Фазы реализации
+
+Ориентировочный объём — ~400–450 LOC суммарно: ~200 OCaml компилятор +
+~150 C рантайм + ~100 stdlib orto.
+
+### Фаза 1 — синтаксис (parser + AST)
+
+**Цель**: лексер и парсер принимают `await`, `await all`, `spawn`,
+`yield`. AST содержит новые узлы. Семантика — заглушка (`check.ml`
+бросает «not yet implemented» если встречает их).
+
+**Цена**: ~80 LOC (token + ast + parser). Не задевает emit/check
+функционально.
+
+Это первая итерация, оставляет компилятор в рабочем состоянии (все 17+
+старых тестов идут).
+
+### Фаза 2 — типизация без трансформации
+
+`Task[T]` и `Stream[T]` как линейные параметрические типы. Проверки:
+- `Ref` не пересекает `spawn`.
+- `await` снимает один уровень и возвращает `Result`-подобное (см. §10).
+- `await all { ... }` — кортеж из веток.
+- `await all coll` — массив, требует `Array[Task[T]]`.
+- Detached spawn — отброс `Task` разрешён.
+
+**Цена**: ~100 LOC в check + ~30 LOC в lib для `Task`/`Stream`.
+
+### Фаза 3 — индуцированная линейность контейнеров
+
+`Array[T]` где `T` линейный → весь `Array` линейный. Эмит drop-функции
+рекурсивно проходящей элементы. Без этого `Array[Task]` невозможен,
+динамический `await all` калечится.
+
+**Цена**: ~80 LOC.
+
+### Фаза 4 — стейт-машина и кадры
+
+Трансформация функций содержащих `await` в стейт-машину. Генерация
+структур-кадров. Анализ live-через-`await` (какие переменные надо
+спиливать).
+
+**Цена**: ~150 LOC в emit + новый pass в check.
+
+### Фаза 5 — рантайм-диспетчер и пул слотов
+
+C-рантайм: пул, цикл диспетчера, интеграция с io_uring. `main` обёртка
+если в графе есть `await`.
+
+**Цена**: ~150 LOC C + ~50 LOC OCaml интеграции.
+
+### Фаза 6 — `Stream` и multishot
+
+`for x in stream { ... }` через multishot SQE (RECV/ACCEPT MULTISHOT).
+
+**Цена**: ~80 LOC.
+
+### Фаза 7 — yield, отмена через drop
+
+`yield` как nop-SQE. Drop `Task` → ASYNC_CANCEL SQE.
+
+**Цена**: ~50 LOC.
+
+### v2 (после v1)
+
+- Многоядерность: N диспетчеров shared-nothing.
+- Offload CPU на пул потоков.
+- Linked-SQE оптимизация (компилятор детектит цепочки зависимых
+  ring-ops, генерит `IOSQE_IO_LINK`).
+- Полировка отмены, авто-отмена в `await all`.
+- IOCP-бэкенд (Windows).
+
+---
+
+## 14. Принципы которым следуем
+
+- **Зашитая модель, не выбор**. Один диспетчер, один рантайм, один
+  способ ждать.
+- **Невидимая трансформация — только если выводима**. State machine
+  генерится если функция содержит `await` — это локально видно. Никакой
+  «магии вдалеке».
+- **N+M, не N²**. Каждая фаза добавляет ~50–150 LOC и не разрушает
+  предыдущие тесты.
+- **Линейные типы — закон, не каталог**. Правило `Ref не пересекает
+  spawn` — следствие общего «Ref не может пережить scope владельца», не
+  специальное правило.
+
+---
+
+## 15. Открытые вопросы (не блокирующие v1)
+
+- **Имя `await all`** — рабочее. Если придёт лучшее (например `gather
+  { }`, `parallel { }`) — единственное место где можно безболезненно
+  поменять.
+- **Где именно живёт `Ring`** — в `main` создаётся, передаётся явно?
+  Или per-thread implicit (TLS)? Текущая позиция — явно, как сейчас.
+  Implicit Ring может стать v2-сахаром.
+- **Pin для self-referential кадров** — orto линейные типы и регионы
+  держат указатели стабильными (slab не реаллоцирует), кадры в пуле
+  тоже не двигаются. Pin как концепция не нужен наружу. Внутри пула
+  слотов — слот N стабилен пока поколение не сменилось.

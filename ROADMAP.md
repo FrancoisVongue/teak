@@ -71,8 +71,10 @@
 - Все file/socket/timer/pipe I/O идут через `iouring.orto` ring API.
 - Direct syscalls (`sys.orto`) остаются только для setup и того что в io_uring нет (process control, signals).
 - Stage 1 (есть): synchronous façade — один SQE submit + один CQE wait per call. `examples/file_io_uring.orto` показывает.
-- Stage 2 (план): batched submit + multiple in-flight ops.
-- Stage 3 (большая работа): `async fn`/`await` с corutines. См. `IO_URING.md`.
+- Stage 2 (есть): batched submit + multiple in-flight ops. `examples/iouring_batch.orto`.
+- Stage 3 (в работе): ring-native completion-based concurrency. `await`, `await all { }`, `spawn`, `yield`, `Stream[T]`. Без `async`-раскраски, без `Future`/`Pin`. См. `STAGE3_ASYNC.md`.
+  - Фаза 1 (есть): синтаксис — лексер/парсер/AST принимают `await`/`await all`/`spawn`/`yield`. Чекер бросает «not yet implemented».
+  - Фазы 2–7: типизация, индуцированная линейность контейнеров (`Array[Task]`), стейт-машина, рантайм-диспетчер, multishot streams, yield/cancel.
 
 **Управление:**
 - Всё — выражения. `if`/`match`/`let` возвращают значения.

@@ -222,7 +222,52 @@ and parse_unary st =
       advance st;
       let inner = parse_unary st in
       EDeref inner
+  | TAwait ->
+      advance st;
+      parse_await_tail st
+  | TSpawn ->
+      advance st;
+      let inner = parse_unary st in
+      ESpawn inner
+  | TYield ->
+      advance st;
+      EYield
   | _ -> parse_postfix st
+
+(* After consuming `await`, decide between:
+     await all { e1, e2, ... }   → EAwaitAll
+     await all <expr>            → EAwaitAllDyn
+     await <expr>                → EAwait
+
+   `all` is a context-sensitive keyword — recognised only here, so
+   programs can still use `all` as an ordinary identifier elsewhere. *)
+and parse_await_tail st =
+  match peek st with
+  | TIdent "all" ->
+      advance st;
+      (match peek st with
+       | TLBrace ->
+           advance st;
+           let branches =
+             if peek st = TRBrace then []
+             else
+               let rec collect () =
+                 let e = parse_expr st in
+                 if peek st = TComma then begin
+                   advance st;
+                   if peek st = TRBrace then [e] else e :: collect ()
+                 end else [e]
+               in
+               collect ()
+           in
+           expect st TRBrace;
+           EAwaitAll branches
+       | _ ->
+           let coll = parse_unary st in
+           EAwaitAllDyn coll)
+  | _ ->
+      let inner = parse_unary st in
+      EAwait inner
 
 and parse_postfix st =
   let head = parse_atom st in
