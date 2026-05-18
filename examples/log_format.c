@@ -18,8 +18,21 @@ struct Region_slot {
     int next_free;   /* -1 if in use, else next free slot id */
     int is_stack;    /* 1 if buffer is stack memory (do not free) */
 };
+typedef struct { int slot; int expected_gen; } Region;
 static struct Region_slot ORTO_REGIONS[ORTO_REGION_SLOTS];
 static int ORTO_REGION_FREE_HEAD = -1;
+
+static void drop_Region(Region r) {
+    if (ORTO_REGIONS[r.slot].gen != r.expected_gen) return;
+    if (!ORTO_REGIONS[r.slot].is_stack)
+        free(ORTO_REGIONS[r.slot].buffer);
+    ORTO_REGIONS[r.slot].buffer = NULL;
+    ORTO_REGIONS[r.slot].buffer_size = 0;
+    ORTO_REGIONS[r.slot].used = 0;
+    ORTO_REGIONS[r.slot].gen++;
+    ORTO_REGIONS[r.slot].next_free = ORTO_REGION_FREE_HEAD;
+    ORTO_REGION_FREE_HEAD = r.slot;
+}
 
 static const uint8_t ORTO_STATIC_BYTES[56] = { 0x75, 0x73, 0x65, 0x72, 0x61, 0x67, 0x65, 0x63, 0x69, 0x74, 0x79, 0x3e, 0x3e, 0x20, 0x20, 0x28, 0x29, 0x20, 0x6c, 0x69, 0x76, 0x65, 0x73, 0x20, 0x69, 0x6e, 0x20, 0x20, 0x3c, 0x3c, 0x75, 0x73, 0x65, 0x72, 0x3d, 0x61, 0x6c, 0x69, 0x63, 0x65, 0x2c, 0x61, 0x67, 0x65, 0x3d, 0x33, 0x30, 0x2c, 0x63, 0x69, 0x74, 0x79, 0x3d, 0x4e, 0x59, 0x43 };
 #define ORTO_STATIC_BYTES_LEN 56
@@ -39,7 +52,6 @@ static void orto_init_regions(void) {
     ORTO_REGIONS[0].next_free = -1;
     ORTO_REGION_FREE_HEAD = 1;
 }
-typedef struct { int slot; int expected_gen; } Region;
 
 typedef struct { int slot; int offset; int len; int expected_gen; } Array_byte;
 
@@ -494,7 +506,7 @@ int main(void) {
     Array_byte line_2 = log_format__format_log(r_1, ((Array_byte){ .slot = 0, .offset = 30, .len = 26, .expected_gen = 1 }));
     (void)(io__println(line_2));
     int _let_result_4 = line_2.len;
-    if (ORTO_REGIONS[r_1.slot].gen == r_1.expected_gen) { if (!ORTO_REGIONS[r_1.slot].is_stack) free(ORTO_REGIONS[r_1.slot].buffer); ORTO_REGIONS[r_1.slot].buffer = NULL; ORTO_REGIONS[r_1.slot].buffer_size = 0; ORTO_REGIONS[r_1.slot].used = 0; ORTO_REGIONS[r_1.slot].gen++; ORTO_REGIONS[r_1.slot].next_free = ORTO_REGION_FREE_HEAD; ORTO_REGION_FREE_HEAD = r_1.slot; }
+    drop_Region(r_1);
     return _let_result_4;
 }
 

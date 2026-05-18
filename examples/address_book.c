@@ -18,10 +18,23 @@ struct Region_slot {
     int next_free;   /* -1 if in use, else next free slot id */
     int is_stack;    /* 1 if buffer is stack memory (do not free) */
 };
+typedef struct { int slot; int expected_gen; } Region;
 static struct Region_slot ORTO_REGIONS[ORTO_REGION_SLOTS];
 static int ORTO_REGION_FREE_HEAD = -1;
 
-static const uint8_t ORTO_STATIC_BYTES[428] = { 0x63, 0x6d, 0x64, 0x63, 0x6f, 0x75, 0x6e, 0x74, 0x66, 0x69, 0x6e, 0x64, 0x73, 0x65, 0x61, 0x72, 0x63, 0x68, 0x6c, 0x69, 0x73, 0x74, 0x53, 0x45, 0x4c, 0x45, 0x43, 0x54, 0x20, 0x69, 0x64, 0x2c, 0x20, 0x6e, 0x61, 0x6d, 0x65, 0x2c, 0x20, 0x65, 0x6d, 0x61, 0x69, 0x6c, 0x2c, 0x20, 0x61, 0x67, 0x65, 0x20, 0x46, 0x52, 0x4f, 0x4d, 0x20, 0x75, 0x73, 0x65, 0x72, 0x73, 0x0a, 0x20, 0x20, 0x23, 0x3a, 0x20, 0x20, 0x3c, 0x3e, 0x20, 0x61, 0x67, 0x65, 0x3d, 0x71, 0x53, 0x45, 0x41, 0x52, 0x43, 0x48, 0x20, 0x22, 0x22, 0x20, 0xe2, 0x80, 0x94, 0x20, 0x20, 0x6d, 0x61, 0x74, 0x63, 0x68, 0x28, 0x65, 0x73, 0x29, 0x3a, 0x4c, 0x49, 0x53, 0x54, 0x3a, 0x20, 0x20, 0x75, 0x73, 0x65, 0x72, 0x28, 0x73, 0x29, 0x3a, 0x69, 0x64, 0x46, 0x4f, 0x55, 0x4e, 0x44, 0x3a, 0x0a, 0x4e, 0x4f, 0x54, 0x20, 0x46, 0x4f, 0x55, 0x4e, 0x44, 0x3a, 0x20, 0x69, 0x64, 0x3d, 0x43, 0x4f, 0x55, 0x4e, 0x54, 0x3a, 0x20, 0x20, 0x75, 0x73, 0x65, 0x72, 0x28, 0x73, 0x29, 0x0a, 0x61, 0x6c, 0x69, 0x63, 0x65, 0x61, 0x6c, 0x69, 0x63, 0x65, 0x40, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x63, 0x6f, 0x6d, 0x62, 0x6f, 0x62, 0x62, 0x6f, 0x62, 0x40, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x63, 0x6f, 0x6d, 0x63, 0x61, 0x72, 0x6f, 0x6c, 0x63, 0x61, 0x72, 0x6f, 0x6c, 0x40, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x63, 0x6f, 0x6d, 0x64, 0x61, 0x76, 0x65, 0x64, 0x61, 0x76, 0x65, 0x40, 0x65, 0x6c, 0x73, 0x65, 0x77, 0x68, 0x65, 0x72, 0x65, 0x2e, 0x6f, 0x72, 0x67, 0x65, 0x76, 0x65, 0x65, 0x76, 0x65, 0x40, 0x65, 0x6c, 0x73, 0x65, 0x77, 0x68, 0x65, 0x72, 0x65, 0x2e, 0x6f, 0x72, 0x67, 0x66, 0x72, 0x61, 0x6e, 0x6b, 0x66, 0x72, 0x61, 0x6e, 0x6b, 0x40, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x63, 0x6f, 0x6d, 0x67, 0x72, 0x61, 0x63, 0x65, 0x67, 0x72, 0x61, 0x63, 0x65, 0x40, 0x65, 0x6c, 0x73, 0x65, 0x77, 0x68, 0x65, 0x72, 0x65, 0x2e, 0x6f, 0x72, 0x67, 0x63, 0x6d, 0x64, 0x3d, 0x63, 0x6f, 0x75, 0x6e, 0x74, 0x63, 0x6d, 0x64, 0x3d, 0x66, 0x69, 0x6e, 0x64, 0x2c, 0x69, 0x64, 0x3d, 0x32, 0x63, 0x6d, 0x64, 0x3d, 0x66, 0x69, 0x6e, 0x64, 0x2c, 0x69, 0x64, 0x3d, 0x39, 0x39, 0x63, 0x6d, 0x64, 0x3d, 0x73, 0x65, 0x61, 0x72, 0x63, 0x68, 0x2c, 0x71, 0x3d, 0x61, 0x6c, 0x63, 0x6d, 0x64, 0x3d, 0x73, 0x65, 0x61, 0x72, 0x63, 0x68, 0x2c, 0x71, 0x3d, 0x76, 0x65, 0x63, 0x6d, 0x64, 0x3d, 0x6c, 0x69, 0x73, 0x74, 0x63, 0x6d, 0x64, 0x3d, 0x67, 0x72, 0x65, 0x65, 0x74, 0x2c, 0x6e, 0x61, 0x6d, 0x65, 0x3d, 0x61, 0x6e, 0x6f, 0x6e, 0x2d, 0x2d, 0x2d, 0x2d, 0x0a, 0x45, 0x52, 0x52, 0x4f, 0x52, 0x3a, 0x20, 0x75, 0x6e, 0x6b, 0x6e, 0x6f, 0x77, 0x6e, 0x20, 0x63, 0x6f, 0x6d, 0x6d, 0x61, 0x6e, 0x64, 0x20, 0x22, 0x22, 0x0a };
+static void drop_Region(Region r) {
+    if (ORTO_REGIONS[r.slot].gen != r.expected_gen) return;
+    if (!ORTO_REGIONS[r.slot].is_stack)
+        free(ORTO_REGIONS[r.slot].buffer);
+    ORTO_REGIONS[r.slot].buffer = NULL;
+    ORTO_REGIONS[r.slot].buffer_size = 0;
+    ORTO_REGIONS[r.slot].used = 0;
+    ORTO_REGIONS[r.slot].gen++;
+    ORTO_REGIONS[r.slot].next_free = ORTO_REGION_FREE_HEAD;
+    ORTO_REGION_FREE_HEAD = r.slot;
+}
+
+static const uint8_t ORTO_STATIC_BYTES[428] = { 0x63, 0x6d, 0x64, 0x53, 0x45, 0x4c, 0x45, 0x43, 0x54, 0x20, 0x69, 0x64, 0x2c, 0x20, 0x6e, 0x61, 0x6d, 0x65, 0x2c, 0x20, 0x65, 0x6d, 0x61, 0x69, 0x6c, 0x2c, 0x20, 0x61, 0x67, 0x65, 0x20, 0x46, 0x52, 0x4f, 0x4d, 0x20, 0x75, 0x73, 0x65, 0x72, 0x73, 0x20, 0x20, 0x23, 0x3a, 0x20, 0x20, 0x3c, 0x3e, 0x20, 0x61, 0x67, 0x65, 0x3d, 0x0a, 0x71, 0x53, 0x45, 0x41, 0x52, 0x43, 0x48, 0x20, 0x22, 0x22, 0x20, 0xe2, 0x80, 0x94, 0x20, 0x20, 0x6d, 0x61, 0x74, 0x63, 0x68, 0x28, 0x65, 0x73, 0x29, 0x3a, 0x69, 0x64, 0x46, 0x4f, 0x55, 0x4e, 0x44, 0x3a, 0x0a, 0x4e, 0x4f, 0x54, 0x20, 0x46, 0x4f, 0x55, 0x4e, 0x44, 0x3a, 0x20, 0x69, 0x64, 0x3d, 0x4c, 0x49, 0x53, 0x54, 0x3a, 0x20, 0x20, 0x75, 0x73, 0x65, 0x72, 0x28, 0x73, 0x29, 0x3a, 0x43, 0x4f, 0x55, 0x4e, 0x54, 0x3a, 0x20, 0x20, 0x75, 0x73, 0x65, 0x72, 0x28, 0x73, 0x29, 0x0a, 0x61, 0x6c, 0x69, 0x63, 0x65, 0x61, 0x6c, 0x69, 0x63, 0x65, 0x40, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x63, 0x6f, 0x6d, 0x62, 0x6f, 0x62, 0x62, 0x6f, 0x62, 0x40, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x63, 0x6f, 0x6d, 0x63, 0x61, 0x72, 0x6f, 0x6c, 0x63, 0x61, 0x72, 0x6f, 0x6c, 0x40, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x63, 0x6f, 0x6d, 0x64, 0x61, 0x76, 0x65, 0x64, 0x61, 0x76, 0x65, 0x40, 0x65, 0x6c, 0x73, 0x65, 0x77, 0x68, 0x65, 0x72, 0x65, 0x2e, 0x6f, 0x72, 0x67, 0x65, 0x76, 0x65, 0x65, 0x76, 0x65, 0x40, 0x65, 0x6c, 0x73, 0x65, 0x77, 0x68, 0x65, 0x72, 0x65, 0x2e, 0x6f, 0x72, 0x67, 0x66, 0x72, 0x61, 0x6e, 0x6b, 0x66, 0x72, 0x61, 0x6e, 0x6b, 0x40, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x63, 0x6f, 0x6d, 0x67, 0x72, 0x61, 0x63, 0x65, 0x67, 0x72, 0x61, 0x63, 0x65, 0x40, 0x65, 0x6c, 0x73, 0x65, 0x77, 0x68, 0x65, 0x72, 0x65, 0x2e, 0x6f, 0x72, 0x67, 0x63, 0x6d, 0x64, 0x3d, 0x63, 0x6f, 0x75, 0x6e, 0x74, 0x63, 0x6d, 0x64, 0x3d, 0x66, 0x69, 0x6e, 0x64, 0x2c, 0x69, 0x64, 0x3d, 0x32, 0x63, 0x6d, 0x64, 0x3d, 0x66, 0x69, 0x6e, 0x64, 0x2c, 0x69, 0x64, 0x3d, 0x39, 0x39, 0x63, 0x6d, 0x64, 0x3d, 0x73, 0x65, 0x61, 0x72, 0x63, 0x68, 0x2c, 0x71, 0x3d, 0x61, 0x6c, 0x63, 0x6d, 0x64, 0x3d, 0x73, 0x65, 0x61, 0x72, 0x63, 0x68, 0x2c, 0x71, 0x3d, 0x76, 0x65, 0x63, 0x6d, 0x64, 0x3d, 0x6c, 0x69, 0x73, 0x74, 0x63, 0x6d, 0x64, 0x3d, 0x67, 0x72, 0x65, 0x65, 0x74, 0x2c, 0x6e, 0x61, 0x6d, 0x65, 0x3d, 0x61, 0x6e, 0x6f, 0x6e, 0x2d, 0x2d, 0x2d, 0x2d, 0x0a, 0x45, 0x52, 0x52, 0x4f, 0x52, 0x3a, 0x20, 0x75, 0x6e, 0x6b, 0x6e, 0x6f, 0x77, 0x6e, 0x20, 0x63, 0x6f, 0x6d, 0x6d, 0x61, 0x6e, 0x64, 0x20, 0x22, 0x22, 0x0a, 0x63, 0x6f, 0x75, 0x6e, 0x74, 0x66, 0x69, 0x6e, 0x64, 0x73, 0x65, 0x61, 0x72, 0x63, 0x68, 0x6c, 0x69, 0x73, 0x74 };
 #define ORTO_STATIC_BYTES_LEN 428
 
 static void orto_init_regions(void) __attribute__((constructor));
@@ -39,7 +52,6 @@ static void orto_init_regions(void) {
     ORTO_REGIONS[0].next_free = -1;
     ORTO_REGION_FREE_HEAD = 1;
 }
-typedef struct { int slot; int expected_gen; } Region;
 
 typedef struct Option_db__Person Option_db__Person;
 
@@ -57,8 +69,6 @@ typedef struct { int slot; int offset; int len; int expected_gen; } Array_db_dri
 
 typedef Array_byte (*fn_Array_byte_Array_byte_to_Array_byte)(Array_byte, Array_byte);
 
-typedef int (*fn_Array_byte_Array_byte_to_bool)(Array_byte, Array_byte);
-
 typedef Array_byte (*fn_Region_Array_db__Person_to_Array_byte)(Region, Array_db__Person);
 
 typedef Array_byte (*fn_Region_Array_db__Person_Array_byte_to_Array_byte)(Region, Array_db__Person, Array_byte);
@@ -68,6 +78,8 @@ typedef Array_byte (*fn_Region_Array_byte_to_Array_byte)(Region, Array_byte);
 typedef int (*fn_int_to_int)(int);
 
 typedef int (*fn_Array_byte_int_to_int)(Array_byte, int);
+
+typedef int (*fn_Array_byte_Array_byte_to_bool)(Array_byte, Array_byte);
 
 typedef int (*fn_Array_byte_byte_to_int)(Array_byte, uint8_t);
 
@@ -79,11 +91,11 @@ typedef Array_db_driver__Row (*fn_Region_Array_byte_to_Array_db_driver__Row)(Reg
 
 typedef db__Person (*fn_db_driver__Row_to_db__Person)(db_driver__Row);
 
-typedef Array_byte (*fn_Region_db__Person_to_Array_byte)(Region, db__Person);
-
 typedef Array_byte (*fn_Region_Array_Array_byte_to_Array_byte)(Region, Array_Array_byte);
 
 typedef Array_byte (*fn_Region_int_to_Array_byte)(Region, int);
+
+typedef Array_byte (*fn_Region_db__Person_to_Array_byte)(Region, db__Person);
 
 typedef Array_db__Person (*fn_Region_Array_db__Person_Array_byte_to_Array_db__Person)(Region, Array_db__Person, Array_byte);
 
@@ -127,9 +139,9 @@ Array_db__Person db__search_by_name(Region r, Array_db__Person users, Array_byte
 
 int io__print(Array_byte s);
 
-int str__bytes_eq(Array_byte a, Array_byte b);
-
 Array_byte str__lookup(Array_byte s, Array_byte key);
+
+int str__bytes_eq(Array_byte a, Array_byte b);
 
 Array_byte str__concat_all(Region r, Array_Array_byte parts);
 
@@ -137,9 +149,9 @@ int str__index_of(Array_byte s, uint8_t c);
 
 Array_db__Person db__all_users(Region r);
 
-Array_byte address_book__format_person_list(Region r, Array_byte header, Array_db__Person people);
-
 Array_byte address_book__format_person(Region r, db__Person p);
+
+Array_byte address_book__format_person_list(Region r, Array_byte header, Array_db__Person people);
 
 int str__contains_substr(Array_byte hay, Array_byte needle);
 
@@ -151,9 +163,9 @@ Array_byte address_book__handle_search(Region req_r, Array_db__Person users, Arr
 
 db__Person db__row_to_person(db_driver__Row row);
 
-Array_byte address_book__handle_list(Region req_r, Array_db__Person users);
-
 Array_byte address_book__handle_find(Region req_r, Array_db__Person users, Array_byte req);
+
+Array_byte address_book__handle_list(Region req_r, Array_db__Person users);
 
 int str__copy_into(Array_byte dst, Array_byte src, int at);
 
@@ -173,31 +185,24 @@ Array_byte address_book__handle_unknown(Region req_r, Array_byte cmd);
 
 Array_byte address_book__handle_request(Region req_r, Array_db__Person users, Array_byte req) {
     Array_byte cmd_1 = str__lookup(req, ((Array_byte){ .slot = 0, .offset = 0, .len = 3, .expected_gen = 1 }));
-    Array_byte tmp_4;
-    if (str__bytes_eq(cmd_1, ((Array_byte){ .slot = 0, .offset = 3, .len = 5, .expected_gen = 1 }))) {
-        tmp_4 = address_book__handle_count(req_r, users);
-    } else {
-        Array_byte tmp_3;
-        if (str__bytes_eq(cmd_1, ((Array_byte){ .slot = 0, .offset = 8, .len = 4, .expected_gen = 1 }))) {
-            tmp_3 = address_book__handle_find(req_r, users, req);
-        } else {
-            Array_byte tmp_2;
-            if (str__bytes_eq(cmd_1, ((Array_byte){ .slot = 0, .offset = 12, .len = 6, .expected_gen = 1 }))) {
-                tmp_2 = address_book__handle_search(req_r, users, req);
-            } else {
-                Array_byte tmp_1;
-                if (str__bytes_eq(cmd_1, ((Array_byte){ .slot = 0, .offset = 18, .len = 4, .expected_gen = 1 }))) {
-                    tmp_1 = address_book__handle_list(req_r, users);
-                } else {
-                    tmp_1 = address_book__handle_unknown(req_r, cmd_1);
-                }
-                tmp_2 = tmp_1;
-            }
-            tmp_3 = tmp_2;
-        }
-        tmp_4 = tmp_3;
+    Array_byte scrut_1 = cmd_1;
+    Array_byte match_result_2;
+    if ((scrut_1).len == 5 && memcmp(ORTO_REGIONS[(scrut_1).slot].buffer + (scrut_1).offset, ORTO_STATIC_BYTES + 409, 5) == 0) {
+        match_result_2 = address_book__handle_count(req_r, users);
     }
-    return tmp_4;
+    else if ((scrut_1).len == 4 && memcmp(ORTO_REGIONS[(scrut_1).slot].buffer + (scrut_1).offset, ORTO_STATIC_BYTES + 414, 4) == 0) {
+        match_result_2 = address_book__handle_find(req_r, users, req);
+    }
+    else if ((scrut_1).len == 6 && memcmp(ORTO_REGIONS[(scrut_1).slot].buffer + (scrut_1).offset, ORTO_STATIC_BYTES + 418, 6) == 0) {
+        match_result_2 = address_book__handle_search(req_r, users, req);
+    }
+    else if ((scrut_1).len == 4 && memcmp(ORTO_REGIONS[(scrut_1).slot].buffer + (scrut_1).offset, ORTO_STATIC_BYTES + 424, 4) == 0) {
+        match_result_2 = address_book__handle_list(req_r, users);
+    }
+    else {
+        match_result_2 = address_book__handle_unknown(req_r, cmd_1);
+    }
+    return match_result_2;
 }
 
 int io__print_loop(Array_byte s, int i) {
@@ -280,7 +285,7 @@ Array_db__Person db__search_by_name(Region r, Array_db__Person users, Array_byte
     int _off_7 = (int)ORTO_REGIONS[_r_5.slot].used;
     ORTO_REGIONS[_r_5.slot].used += (size_t)_n_6 * sizeof(db__Person);
     db__Person* _slots_8 = (db__Person*)(ORTO_REGIONS[_r_5.slot].buffer + _off_7);
-    for (int _i_9 = 0; _i_9 < _n_6; _i_9++) _slots_8[_i_9] = ((db__Person){ .id = 0, .name = ((Array_byte){ .slot = 0, .offset = 22, .len = 0, .expected_gen = 1 }), .email = ((Array_byte){ .slot = 0, .offset = 22, .len = 0, .expected_gen = 1 }), .age = 0 });
+    for (int _i_9 = 0; _i_9 < _n_6; _i_9++) _slots_8[_i_9] = ((db__Person){ .id = 0, .name = ((Array_byte){ .slot = 0, .offset = 3, .len = 0, .expected_gen = 1 }), .email = ((Array_byte){ .slot = 0, .offset = 3, .len = 0, .expected_gen = 1 }), .age = 0 });
     Array_db__Person _arr_10 = ((Array_db__Person){ .slot = _r_5.slot, .offset = _off_7, .len = _n_6, .expected_gen = _r_5.expected_gen });
     Array_db__Person result_4 = _arr_10;
     int k_5 = 0;
@@ -322,41 +327,6 @@ Array_db__Person db__search_by_name(Region r, Array_db__Person users, Array_byte
 
 int io__print(Array_byte s) {
     return io__print_loop(s, 0);
-}
-
-int str__bytes_eq(Array_byte a, Array_byte b) {
-    int tmp_8;
-    if ((a.len != b.len)) {
-        tmp_8 = 0;
-    } else {
-        int i_1 = 0;
-        while ((i_1 < a.len)) {
-            Array_byte _a_1 = a;
-            int _i_2 = i_1;
-            if (ORTO_REGIONS[_a_1.slot].gen != _a_1.expected_gen) abort();
-            if (_i_2 < 0 || _i_2 >= _a_1.len) abort();
-            uint8_t _idx_3 = ((uint8_t*)(ORTO_REGIONS[_a_1.slot].buffer + _a_1.offset))[_i_2];
-            Array_byte _a_4 = b;
-            int _i_5 = i_1;
-            if (ORTO_REGIONS[_a_4.slot].gen != _a_4.expected_gen) abort();
-            if (_i_5 < 0 || _i_5 >= _a_4.len) abort();
-            uint8_t _idx_6 = ((uint8_t*)(ORTO_REGIONS[_a_4.slot].buffer + _a_4.offset))[_i_5];
-            int tmp_7;
-            if ((_idx_3 != _idx_6)) {
-                break;
-                tmp_7 = 0;
-            } else {
-                tmp_7 = 0;
-            }
-            (void)(tmp_7);
-            i_1 = (i_1 + 1);
-            (void)(0);
-            (void)(0);
-        }
-        (void)(0);
-        tmp_8 = (i_1 == a.len);
-    }
-    return tmp_8;
 }
 
 Array_byte str__lookup(Array_byte s, Array_byte key) {
@@ -438,6 +408,41 @@ Array_byte str__lookup(Array_byte s, Array_byte key) {
     return _sl_30;
 }
 
+int str__bytes_eq(Array_byte a, Array_byte b) {
+    int tmp_8;
+    if ((a.len != b.len)) {
+        tmp_8 = 0;
+    } else {
+        int i_1 = 0;
+        while ((i_1 < a.len)) {
+            Array_byte _a_1 = a;
+            int _i_2 = i_1;
+            if (ORTO_REGIONS[_a_1.slot].gen != _a_1.expected_gen) abort();
+            if (_i_2 < 0 || _i_2 >= _a_1.len) abort();
+            uint8_t _idx_3 = ((uint8_t*)(ORTO_REGIONS[_a_1.slot].buffer + _a_1.offset))[_i_2];
+            Array_byte _a_4 = b;
+            int _i_5 = i_1;
+            if (ORTO_REGIONS[_a_4.slot].gen != _a_4.expected_gen) abort();
+            if (_i_5 < 0 || _i_5 >= _a_4.len) abort();
+            uint8_t _idx_6 = ((uint8_t*)(ORTO_REGIONS[_a_4.slot].buffer + _a_4.offset))[_i_5];
+            int tmp_7;
+            if ((_idx_3 != _idx_6)) {
+                break;
+                tmp_7 = 0;
+            } else {
+                tmp_7 = 0;
+            }
+            (void)(tmp_7);
+            i_1 = (i_1 + 1);
+            (void)(0);
+            (void)(0);
+        }
+        (void)(0);
+        tmp_8 = (i_1 == a.len);
+    }
+    return tmp_8;
+}
+
 Array_byte str__concat_all(Region r, Array_Array_byte parts) {
     Region _r_1 = r;
     if (ORTO_REGIONS[_r_1.slot].gen != _r_1.expected_gen) abort();
@@ -505,7 +510,7 @@ int str__index_of(Array_byte s, uint8_t c) {
 }
 
 Array_db__Person db__all_users(Region r) {
-    Array_db_driver__Row rows_1 = db_driver__run_query(r, ((Array_byte){ .slot = 0, .offset = 22, .len = 38, .expected_gen = 1 }));
+    Array_db_driver__Row rows_1 = db_driver__run_query(r, ((Array_byte){ .slot = 0, .offset = 3, .len = 38, .expected_gen = 1 }));
     Region _r_1 = r;
     if (ORTO_REGIONS[_r_1.slot].gen != _r_1.expected_gen) abort();
     int _n_2 = rows_1.len;
@@ -514,7 +519,7 @@ Array_db__Person db__all_users(Region r) {
     int _off_3 = (int)ORTO_REGIONS[_r_1.slot].used;
     ORTO_REGIONS[_r_1.slot].used += (size_t)_n_2 * sizeof(db__Person);
     db__Person* _slots_4 = (db__Person*)(ORTO_REGIONS[_r_1.slot].buffer + _off_3);
-    for (int _i_5 = 0; _i_5 < _n_2; _i_5++) _slots_4[_i_5] = ((db__Person){ .id = 0, .name = ((Array_byte){ .slot = 0, .offset = 22, .len = 0, .expected_gen = 1 }), .email = ((Array_byte){ .slot = 0, .offset = 22, .len = 0, .expected_gen = 1 }), .age = 0 });
+    for (int _i_5 = 0; _i_5 < _n_2; _i_5++) _slots_4[_i_5] = ((db__Person){ .id = 0, .name = ((Array_byte){ .slot = 0, .offset = 3, .len = 0, .expected_gen = 1 }), .email = ((Array_byte){ .slot = 0, .offset = 3, .len = 0, .expected_gen = 1 }), .age = 0 });
     Array_db__Person _arr_6 = ((Array_db__Person){ .slot = _r_1.slot, .offset = _off_3, .len = _n_2, .expected_gen = _r_1.expected_gen });
     Array_db__Person result_2 = _arr_6;
     int _for_hi_604309372_3 = rows_1.len;
@@ -540,6 +545,27 @@ Array_db__Person db__all_users(Region r) {
     return result_2;
 }
 
+Array_byte address_book__format_person(Region r, db__Person p) {
+    Region _r_1 = r;
+    if (ORTO_REGIONS[_r_1.slot].gen != _r_1.expected_gen) abort();
+    if (ORTO_REGIONS[_r_1.slot].used + (size_t)10 * sizeof(Array_byte) > ORTO_REGIONS[_r_1.slot].buffer_size) abort();
+    int _off_2 = (int)ORTO_REGIONS[_r_1.slot].used;
+    ORTO_REGIONS[_r_1.slot].used += (size_t)10 * sizeof(Array_byte);
+    Array_byte* _slots_3 = (Array_byte*)(ORTO_REGIONS[_r_1.slot].buffer + _off_2);
+    _slots_3[0] = ((Array_byte){ .slot = 0, .offset = 41, .len = 3, .expected_gen = 1 });
+    _slots_3[1] = str__int_to_bytes(r, p.id);
+    _slots_3[2] = ((Array_byte){ .slot = 0, .offset = 44, .len = 2, .expected_gen = 1 });
+    _slots_3[3] = p.name;
+    _slots_3[4] = ((Array_byte){ .slot = 0, .offset = 46, .len = 2, .expected_gen = 1 });
+    _slots_3[5] = p.email;
+    _slots_3[6] = ((Array_byte){ .slot = 0, .offset = 48, .len = 1, .expected_gen = 1 });
+    _slots_3[7] = ((Array_byte){ .slot = 0, .offset = 49, .len = 5, .expected_gen = 1 });
+    _slots_3[8] = str__int_to_bytes(r, p.age);
+    _slots_3[9] = ((Array_byte){ .slot = 0, .offset = 54, .len = 1, .expected_gen = 1 });
+    Array_Array_byte _arr_4 = ((Array_Array_byte){ .slot = _r_1.slot, .offset = _off_2, .len = 10, .expected_gen = _r_1.expected_gen });
+    return str__concat_all(r, _arr_4);
+}
+
 Array_byte address_book__format_person_list(Region r, Array_byte header, Array_db__Person people) {
     Region _r_1 = r;
     if (ORTO_REGIONS[_r_1.slot].gen != _r_1.expected_gen) abort();
@@ -562,7 +588,7 @@ Array_byte address_book__format_person_list(Region r, Array_byte header, Array_d
     int _i_10 = 1;
     if (ORTO_REGIONS[_a_9.slot].gen != _a_9.expected_gen) abort();
     if (_i_10 < 0 || _i_10 >= _a_9.len) abort();
-    ((Array_byte*)(ORTO_REGIONS[_a_9.slot].buffer + _a_9.offset))[_i_10] = ((Array_byte){ .slot = 0, .offset = 60, .len = 1, .expected_gen = 1 });
+    ((Array_byte*)(ORTO_REGIONS[_a_9.slot].buffer + _a_9.offset))[_i_10] = ((Array_byte){ .slot = 0, .offset = 54, .len = 1, .expected_gen = 1 });
     (void)(0);
     int _for_hi_779876575_2 = people.len;
     int i_3 = 0;
@@ -585,27 +611,6 @@ Array_byte address_book__format_person_list(Region r, Array_byte header, Array_d
     }
     (void)(0);
     return str__concat_all(r, parts_1);
-}
-
-Array_byte address_book__format_person(Region r, db__Person p) {
-    Region _r_1 = r;
-    if (ORTO_REGIONS[_r_1.slot].gen != _r_1.expected_gen) abort();
-    if (ORTO_REGIONS[_r_1.slot].used + (size_t)10 * sizeof(Array_byte) > ORTO_REGIONS[_r_1.slot].buffer_size) abort();
-    int _off_2 = (int)ORTO_REGIONS[_r_1.slot].used;
-    ORTO_REGIONS[_r_1.slot].used += (size_t)10 * sizeof(Array_byte);
-    Array_byte* _slots_3 = (Array_byte*)(ORTO_REGIONS[_r_1.slot].buffer + _off_2);
-    _slots_3[0] = ((Array_byte){ .slot = 0, .offset = 61, .len = 3, .expected_gen = 1 });
-    _slots_3[1] = str__int_to_bytes(r, p.id);
-    _slots_3[2] = ((Array_byte){ .slot = 0, .offset = 64, .len = 2, .expected_gen = 1 });
-    _slots_3[3] = p.name;
-    _slots_3[4] = ((Array_byte){ .slot = 0, .offset = 66, .len = 2, .expected_gen = 1 });
-    _slots_3[5] = p.email;
-    _slots_3[6] = ((Array_byte){ .slot = 0, .offset = 68, .len = 1, .expected_gen = 1 });
-    _slots_3[7] = ((Array_byte){ .slot = 0, .offset = 69, .len = 5, .expected_gen = 1 });
-    _slots_3[8] = str__int_to_bytes(r, p.age);
-    _slots_3[9] = ((Array_byte){ .slot = 0, .offset = 60, .len = 1, .expected_gen = 1 });
-    Array_Array_byte _arr_4 = ((Array_Array_byte){ .slot = _r_1.slot, .offset = _off_2, .len = 10, .expected_gen = _r_1.expected_gen });
-    return str__concat_all(r, _arr_4);
 }
 
 int str__contains_substr(Array_byte hay, Array_byte needle) {
@@ -676,7 +681,7 @@ int str__total_len(Array_Array_byte parts) {
 }
 
 Array_byte address_book__handle_search(Region req_r, Array_db__Person users, Array_byte req) {
-    Array_byte needle_1 = str__lookup(req, ((Array_byte){ .slot = 0, .offset = 74, .len = 1, .expected_gen = 1 }));
+    Array_byte needle_1 = str__lookup(req, ((Array_byte){ .slot = 0, .offset = 55, .len = 1, .expected_gen = 1 }));
     Array_db__Person matches_2 = db__search_by_name(req_r, users, needle_1);
     Region _r_1 = req_r;
     if (ORTO_REGIONS[_r_1.slot].gen != _r_1.expected_gen) abort();
@@ -684,11 +689,11 @@ Array_byte address_book__handle_search(Region req_r, Array_db__Person users, Arr
     int _off_2 = (int)ORTO_REGIONS[_r_1.slot].used;
     ORTO_REGIONS[_r_1.slot].used += (size_t)5 * sizeof(Array_byte);
     Array_byte* _slots_3 = (Array_byte*)(ORTO_REGIONS[_r_1.slot].buffer + _off_2);
-    _slots_3[0] = ((Array_byte){ .slot = 0, .offset = 75, .len = 8, .expected_gen = 1 });
+    _slots_3[0] = ((Array_byte){ .slot = 0, .offset = 56, .len = 8, .expected_gen = 1 });
     _slots_3[1] = needle_1;
-    _slots_3[2] = ((Array_byte){ .slot = 0, .offset = 83, .len = 6, .expected_gen = 1 });
+    _slots_3[2] = ((Array_byte){ .slot = 0, .offset = 64, .len = 6, .expected_gen = 1 });
     _slots_3[3] = str__int_to_bytes(req_r, matches_2.len);
-    _slots_3[4] = ((Array_byte){ .slot = 0, .offset = 89, .len = 11, .expected_gen = 1 });
+    _slots_3[4] = ((Array_byte){ .slot = 0, .offset = 70, .len = 11, .expected_gen = 1 });
     Array_Array_byte _arr_4 = ((Array_Array_byte){ .slot = _r_1.slot, .offset = _off_2, .len = 5, .expected_gen = _r_1.expected_gen });
     Array_byte header_3 = str__concat_all(req_r, _arr_4);
     return address_book__format_person_list(req_r, header_3, matches_2);
@@ -718,23 +723,8 @@ db__Person db__row_to_person(db_driver__Row row) {
     return ((db__Person){ .id = str__parse_int(_idx_3), .name = _idx_6, .email = _idx_9, .age = str__parse_int(_idx_12) });
 }
 
-Array_byte address_book__handle_list(Region req_r, Array_db__Person users) {
-    Region _r_1 = req_r;
-    if (ORTO_REGIONS[_r_1.slot].gen != _r_1.expected_gen) abort();
-    if (ORTO_REGIONS[_r_1.slot].used + (size_t)3 * sizeof(Array_byte) > ORTO_REGIONS[_r_1.slot].buffer_size) abort();
-    int _off_2 = (int)ORTO_REGIONS[_r_1.slot].used;
-    ORTO_REGIONS[_r_1.slot].used += (size_t)3 * sizeof(Array_byte);
-    Array_byte* _slots_3 = (Array_byte*)(ORTO_REGIONS[_r_1.slot].buffer + _off_2);
-    _slots_3[0] = ((Array_byte){ .slot = 0, .offset = 100, .len = 6, .expected_gen = 1 });
-    _slots_3[1] = str__int_to_bytes(req_r, users.len);
-    _slots_3[2] = ((Array_byte){ .slot = 0, .offset = 106, .len = 9, .expected_gen = 1 });
-    Array_Array_byte _arr_4 = ((Array_Array_byte){ .slot = _r_1.slot, .offset = _off_2, .len = 3, .expected_gen = _r_1.expected_gen });
-    Array_byte header_1 = str__concat_all(req_r, _arr_4);
-    return address_book__format_person_list(req_r, header_1, users);
-}
-
 Array_byte address_book__handle_find(Region req_r, Array_db__Person users, Array_byte req) {
-    int id_1 = str__parse_int(str__lookup(req, ((Array_byte){ .slot = 0, .offset = 115, .len = 2, .expected_gen = 1 })));
+    int id_1 = str__parse_int(str__lookup(req, ((Array_byte){ .slot = 0, .offset = 81, .len = 2, .expected_gen = 1 })));
     Option_db__Person scrut_1 = db__find_by_id(users, id_1);
     Array_byte match_result_2;
     switch (scrut_1.tag) {
@@ -746,7 +736,7 @@ Array_byte address_book__handle_find(Region req_r, Array_db__Person users, Array
             int _off_4 = (int)ORTO_REGIONS[_r_3.slot].used;
             ORTO_REGIONS[_r_3.slot].used += (size_t)2 * sizeof(Array_byte);
             Array_byte* _slots_5 = (Array_byte*)(ORTO_REGIONS[_r_3.slot].buffer + _off_4);
-            _slots_5[0] = ((Array_byte){ .slot = 0, .offset = 117, .len = 7, .expected_gen = 1 });
+            _slots_5[0] = ((Array_byte){ .slot = 0, .offset = 83, .len = 7, .expected_gen = 1 });
             _slots_5[1] = address_book__format_person(req_r, user_2);
             Array_Array_byte _arr_6 = ((Array_Array_byte){ .slot = _r_3.slot, .offset = _off_4, .len = 2, .expected_gen = _r_3.expected_gen });
             match_result_2 = str__concat_all(req_r, _arr_6);
@@ -759,9 +749,9 @@ Array_byte address_book__handle_find(Region req_r, Array_db__Person users, Array
             int _off_8 = (int)ORTO_REGIONS[_r_7.slot].used;
             ORTO_REGIONS[_r_7.slot].used += (size_t)3 * sizeof(Array_byte);
             Array_byte* _slots_9 = (Array_byte*)(ORTO_REGIONS[_r_7.slot].buffer + _off_8);
-            _slots_9[0] = ((Array_byte){ .slot = 0, .offset = 124, .len = 14, .expected_gen = 1 });
+            _slots_9[0] = ((Array_byte){ .slot = 0, .offset = 90, .len = 14, .expected_gen = 1 });
             _slots_9[1] = str__int_to_bytes(req_r, id_1);
-            _slots_9[2] = ((Array_byte){ .slot = 0, .offset = 60, .len = 1, .expected_gen = 1 });
+            _slots_9[2] = ((Array_byte){ .slot = 0, .offset = 54, .len = 1, .expected_gen = 1 });
             Array_Array_byte _arr_10 = ((Array_Array_byte){ .slot = _r_7.slot, .offset = _off_8, .len = 3, .expected_gen = _r_7.expected_gen });
             match_result_2 = str__concat_all(req_r, _arr_10);
             break;
@@ -769,6 +759,21 @@ Array_byte address_book__handle_find(Region req_r, Array_db__Person users, Array
         default: abort();
     }
     return match_result_2;
+}
+
+Array_byte address_book__handle_list(Region req_r, Array_db__Person users) {
+    Region _r_1 = req_r;
+    if (ORTO_REGIONS[_r_1.slot].gen != _r_1.expected_gen) abort();
+    if (ORTO_REGIONS[_r_1.slot].used + (size_t)3 * sizeof(Array_byte) > ORTO_REGIONS[_r_1.slot].buffer_size) abort();
+    int _off_2 = (int)ORTO_REGIONS[_r_1.slot].used;
+    ORTO_REGIONS[_r_1.slot].used += (size_t)3 * sizeof(Array_byte);
+    Array_byte* _slots_3 = (Array_byte*)(ORTO_REGIONS[_r_1.slot].buffer + _off_2);
+    _slots_3[0] = ((Array_byte){ .slot = 0, .offset = 104, .len = 6, .expected_gen = 1 });
+    _slots_3[1] = str__int_to_bytes(req_r, users.len);
+    _slots_3[2] = ((Array_byte){ .slot = 0, .offset = 110, .len = 9, .expected_gen = 1 });
+    Array_Array_byte _arr_4 = ((Array_Array_byte){ .slot = _r_1.slot, .offset = _off_2, .len = 3, .expected_gen = _r_1.expected_gen });
+    Array_byte header_1 = str__concat_all(req_r, _arr_4);
+    return address_book__format_person_list(req_r, header_1, users);
 }
 
 int str__copy_into(Array_byte dst, Array_byte src, int at) {
@@ -842,9 +847,9 @@ Array_byte address_book__handle_count(Region req_r, Array_db__Person users) {
     int _off_2 = (int)ORTO_REGIONS[_r_1.slot].used;
     ORTO_REGIONS[_r_1.slot].used += (size_t)3 * sizeof(Array_byte);
     Array_byte* _slots_3 = (Array_byte*)(ORTO_REGIONS[_r_1.slot].buffer + _off_2);
-    _slots_3[0] = ((Array_byte){ .slot = 0, .offset = 138, .len = 7, .expected_gen = 1 });
+    _slots_3[0] = ((Array_byte){ .slot = 0, .offset = 119, .len = 7, .expected_gen = 1 });
     _slots_3[1] = str__int_to_bytes(req_r, users.len);
-    _slots_3[2] = ((Array_byte){ .slot = 0, .offset = 145, .len = 9, .expected_gen = 1 });
+    _slots_3[2] = ((Array_byte){ .slot = 0, .offset = 126, .len = 9, .expected_gen = 1 });
     Array_Array_byte _arr_4 = ((Array_Array_byte){ .slot = _r_1.slot, .offset = _off_2, .len = 3, .expected_gen = _r_1.expected_gen });
     return str__concat_all(req_r, _arr_4);
 }
@@ -856,13 +861,13 @@ Array_db_driver__Row db_driver__run_query(Region r, Array_byte _sql) {
     int _off_2 = (int)ORTO_REGIONS[_r_1.slot].used;
     ORTO_REGIONS[_r_1.slot].used += (size_t)7 * sizeof(db_driver__Row);
     db_driver__Row* _slots_3 = (db_driver__Row*)(ORTO_REGIONS[_r_1.slot].buffer + _off_2);
-    _slots_3[0] = db_driver__make_row(r, 1, ((Array_byte){ .slot = 0, .offset = 154, .len = 5, .expected_gen = 1 }), ((Array_byte){ .slot = 0, .offset = 159, .len = 17, .expected_gen = 1 }), 30);
-    _slots_3[1] = db_driver__make_row(r, 2, ((Array_byte){ .slot = 0, .offset = 176, .len = 3, .expected_gen = 1 }), ((Array_byte){ .slot = 0, .offset = 179, .len = 15, .expected_gen = 1 }), 45);
-    _slots_3[2] = db_driver__make_row(r, 3, ((Array_byte){ .slot = 0, .offset = 194, .len = 5, .expected_gen = 1 }), ((Array_byte){ .slot = 0, .offset = 199, .len = 17, .expected_gen = 1 }), 22);
-    _slots_3[3] = db_driver__make_row(r, 4, ((Array_byte){ .slot = 0, .offset = 216, .len = 4, .expected_gen = 1 }), ((Array_byte){ .slot = 0, .offset = 220, .len = 18, .expected_gen = 1 }), 38);
-    _slots_3[4] = db_driver__make_row(r, 5, ((Array_byte){ .slot = 0, .offset = 238, .len = 3, .expected_gen = 1 }), ((Array_byte){ .slot = 0, .offset = 241, .len = 17, .expected_gen = 1 }), 51);
-    _slots_3[5] = db_driver__make_row(r, 6, ((Array_byte){ .slot = 0, .offset = 258, .len = 5, .expected_gen = 1 }), ((Array_byte){ .slot = 0, .offset = 263, .len = 17, .expected_gen = 1 }), 29);
-    _slots_3[6] = db_driver__make_row(r, 7, ((Array_byte){ .slot = 0, .offset = 280, .len = 5, .expected_gen = 1 }), ((Array_byte){ .slot = 0, .offset = 285, .len = 19, .expected_gen = 1 }), 33);
+    _slots_3[0] = db_driver__make_row(r, 1, ((Array_byte){ .slot = 0, .offset = 135, .len = 5, .expected_gen = 1 }), ((Array_byte){ .slot = 0, .offset = 140, .len = 17, .expected_gen = 1 }), 30);
+    _slots_3[1] = db_driver__make_row(r, 2, ((Array_byte){ .slot = 0, .offset = 157, .len = 3, .expected_gen = 1 }), ((Array_byte){ .slot = 0, .offset = 160, .len = 15, .expected_gen = 1 }), 45);
+    _slots_3[2] = db_driver__make_row(r, 3, ((Array_byte){ .slot = 0, .offset = 175, .len = 5, .expected_gen = 1 }), ((Array_byte){ .slot = 0, .offset = 180, .len = 17, .expected_gen = 1 }), 22);
+    _slots_3[3] = db_driver__make_row(r, 4, ((Array_byte){ .slot = 0, .offset = 197, .len = 4, .expected_gen = 1 }), ((Array_byte){ .slot = 0, .offset = 201, .len = 18, .expected_gen = 1 }), 38);
+    _slots_3[4] = db_driver__make_row(r, 5, ((Array_byte){ .slot = 0, .offset = 219, .len = 3, .expected_gen = 1 }), ((Array_byte){ .slot = 0, .offset = 222, .len = 17, .expected_gen = 1 }), 51);
+    _slots_3[5] = db_driver__make_row(r, 6, ((Array_byte){ .slot = 0, .offset = 239, .len = 5, .expected_gen = 1 }), ((Array_byte){ .slot = 0, .offset = 244, .len = 17, .expected_gen = 1 }), 29);
+    _slots_3[6] = db_driver__make_row(r, 7, ((Array_byte){ .slot = 0, .offset = 261, .len = 5, .expected_gen = 1 }), ((Array_byte){ .slot = 0, .offset = 266, .len = 19, .expected_gen = 1 }), 33);
     Array_db_driver__Row _arr_4 = ((Array_db_driver__Row){ .slot = _r_1.slot, .offset = _off_2, .len = 7, .expected_gen = _r_1.expected_gen });
     return _arr_4;
 }
@@ -918,13 +923,13 @@ int main(void) {
     int _off_5 = (int)ORTO_REGIONS[_r_4.slot].used;
     ORTO_REGIONS[_r_4.slot].used += (size_t)7 * sizeof(Array_byte);
     Array_byte* _slots_6 = (Array_byte*)(ORTO_REGIONS[_r_4.slot].buffer + _off_5);
-    _slots_6[0] = ((Array_byte){ .slot = 0, .offset = 304, .len = 9, .expected_gen = 1 });
-    _slots_6[1] = ((Array_byte){ .slot = 0, .offset = 313, .len = 13, .expected_gen = 1 });
-    _slots_6[2] = ((Array_byte){ .slot = 0, .offset = 326, .len = 14, .expected_gen = 1 });
-    _slots_6[3] = ((Array_byte){ .slot = 0, .offset = 340, .len = 15, .expected_gen = 1 });
-    _slots_6[4] = ((Array_byte){ .slot = 0, .offset = 355, .len = 15, .expected_gen = 1 });
-    _slots_6[5] = ((Array_byte){ .slot = 0, .offset = 370, .len = 8, .expected_gen = 1 });
-    _slots_6[6] = ((Array_byte){ .slot = 0, .offset = 378, .len = 19, .expected_gen = 1 });
+    _slots_6[0] = ((Array_byte){ .slot = 0, .offset = 285, .len = 9, .expected_gen = 1 });
+    _slots_6[1] = ((Array_byte){ .slot = 0, .offset = 294, .len = 13, .expected_gen = 1 });
+    _slots_6[2] = ((Array_byte){ .slot = 0, .offset = 307, .len = 14, .expected_gen = 1 });
+    _slots_6[3] = ((Array_byte){ .slot = 0, .offset = 321, .len = 15, .expected_gen = 1 });
+    _slots_6[4] = ((Array_byte){ .slot = 0, .offset = 336, .len = 15, .expected_gen = 1 });
+    _slots_6[5] = ((Array_byte){ .slot = 0, .offset = 351, .len = 8, .expected_gen = 1 });
+    _slots_6[6] = ((Array_byte){ .slot = 0, .offset = 359, .len = 19, .expected_gen = 1 });
     Array_Array_byte _arr_7 = ((Array_Array_byte){ .slot = _r_4.slot, .offset = _off_5, .len = 7, .expected_gen = _r_4.expected_gen });
     Array_Array_byte requests_3 = _arr_7;
     int _for_hi_984410231_4 = requests_3.len;
@@ -943,7 +948,7 @@ int main(void) {
         ORTO_REGIONS[_slot_9].is_stack = 0;
         Region _reg_10 = ((Region){ .slot = _slot_9, .expected_gen = ORTO_REGIONS[_slot_9].gen });
         Region req_r_6 = _reg_10;
-        (void)(io__print(((Array_byte){ .slot = 0, .offset = 397, .len = 5, .expected_gen = 1 })));
+        (void)(io__print(((Array_byte){ .slot = 0, .offset = 378, .len = 5, .expected_gen = 1 })));
         Array_Array_byte _a_11 = requests_3;
         int _i_12 = i_5;
         if (ORTO_REGIONS[_a_11.slot].gen != _a_11.expected_gen) abort();
@@ -952,7 +957,7 @@ int main(void) {
         Array_byte response_7 = address_book__handle_request(req_r_6, users_2, _idx_13);
         (void)(io__print(response_7));
         int _let_result_14 = 0;
-        if (ORTO_REGIONS[req_r_6.slot].gen == req_r_6.expected_gen) { if (!ORTO_REGIONS[req_r_6.slot].is_stack) free(ORTO_REGIONS[req_r_6.slot].buffer); ORTO_REGIONS[req_r_6.slot].buffer = NULL; ORTO_REGIONS[req_r_6.slot].buffer_size = 0; ORTO_REGIONS[req_r_6.slot].used = 0; ORTO_REGIONS[req_r_6.slot].gen++; ORTO_REGIONS[req_r_6.slot].next_free = ORTO_REGION_FREE_HEAD; ORTO_REGION_FREE_HEAD = req_r_6.slot; }
+        drop_Region(req_r_6);
         (void)(_let_result_14);
         i_5 = (i_5 + 1);
         (void)(0);
@@ -960,7 +965,7 @@ int main(void) {
     }
     (void)(0);
     int _let_result_15 = 0;
-    if (ORTO_REGIONS[app_r_1.slot].gen == app_r_1.expected_gen) { if (!ORTO_REGIONS[app_r_1.slot].is_stack) free(ORTO_REGIONS[app_r_1.slot].buffer); ORTO_REGIONS[app_r_1.slot].buffer = NULL; ORTO_REGIONS[app_r_1.slot].buffer_size = 0; ORTO_REGIONS[app_r_1.slot].used = 0; ORTO_REGIONS[app_r_1.slot].gen++; ORTO_REGIONS[app_r_1.slot].next_free = ORTO_REGION_FREE_HEAD; ORTO_REGION_FREE_HEAD = app_r_1.slot; }
+    drop_Region(app_r_1);
     return _let_result_15;
 }
 
@@ -971,9 +976,9 @@ Array_byte address_book__handle_unknown(Region req_r, Array_byte cmd) {
     int _off_2 = (int)ORTO_REGIONS[_r_1.slot].used;
     ORTO_REGIONS[_r_1.slot].used += (size_t)3 * sizeof(Array_byte);
     Array_byte* _slots_3 = (Array_byte*)(ORTO_REGIONS[_r_1.slot].buffer + _off_2);
-    _slots_3[0] = ((Array_byte){ .slot = 0, .offset = 402, .len = 24, .expected_gen = 1 });
+    _slots_3[0] = ((Array_byte){ .slot = 0, .offset = 383, .len = 24, .expected_gen = 1 });
     _slots_3[1] = cmd;
-    _slots_3[2] = ((Array_byte){ .slot = 0, .offset = 426, .len = 2, .expected_gen = 1 });
+    _slots_3[2] = ((Array_byte){ .slot = 0, .offset = 407, .len = 2, .expected_gen = 1 });
     Array_Array_byte _arr_4 = ((Array_Array_byte){ .slot = _r_1.slot, .offset = _off_2, .len = 3, .expected_gen = _r_1.expected_gen });
     return str__concat_all(req_r, _arr_4);
 }

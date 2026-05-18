@@ -166,6 +166,7 @@ let rec collect_expr (e : Check.T.expr) : unit =
   | Check.T.TEBreak | Check.T.TEContinue -> ()
   | Check.T.TEReturn (v, t) -> collect_expr v; collect_ty t
   | Check.T.TETryAt (a, i, t) -> collect_expr a; collect_expr i; collect_ty t
+  | Check.T.TEDrop (e, t) -> collect_expr e; collect_ty t
 
 let collect_program (prog : Check.T.program) : unit =
   Hashtbl.clear fn_types_seen;
@@ -340,6 +341,7 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
     | TEBreak | TEContinue -> e
     | TEReturn (v, t) -> TEReturn (rn env v, t)
     | TETryAt (a, i, t) -> TETryAt (rn env a, rn env i, t)
+    | TEDrop (e, t) -> TEDrop (rn env e, t)
   in
   let initial_env = List.map (fun (p, _) -> (p, p)) f.params in
   { f with body = rn initial_env f.body }
@@ -483,6 +485,7 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TEBreak | Check.T.TEContinue -> TyInt
   | Check.T.TEReturn (_, _) -> TyInt
   | Check.T.TETryAt (_, _, t) -> t
+  | Check.T.TEDrop (_, _) -> TyInt
 
 (* Release a Region's buffer (if it's heap-allocated), bump the
    generation, and push the slot back onto the free list. Stack
@@ -493,17 +496,18 @@ let is_catchall_pat_emit = function
   | PWild | PBind _ -> true
   | _ -> false
 
-let drop_region_stmt (name : string) : string =
-  Printf.sprintf
-    "if (ORTO_REGIONS[%s.slot].gen == %s.expected_gen) { \
-     if (!ORTO_REGIONS[%s.slot].is_stack) free(ORTO_REGIONS[%s.slot].buffer); \
-     ORTO_REGIONS[%s.slot].buffer = NULL; \
-     ORTO_REGIONS[%s.slot].buffer_size = 0; \
-     ORTO_REGIONS[%s.slot].used = 0; \
-     ORTO_REGIONS[%s.slot].gen++; \
-     ORTO_REGIONS[%s.slot].next_free = ORTO_REGION_FREE_HEAD; \
-     ORTO_REGION_FREE_HEAD = %s.slot; }"
-    name name name name name name name name name name
+(* Emit a call to the right drop function for a linear type. After mono,
+   the type name carries its module mangling (`net__Socket`); the helper
+   in check.ml derives the matching drop fn name. For Region the
+   runtime supplies `drop_Region` directly. *)
+let drop_call_stmt (var_name : string) (t : ty) : string =
+  match t with
+  | TyApp (n, _) ->
+      let fn = Check.drop_fn_name_for n in
+      Printf.sprintf "%s(%s);" fn var_name
+  | _ ->
+      failwith
+        (Printf.sprintf "emit: drop on non-TyApp type %s" (Ast.show_ty t))
 
 let rec emit_expr
   (ctor_map : (string, type_decl * variant * int) Hashtbl.t)
@@ -639,10 +643,7 @@ let rec emit_expr
         let body_decl =
           Printf.sprintf "%s %s = %s;" (c_type body_ty) temp cb.value
         in
-        let free_stmt = match vt with
-          | TyApp ("Region", _) -> drop_region_stmt x
-          | _ -> failwith "emit: auto_drop on non-linear type"
-        in
+        let free_stmt = drop_call_stmt x vt in
         let stmts =
           cv.stmts
           @ [decl]
@@ -1145,6 +1146,16 @@ let rec emit_expr
       let stmts = cv.stmts @ [Printf.sprintf "return %s;" cv.value] in
       { stmts; value = "0" }
 
+  | Check.T.TEDrop (sub, t) ->
+      let cs = emit_expr ctor_map sub in
+      let var = fresh "_drop_val" in
+      let c_ty = c_type t in
+      let stmts = cs.stmts @ [
+        Printf.sprintf "%s %s = %s;" c_ty var cs.value;
+        drop_call_stmt var t;
+      ] in
+      { stmts; value = "0" }
+
   | Check.T.TETryAt (a_e, i_e, result_ty) ->
       (* try_at(a, i): Some(a[i]) if gen+bounds OK, else None. *)
       let ca = emit_expr ctor_map a_e in
@@ -1248,13 +1259,17 @@ let emit_func_def ctor_map (f : Check.T.func) : string =
     if f.param_drops = [] then
       cb.stmts @ [Printf.sprintf "return %s;" cb.value]
     else
-      (* Materialise the body result first, then free each linear param
-         that the body didn't consume, then return the saved result. *)
       let ret_var = "_ret" in
+      let param_drop_calls =
+        List.filter_map (fun pname ->
+          match List.assoc_opt pname f.params with
+          | Some pt -> Some (drop_call_stmt pname pt)
+          | None -> None) f.param_drops
+      in
       cb.stmts
       @ [Printf.sprintf "%s %s = %s;"
            (c_type f.return_ty) ret_var cb.value]
-      @ List.map drop_region_stmt f.param_drops
+      @ param_drop_calls
       @ [Printf.sprintf "return %s;" ret_var]
   in
   let indented = List.map (fun s -> "    " ^ s) body_lines in
@@ -1321,8 +1336,21 @@ let emit (prog : Check.T.program) : string =
      \    int next_free;   /* -1 if in use, else next free slot id */\n\
      \    int is_stack;    /* 1 if buffer is stack memory (do not free) */\n\
      };\n\
+     typedef struct { int slot; int expected_gen; } Region;\n\
      static struct Region_slot ORTO_REGIONS[ORTO_REGION_SLOTS];\n\
      static int ORTO_REGION_FREE_HEAD = -1;\n\
+     \n\
+     static void drop_Region(Region r) {\n\
+     \    if (ORTO_REGIONS[r.slot].gen != r.expected_gen) return;\n\
+     \    if (!ORTO_REGIONS[r.slot].is_stack)\n\
+     \        free(ORTO_REGIONS[r.slot].buffer);\n\
+     \    ORTO_REGIONS[r.slot].buffer = NULL;\n\
+     \    ORTO_REGIONS[r.slot].buffer_size = 0;\n\
+     \    ORTO_REGIONS[r.slot].used = 0;\n\
+     \    ORTO_REGIONS[r.slot].gen++;\n\
+     \    ORTO_REGIONS[r.slot].next_free = ORTO_REGION_FREE_HEAD;\n\
+     \    ORTO_REGION_FREE_HEAD = r.slot;\n\
+     }\n\
      \n\
      %s\n\
      \n\
@@ -1340,8 +1368,7 @@ let emit (prog : Check.T.program) : string =
      \    ORTO_REGIONS[0].is_stack = 1;\n\
      \    ORTO_REGIONS[0].next_free = -1;\n\
      \    ORTO_REGION_FREE_HEAD = 1;\n\
-     }\n\
-     typedef struct { int slot; int expected_gen; } Region;"
+     }"
     static_bytes
   in
   String.concat "\n\n"

@@ -18,6 +18,27 @@
 - `slice(a, lo, hi)` — sub-handle в тот же Region, без копирования.
 - Slab allocator под капотом — никаких leak'ов, slots переиспользуются.
 
+**Линейные типы (resource ownership):**
+- `linear struct Socket { fd: int }` / `linear enum ...` — типы помечены как resource.
+- Обязательная `fn drop_<TypeName>(x: TypeName) -> int` в том же модуле. Компилятор требует.
+- `let y = x` где x линейный — compile error. Aliasing запрещён.
+- `let mut x = ...` линейного — compile error.
+- Линейные нельзя класть в data position (поле обычной struct, generic param, элемент Array).
+- `drop(x)` — explicit consume, запускает destructor.
+- Auto-drop в конце scope если не consumed.
+- Branch divergence — нельзя забыть drop в ветке.
+- Region — частный случай linear типа: автогенерируемый `drop_Region`.
+
+**Pattern matching:**
+- Match по int, bool, byte, Array[byte], ADT.
+- Literal patterns: `42`, `-3`, `true`, `"hello"`.
+- Bind pattern: `x => body` биндит scrutinee к x (lowercase ident).
+- Or-patterns: `1 | 2 | 3 =>`, `Red | Green | Blue =>`.
+- Exhaustivity:
+  - ADT — все ctor покрыты или catch-all.
+  - Bool — true и false или catch-all.
+  - Int/Byte/Bytes — catch-all обязателен.
+
 **Типы:**
 - `int`, `bool`, `byte`, `struct`, `enum`, `fn(...) -> ...`.
 - Generics с параметрами `[T, U, ...]`.

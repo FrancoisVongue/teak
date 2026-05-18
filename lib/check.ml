@@ -74,6 +74,8 @@ module T = struct
                   (* array_data(a: Array[T]) -> TyPtr T *)
     | TETryAt of expr * expr * ty
                   (* try_at(a, i) — third field is result Option[T] *)
+    | TEDrop  of expr * ty
+                  (* drop(x) — second field is x's (linear) type *)
     | TEDeref  of expr * ty
                   (* p deref — second field is element type T *)
     | TEAssign of string * expr * ty
@@ -164,6 +166,36 @@ let loop_depth = ref 0
 (* The return type of the function currently being checked, so EReturn
    can verify the type of its expression. Reset on every check_func. *)
 let current_return_ty : ty option ref = ref None
+
+(* Set of type names that are linear: Region (always) plus every
+   user-declared `linear struct/enum`. Populated by build_env. *)
+let linear_type_names : (string, unit) Hashtbl.t = Hashtbl.create 8
+
+let reset_linear_table () =
+  Hashtbl.clear linear_type_names;
+  Hashtbl.add linear_type_names "Region" ()
+
+let mark_linear n = Hashtbl.replace linear_type_names n ()
+
+let is_linear_name n = Hashtbl.mem linear_type_names n
+
+(* The mangled name of the drop function for a linear type. Given the
+   type's (possibly mangled) name "<mod>__<base>", returns
+   "<mod>__drop_<base>". For unmangled names like "Region" (builtin),
+   returns "drop_Region". *)
+let drop_fn_name_for (type_name : string) : string =
+  let n = String.length type_name in
+  let rec find_dd i =
+    if i + 1 >= n then None
+    else if type_name.[i] = '_' && type_name.[i + 1] = '_' then Some i
+    else find_dd (i + 1)
+  in
+  match find_dd 0 with
+  | Some i ->
+      let prefix = String.sub type_name 0 (i + 2) in
+      let base   = String.sub type_name (i + 2) (n - i - 2) in
+      prefix ^ "drop_" ^ base
+  | None -> "drop_" ^ type_name
 let fresh_meta () : meta =
   incr meta_counter;
   { id = !meta_counter; resolved = None }
@@ -175,6 +207,11 @@ let rec prune (t : ty) : ty =
       m.resolved <- Some r;
       r
   | _ -> t
+
+let is_linear_ty (t : ty) : bool =
+  match prune t with
+  | TyApp (n, _) -> is_linear_name n
+  | _ -> false
 
 let rec zonk (t : ty) : ty =
   match prune t with
@@ -275,16 +312,16 @@ let split_program (prog : program)
 
 (* ---------- type validation ---------- *)
 
-(* Tests whether a type contains a linear (non-copyable) builtin anywhere
-   except behind a function arrow. Currently only Region is linear.
-   Linear types are forbidden as record fields, ADT variant args, or
-   type args — they can only live as the top-level type of a name. *)
+(* Tests whether a type contains a linear builtin or user-linear type
+   anywhere except behind a function arrow or raw pointer. Linear types
+   may only live as the top-level type of a name — never as a record
+   field, variant argument, or type-argument of a non-linear container. *)
 let rec ty_contains_linear (t : ty) : bool =
   match t with
-  | TyApp ("Region", _) -> true
+  | TyApp (n, _) when is_linear_name n -> true
   | TyApp (_, args) -> List.exists ty_contains_linear args
   | TyFun _ -> false
-  | TyPtr _ -> false   (* raw pointers hide their contents, like fn arrows *)
+  | TyPtr _ -> false
   | TyInt | TyBool | TyVar _ | TyMeta _ -> false
 
 (* When a generic is instantiated (function call, ctor application,
@@ -397,6 +434,11 @@ let build_env
   (records : record_decl list)
   (funcs : func list)
   (externs : extern_decl list) : env =
+  reset_linear_table ();
+  List.iter (fun (td : type_decl) ->
+    if td.is_linear then mark_linear td.type_name) types;
+  List.iter (fun (rd : record_decl) ->
+    if rd.rec_is_linear then mark_linear rd.rec_name) records;
   let seen_types = Hashtbl.create 16 in
   List.iter (fun (td : type_decl) ->
     check_not_c_reserved "type" td.type_name;
@@ -551,10 +593,26 @@ let build_env
       let ret_ty = validate_ty type_env record_env [] e.ext_return_ty in
       (e.ext_name, ([], (param_tys, ret_ty)))) externs
   in
-  { types = type_env;
-    records = record_env;
-    ctors = ctor_env;
-    fns = user_sigs @ extern_sigs }
+  let env = { types = type_env;
+              records = record_env;
+              ctors = ctor_env;
+              fns = user_sigs @ extern_sigs } in
+  (* For every user-declared linear type, require a matching drop fn
+     in the same module. The fn is found by name convention. *)
+  let check_drop_fn type_name =
+    let fn_name = drop_fn_name_for type_name in
+    if not (List.mem_assoc fn_name env.fns) then
+      raise (Type_error
+        (Printf.sprintf
+           "linear type %S requires a drop function %S in the same module \
+            (signature: fn %s(<param>: %s) -> int)"
+           type_name fn_name fn_name type_name))
+  in
+  List.iter (fun (td : type_decl) ->
+    if td.is_linear then check_drop_fn td.type_name) types;
+  List.iter (fun (rd : record_decl) ->
+    if rd.rec_is_linear then check_drop_fn rd.rec_name) records;
+  env
 
 (* ---------- recursive type detection ---------- *)
 
@@ -884,6 +942,7 @@ let rec takes_consume (env : env) (x : string) (e : T.expr) : bool =
   | T.TEReturn (v, _) -> takes_consume env x v
   | T.TETryAt (a, i, _) ->
       takes_consume env x a || takes_consume env x i
+  | T.TEDrop (e, _) -> takes_consume env x e
 
 (* tail_consume: does x reach the tail position of the expression? *)
 let rec tail_consume (x : string) (e : T.expr) : bool =
@@ -1139,45 +1198,49 @@ let rec infer (env : env) (tparams : string list)
        | Some t ->
            let t = validate_ty_for_ascription env tparams t in
            unify tv_ty t);
-      (* Region must not be `mut` — reassigning would silently leak
-         the slot held by the previous value. *)
-      if is_mut then
-        (match prune tv_ty with
-         | TyApp ("Region", _) ->
-             raise (Type_error
-               (Printf.sprintf
-                  "let mut %s : Region is forbidden — \
-                   reassigning a Region binding would leak its slot. \
-                   Create a fresh let-binding instead."
-                  x))
-         | _ -> ());
-      (* Region is a copyable handle, but each underlying slot must have
-         exactly one drop. Reject aliasing — `let r2 = r` would silently
-         create two owners pointing at the same slot. *)
-      (match prune tv_ty, tv with
-       | TyApp ("Region", _), T.TEVar (src, _) ->
+      (* Linear types (Region, user `linear` structs/enums) cannot be
+         `mut` — reassigning would silently leak the previous value. *)
+      if is_mut && is_linear_ty tv_ty then
+        raise (Type_error
+          (Printf.sprintf
+             "let mut %s : %s is forbidden — \
+              reassigning a linear binding would leak the previous value. \
+              Create a fresh let-binding instead."
+             x (show_ty (zonk tv_ty))));
+      (* Linear values cannot be aliased. `let y = x` where x is linear
+         would silently create two owners of the same resource. *)
+      (match tv, prune tv_ty with
+       | T.TEVar (src, _), t when is_linear_ty t ->
            raise (Type_error
              (Printf.sprintf
-                "cannot bind one Region variable to another \
-                 (let %s = %s): each Region must come from a fresh \
-                 region(...) / stack_region(...) / aligned_region(...) call"
+                "cannot bind one linear variable to another \
+                 (let %s = %s): linear values must come from a fresh \
+                 constructor or function call"
                 x src))
        | _ -> ());
-      (* When `_ = <diverging-expr>` (break/continue/return), the value
-         type is an unresolved TyMeta — there's nothing in the context
-         to constrain it. Pin it to int so zonk doesn't fail. *)
+      (* Field access of a linear container is also aliasing — it would
+         create a binding that owns the same underlying resource. *)
+      (match tv, prune tv_ty with
+       | T.TEField (_, fname, _), t when is_linear_ty t ->
+           raise (Type_error
+             (Printf.sprintf
+                "cannot bind a linear field to a new name \
+                 (let %s = ....%s): consume it directly with drop(...) \
+                 or pass it to a function instead"
+                x fname))
+       | _ -> ());
+      (* `_ = <diverging-expr>` (break/continue/return) — value type is
+         unresolved TyMeta with nothing to constrain it. Default to int
+         so zonk doesn't fail. *)
       if x = "_" then
         (match prune tv_ty with
          | TyMeta _ -> unify tv_ty TyInt
          | _ -> ());
       let x_actual =
-        if x = "_" then
-          (match prune tv_ty with
-           | TyApp ("Region", _) ->
-               incr drop_name_counter;
-               Printf.sprintf "_drop_%d" !drop_name_counter
-           | _ -> x)
-        else x
+        if x = "_" && is_linear_ty tv_ty then begin
+          incr drop_name_counter;
+          Printf.sprintf "_drop_%d" !drop_name_counter
+        end else x
       in
       let body_vars =
         if x_actual = "_" then vars
@@ -1186,10 +1249,7 @@ let rec infer (env : env) (tparams : string list)
       let (tb, tb_ty) = infer env tparams body_vars body in
       let auto_drop =
         if x_actual = "_" then false
-        else
-          (match prune tv_ty with
-           | TyApp ("Region", _) -> true
-           | _ -> false)
+        else is_linear_ty tv_ty
       in
       (T.TELet (x_actual, tv_ty, tv, tb, tb_ty, auto_drop), tb_ty)
 
@@ -1637,6 +1697,16 @@ let rec infer (env : env) (tparams : string list)
       let result_ty = TyApp ("Option", [elem]) in
       (T.TETryAt (ta, ti, result_ty), result_ty)
 
+  | EDrop x_e ->
+      let (tx, tx_ty) = infer env tparams vars x_e in
+      if not (is_linear_ty tx_ty) then
+        raise (Type_error
+          (Printf.sprintf
+             "drop() requires a linear value (Region or a user `linear` \
+              type), got %s"
+             (show_ty (zonk tx_ty))));
+      (T.TEDrop (tx, tx_ty), TyInt)
+
 and check_args env tparams vars callee_name param_tys args : T.expr list =
   let n_expected = List.length param_tys in
   let n_got = List.length args in
@@ -1724,6 +1794,8 @@ let rec zonk_expr (e : T.expr) : T.expr =
   | T.TEReturn (v, t) -> T.TEReturn (zonk_expr v, zonk_expect t)
   | T.TETryAt (a, i, t) ->
       T.TETryAt (zonk_expr a, zonk_expr i, zonk_expect t)
+  | T.TEDrop (e, t) ->
+      T.TEDrop (zonk_expr e, zonk_expect t)
 
 and zonk_expect (t : ty) : ty =
   let t = zonk t in
@@ -1771,7 +1843,7 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
              "use of moved name %S — its ownership was transferred earlier"
              x));
       let live' =
-        if in_tail && not (is_copyable env t) then SM.remove x live
+        if in_tail && is_linear_ty t then SM.remove x live
         else live
       in
       (e, live')
@@ -1845,11 +1917,15 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
         let outer_had = SM.find_opt x live in
         let live_inner = SM.add x vt live in
         let (b', live_after) = check_moves_expr env live_inner in_tail b in
+        (* If x was consumed somewhere in the body (drop, tail-return),
+           it's no longer in live_after — skip the scope-end auto-drop
+           to avoid double-free. *)
+        let ad' = if ad && not (SM.mem x live_after) then false else ad in
         let live_final = match outer_had with
           | Some t -> SM.add x t live_after
           | None -> SM.remove x live_after
         in
-        (T.TELet (x, vt, v', b', bt, ad), live_final)
+        (T.TELet (x, vt, v', b', bt, ad'), live_final)
 
   | T.TEMatch (scrut, scrut_ty, arms, ty) ->
       let (scrut', live) = check_moves_expr env live false scrut in
@@ -2007,6 +2083,16 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       let (i', live) = check_moves_expr env live false i in
       (T.TETryAt (a', i', t), live)
 
+  | T.TEDrop (sub, t) ->
+      let (sub', live) = check_moves_expr env live false sub in
+      (* Explicit drop of a bare variable consumes it. After drop, the
+         name is no longer live (use-after-drop is a compile error). *)
+      let live = match sub' with
+        | T.TEVar (x, _) when is_linear_ty t -> SM.remove x live
+        | _ -> live
+      in
+      (T.TEDrop (sub', t), live)
+
 and consume_arg (env : env) (live : ty SM.t) (e : T.expr)
   : T.expr * ty SM.t =
   let (e', live) = check_moves_expr env live false e in
@@ -2068,6 +2154,7 @@ let builtin_option_decl : type_decl = {
     { ctor_name = "Some"; arg_tys = [TyVar "T"] };
     { ctor_name = "None"; arg_tys = [] };
   ];
+  is_linear = false;
 }
 
 let check (prog : program) : T.program =

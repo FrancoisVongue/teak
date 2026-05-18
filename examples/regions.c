@@ -18,8 +18,21 @@ struct Region_slot {
     int next_free;   /* -1 if in use, else next free slot id */
     int is_stack;    /* 1 if buffer is stack memory (do not free) */
 };
+typedef struct { int slot; int expected_gen; } Region;
 static struct Region_slot ORTO_REGIONS[ORTO_REGION_SLOTS];
 static int ORTO_REGION_FREE_HEAD = -1;
+
+static void drop_Region(Region r) {
+    if (ORTO_REGIONS[r.slot].gen != r.expected_gen) return;
+    if (!ORTO_REGIONS[r.slot].is_stack)
+        free(ORTO_REGIONS[r.slot].buffer);
+    ORTO_REGIONS[r.slot].buffer = NULL;
+    ORTO_REGIONS[r.slot].buffer_size = 0;
+    ORTO_REGIONS[r.slot].used = 0;
+    ORTO_REGIONS[r.slot].gen++;
+    ORTO_REGIONS[r.slot].next_free = ORTO_REGION_FREE_HEAD;
+    ORTO_REGION_FREE_HEAD = r.slot;
+}
 
 static const uint8_t ORTO_STATIC_BYTES[1] = { 0x00 };
 #define ORTO_STATIC_BYTES_LEN 0
@@ -39,7 +52,6 @@ static void orto_init_regions(void) {
     ORTO_REGIONS[0].next_free = -1;
     ORTO_REGION_FREE_HEAD = 1;
 }
-typedef struct { int slot; int expected_gen; } Region;
 
 typedef struct { int slot; int offset; int len; int expected_gen; } Array_int;
 
@@ -135,10 +147,10 @@ int main(void) {
     if (_i_31 < 0 || _i_31 >= _a_30.len) abort();
     int _idx_32 = ((int*)(ORTO_REGIONS[_a_30.slot].buffer + _a_30.offset))[_i_31];
     int _let_result_33 = (((_idx_26 + _idx_29) + _idx_32) + a_2.len);
-    if (ORTO_REGIONS[aln_5.slot].gen == aln_5.expected_gen) { if (!ORTO_REGIONS[aln_5.slot].is_stack) free(ORTO_REGIONS[aln_5.slot].buffer); ORTO_REGIONS[aln_5.slot].buffer = NULL; ORTO_REGIONS[aln_5.slot].buffer_size = 0; ORTO_REGIONS[aln_5.slot].used = 0; ORTO_REGIONS[aln_5.slot].gen++; ORTO_REGIONS[aln_5.slot].next_free = ORTO_REGION_FREE_HEAD; ORTO_REGION_FREE_HEAD = aln_5.slot; }
+    drop_Region(aln_5);
     int _let_result_34 = _let_result_33;
-    if (ORTO_REGIONS[stk_3.slot].gen == stk_3.expected_gen) { if (!ORTO_REGIONS[stk_3.slot].is_stack) free(ORTO_REGIONS[stk_3.slot].buffer); ORTO_REGIONS[stk_3.slot].buffer = NULL; ORTO_REGIONS[stk_3.slot].buffer_size = 0; ORTO_REGIONS[stk_3.slot].used = 0; ORTO_REGIONS[stk_3.slot].gen++; ORTO_REGIONS[stk_3.slot].next_free = ORTO_REGION_FREE_HEAD; ORTO_REGION_FREE_HEAD = stk_3.slot; }
+    drop_Region(stk_3);
     int _let_result_35 = _let_result_34;
-    if (ORTO_REGIONS[heap_1.slot].gen == heap_1.expected_gen) { if (!ORTO_REGIONS[heap_1.slot].is_stack) free(ORTO_REGIONS[heap_1.slot].buffer); ORTO_REGIONS[heap_1.slot].buffer = NULL; ORTO_REGIONS[heap_1.slot].buffer_size = 0; ORTO_REGIONS[heap_1.slot].used = 0; ORTO_REGIONS[heap_1.slot].gen++; ORTO_REGIONS[heap_1.slot].next_free = ORTO_REGION_FREE_HEAD; ORTO_REGION_FREE_HEAD = heap_1.slot; }
+    drop_Region(heap_1);
     return _let_result_35;
 }

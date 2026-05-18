@@ -18,8 +18,21 @@ struct Region_slot {
     int next_free;   /* -1 if in use, else next free slot id */
     int is_stack;    /* 1 if buffer is stack memory (do not free) */
 };
+typedef struct { int slot; int expected_gen; } Region;
 static struct Region_slot ORTO_REGIONS[ORTO_REGION_SLOTS];
 static int ORTO_REGION_FREE_HEAD = -1;
+
+static void drop_Region(Region r) {
+    if (ORTO_REGIONS[r.slot].gen != r.expected_gen) return;
+    if (!ORTO_REGIONS[r.slot].is_stack)
+        free(ORTO_REGIONS[r.slot].buffer);
+    ORTO_REGIONS[r.slot].buffer = NULL;
+    ORTO_REGIONS[r.slot].buffer_size = 0;
+    ORTO_REGIONS[r.slot].used = 0;
+    ORTO_REGIONS[r.slot].gen++;
+    ORTO_REGIONS[r.slot].next_free = ORTO_REGION_FREE_HEAD;
+    ORTO_REGION_FREE_HEAD = r.slot;
+}
 
 static const uint8_t ORTO_STATIC_BYTES[1] = { 0x00 };
 #define ORTO_STATIC_BYTES_LEN 0
@@ -39,7 +52,6 @@ static void orto_init_regions(void) {
     ORTO_REGIONS[0].next_free = -1;
     ORTO_REGION_FREE_HEAD = 1;
 }
-typedef struct { int slot; int expected_gen; } Region;
 
 typedef struct { int slot; int offset; int len; int expected_gen; } Array_int;
 
@@ -146,6 +158,6 @@ int main(void) {
     Array_int counters_3 = _arr_13;
     (void)(histogram__build_histogram(values_2, counters_3, 0));
     int _let_result_14 = histogram__find_max(counters_3, 0, 0);
-    if (ORTO_REGIONS[r_1.slot].gen == r_1.expected_gen) { if (!ORTO_REGIONS[r_1.slot].is_stack) free(ORTO_REGIONS[r_1.slot].buffer); ORTO_REGIONS[r_1.slot].buffer = NULL; ORTO_REGIONS[r_1.slot].buffer_size = 0; ORTO_REGIONS[r_1.slot].used = 0; ORTO_REGIONS[r_1.slot].gen++; ORTO_REGIONS[r_1.slot].next_free = ORTO_REGION_FREE_HEAD; ORTO_REGION_FREE_HEAD = r_1.slot; }
+    drop_Region(r_1);
     return _let_result_14;
 }

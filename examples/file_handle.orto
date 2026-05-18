@@ -1,0 +1,49 @@
+// File-handle demo: a real linear resource.
+//
+// Shows how a file descriptor wrapped in a `linear struct` behaves:
+//   - copying is a compile error (alias forbidden)
+//   - forgetting to handle it in one branch is a compile error
+//   - the drop function runs automatically at scope exit
+//
+// In a real program these `extern fn`s would be from libc. We declare
+// the same prototypes here so the C linker resolves them.
+
+extern fn close(fd: int) -> int
+extern fn write(fd: int, buf: *byte, n: int) -> int
+extern fn putchar(c: int) -> int
+
+linear struct File { fd: int }
+
+// Required: every linear type has its drop function in the same module.
+// The compiler errors at the type declaration if it's missing.
+fn drop_File(f: File) -> int {
+    close(f.fd);   // release the kernel resource
+    0
+}
+
+fn open_stdout() -> File {
+    File { fd: 1 }
+}
+
+// Writing to a file consumes the handle? No — File is passed by value
+// (borrow-like), the function does not drop. Caller still owns.
+fn write_str(f: File, s: Array[byte]) -> int {
+    write(f.fd, array_data(s), len(s));
+    0
+}
+
+fn main() -> int {
+    let f = open_stdout();
+    write_str(f, "first line\n");
+    write_str(f, "second line\n");
+
+    // We could drop early:
+    //   drop(f);
+    //   write_str(f, "...");  // ← compiler would catch this
+    //
+    // Or let scope-exit do it (the default):
+    putchar(65);  // 'A'
+    putchar(10);
+    0
+    // implicit drop_File(f) here — calls close(f.fd) on fd=1
+}

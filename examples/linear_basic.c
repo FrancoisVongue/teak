@@ -53,71 +53,50 @@ static void orto_init_regions(void) {
     ORTO_REGION_FREE_HEAD = 1;
 }
 
+typedef struct linear_basic__Socket linear_basic__Socket;
+
 typedef int (*fn_int_to_int)(int);
 
-typedef int (*fn_int_to_bool)(int);
+typedef linear_basic__Socket (*fn_to_linear_basic__Socket)(void);
 
-typedef int (*fn_fn_int_to_int_int_to_int)(fn_int_to_int, int);
+typedef int (*fn_linear_basic__Socket_to_int)(linear_basic__Socket);
 
-typedef int (*fn_fn_int_to_bool_int_to_bool)(fn_int_to_bool, int);
+struct linear_basic__Socket {
+    int fd;
+};
 
-int higher_order__is_even(int x);
+extern int putchar(int c);
 
-int higher_order__inc(int x);
+linear_basic__Socket linear_basic__open_fake(void);
 
-int higher_order__twice(fn_int_to_int f, int x);
+int linear_basic__drop_Socket(linear_basic__Socket s);
 
-int higher_order__apply_int_bool(fn_int_to_bool f, int x);
-
-int higher_order__dbl(int x);
-
-int higher_order__add5(int x);
+int linear_basic__use_socket(linear_basic__Socket s);
 
 int main(void);
 
-int higher_order__apply_int_int(fn_int_to_int f, int x);
-
-int higher_order__is_even(int x) {
-    return ((x % 2) == 0);
+linear_basic__Socket linear_basic__open_fake(void) {
+    return ((linear_basic__Socket){ .fd = 7 });
 }
 
-int higher_order__inc(int x) {
-    return (x + 1);
+int linear_basic__drop_Socket(linear_basic__Socket s) {
+    (void)(putchar(68));
+    (void)(putchar(((10 + s.fd) - s.fd)));
+    return 0;
 }
 
-int higher_order__twice(fn_int_to_int f, int x) {
-    return f(f(x));
-}
-
-int higher_order__apply_int_bool(fn_int_to_bool f, int x) {
-    return f(x);
-}
-
-int higher_order__dbl(int x) {
-    return (x * 2);
-}
-
-int higher_order__add5(int x) {
-    return (x + 5);
+int linear_basic__use_socket(linear_basic__Socket s) {
+    (void)(putchar(85));
+    (void)(putchar((48 + s.fd)));
+    (void)(putchar(10));
+    return 0;
 }
 
 int main(void) {
-    int a_1 = higher_order__twice(higher_order__inc, 10);
-    int b_2 = higher_order__twice(higher_order__dbl, 3);
-    int c_3 = higher_order__apply_int_int(higher_order__add5, 20);
-    int d_bool_4 = higher_order__apply_int_bool(higher_order__is_even, 6);
-    int tmp_1;
-    if (d_bool_4) {
-        tmp_1 = 100;
-    } else {
-        tmp_1 = 0;
-    }
-    int d_5 = tmp_1;
-    fn_int_to_int f_6 = higher_order__inc;
-    int e_7 = f_6(f_6(f_6(5)));
-    return ((((a_1 + b_2) + c_3) + d_5) + e_7);
-}
-
-int higher_order__apply_int_int(fn_int_to_int f, int x) {
-    return f(x);
+    linear_basic__Socket s_1 = linear_basic__open_fake();
+    (void)(linear_basic__use_socket(s_1));
+    (void)(linear_basic__use_socket(s_1));
+    int _let_result_1 = 0;
+    linear_basic__drop_Socket(s_1);
+    return _let_result_1;
 }

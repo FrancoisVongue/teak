@@ -79,6 +79,7 @@ type expr =
   | EIsNull of expr                       (* is_null(p) — NULL check *)
   | EArrayData of expr                    (* array_data(a) — *T view of Array[T] bytes *)
   | ETryAt  of expr * expr                (* try_at(a, i) — None on dangling/oob *)
+  | EDrop   of expr                       (* drop(x) — consume linear value, run its drop fn *)
   | EDeref  of expr                       (* *p — pointer deref *)
 
 and record_init_elem =
@@ -94,12 +95,14 @@ type type_decl = {
   type_name   : string;
   type_params : string list;
   variants    : variant list;
+  is_linear   : bool;   (* `linear enum Foo { ... }` — move-only with user drop fn *)
 }
 
 type record_decl = {
   rec_name        : string;
   rec_type_params : string list;
   rec_fields      : (string * ty) list;
+  rec_is_linear   : bool;   (* `linear struct Foo { ... }` *)
 }
 
 type func = {
@@ -255,4 +258,5 @@ let rec show_expr = function
   | EIsNull p -> Printf.sprintf "is_null(%s)" (show_expr p)
   | EArrayData a -> Printf.sprintf "array_data(%s)" (show_expr a)
   | ETryAt (a, i) -> Printf.sprintf "try_at(%s, %s)" (show_expr a) (show_expr i)
+  | EDrop e -> Printf.sprintf "drop(%s)" (show_expr e)
   | EDeref p -> Printf.sprintf "*%s" (show_expr p)

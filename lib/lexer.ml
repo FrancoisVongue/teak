@@ -36,6 +36,8 @@ let lower_ident_or_keyword s =
   | "type"  -> TType
   | "struct" -> TStruct
   | "enum"  -> TEnum
+  | "linear" -> TLinear
+  | "drop"  -> TDrop
   | "match" -> TMatch
   | "extern" -> TExtern
   | "use"   -> TUse

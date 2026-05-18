@@ -271,7 +271,7 @@ and parse_atom st =
   | TIf | TMatch | TWhile | TBreak | TContinue | TFor | TReturn
   | TArray | TLen | TSlice
   | TToInt | TToByte
-  | TCAlloc | TCFree | TNullPtr | TIsNull | TArrayData | TTryAt
+  | TCAlloc | TCFree | TNullPtr | TIsNull | TArrayData | TTryAt | TDrop
   | TRegion | TStackRegion | TAlignedRegion -> parse_atom_consume st
   | t -> raise (Parse_error
     (Printf.sprintf "expected expression, got %s" (Token.show t)))
@@ -436,6 +436,11 @@ and parse_atom_consume st =
       let i = parse_expr st in
       expect st TRParen;
       ETryAt (a, i)
+  | TDrop ->
+      expect st TLParen;
+      let e = parse_expr st in
+      expect st TRParen;
+      EDrop e
   | TStackRegion ->
       (* stack_region(N) — N must be an int literal (compile-time size).
          The block lives in the surrounding C function's frame; the
@@ -681,7 +686,7 @@ let parse_extern st =
 
 (* ---------- type declarations ---------- *)
 
-let parse_struct st : top_decl =
+let parse_struct st ~is_linear : top_decl =
   expect st TStruct;
   let name = match eat st with
     | TCtorIdent s -> s
@@ -715,9 +720,10 @@ let parse_struct st : top_decl =
     rec_name = name;
     rec_type_params = type_params;
     rec_fields = fields;
+    rec_is_linear = is_linear;
   }
 
-let parse_enum st : top_decl =
+let parse_enum st ~is_linear : top_decl =
   expect st TEnum;
   let name = match eat st with
     | TCtorIdent s -> s
@@ -755,7 +761,7 @@ let parse_enum st : top_decl =
   in
   let variants = collect_variants () in
   expect st TRBrace;
-  TopType { type_name = name; type_params; variants }
+  TopType { type_name = name; type_params; variants; is_linear }
 
 (* ---------- use declarations ---------- *)
 
@@ -817,11 +823,23 @@ let parse (toks : token list) : program =
         let f = parse_func st in
         loop (TopFunc f :: acc)
     | TStruct ->
-        let td = parse_struct st in
+        let td = parse_struct st ~is_linear:false in
         loop (td :: acc)
     | TEnum ->
-        let td = parse_enum st in
+        let td = parse_enum st ~is_linear:false in
         loop (td :: acc)
+    | TLinear ->
+        advance st;
+        (match peek st with
+         | TStruct ->
+             let td = parse_struct st ~is_linear:true in
+             loop (td :: acc)
+         | TEnum ->
+             let td = parse_enum st ~is_linear:true in
+             loop (td :: acc)
+         | t -> raise (Parse_error
+           (Printf.sprintf "expected `struct` or `enum` after `linear`, got %s"
+              (Token.show t))))
     | TType ->
         advance st;
         let name = match eat st with
@@ -838,7 +856,7 @@ let parse (toks : token list) : program =
         let e = parse_extern st in
         loop (TopExtern e :: acc)
     | t -> raise (Parse_error
-      (Printf.sprintf "expected `use`, `fn`, `struct`, `enum`, or `extern` at top level, got %s"
+      (Printf.sprintf "expected `use`, `fn`, `struct`, `enum`, `linear`, `type`, or `extern` at top level, got %s"
          (Token.show t)))
   in
   loop []

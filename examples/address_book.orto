@@ -15,7 +15,7 @@
 // The whole thing prints to stdout.
 
 use io::{print, println};
-use str::{bytes_eq, concat_all, parse_int, int_to_bytes, lookup};
+use str::{concat_all, parse_int, int_to_bytes, lookup};
 use db::{Person, all_users, find_by_id, search_by_name};
 
 // ---------- formatting helpers ----------
@@ -87,11 +87,13 @@ fn handle_unknown(req_r: Region, cmd: Array[byte]) -> Array[byte] {
 
 fn handle_request(req_r: Region, users: Array[Person], req: Array[byte]) -> Array[byte] {
     let cmd = lookup(req, "cmd");
-    if bytes_eq(cmd, "count")       { handle_count(req_r, users) }
-    else if bytes_eq(cmd, "find")   { handle_find(req_r, users, req) }
-    else if bytes_eq(cmd, "search") { handle_search(req_r, users, req) }
-    else if bytes_eq(cmd, "list")   { handle_list(req_r, users) }
-    else                            { handle_unknown(req_r, cmd) }
+    match cmd {
+        "count"  => handle_count(req_r, users),
+        "find"   => handle_find(req_r, users, req),
+        "search" => handle_search(req_r, users, req),
+        "list"   => handle_list(req_r, users),
+        _        => handle_unknown(req_r, cmd),
+    }
 }
 
 // ---------- entry ----------

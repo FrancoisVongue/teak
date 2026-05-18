@@ -34,8 +34,8 @@ static void drop_Region(Region r) {
     ORTO_REGION_FREE_HEAD = r.slot;
 }
 
-static const uint8_t ORTO_STATIC_BYTES[1] = { 0x00 };
-#define ORTO_STATIC_BYTES_LEN 0
+static const uint8_t ORTO_STATIC_BYTES[23] = { 0x66, 0x69, 0x72, 0x73, 0x74, 0x20, 0x6c, 0x69, 0x6e, 0x65, 0x0a, 0x73, 0x65, 0x63, 0x6f, 0x6e, 0x64, 0x20, 0x6c, 0x69, 0x6e, 0x65, 0x0a };
+#define ORTO_STATIC_BYTES_LEN 23
 
 static void orto_init_regions(void) __attribute__((constructor));
 static void orto_init_regions(void) {
@@ -53,71 +53,60 @@ static void orto_init_regions(void) {
     ORTO_REGION_FREE_HEAD = 1;
 }
 
+typedef struct file_handle__File file_handle__File;
+
+typedef struct { int slot; int offset; int len; int expected_gen; } Array_byte;
+
+typedef int (*fn_int_ptr_byte_int_to_int)(int, uint8_t*, int);
+
+typedef file_handle__File (*fn_to_file_handle__File)(void);
+
+typedef int (*fn_file_handle__File_Array_byte_to_int)(file_handle__File, Array_byte);
+
 typedef int (*fn_int_to_int)(int);
 
-typedef int (*fn_int_to_bool)(int);
+struct file_handle__File {
+    int fd;
+};
 
-typedef int (*fn_fn_int_to_int_int_to_int)(fn_int_to_int, int);
+extern int close(int fd);
 
-typedef int (*fn_fn_int_to_bool_int_to_bool)(fn_int_to_bool, int);
+extern int write(int fd, uint8_t* buf, int n);
 
-int higher_order__is_even(int x);
+extern int putchar(int c);
 
-int higher_order__inc(int x);
+file_handle__File file_handle__open_stdout(void);
 
-int higher_order__twice(fn_int_to_int f, int x);
-
-int higher_order__apply_int_bool(fn_int_to_bool f, int x);
-
-int higher_order__dbl(int x);
-
-int higher_order__add5(int x);
+int file_handle__write_str(file_handle__File f, Array_byte s);
 
 int main(void);
 
-int higher_order__apply_int_int(fn_int_to_int f, int x);
+int file_handle__drop_File(file_handle__File f);
 
-int higher_order__is_even(int x) {
-    return ((x % 2) == 0);
+file_handle__File file_handle__open_stdout(void) {
+    return ((file_handle__File){ .fd = 1 });
 }
 
-int higher_order__inc(int x) {
-    return (x + 1);
-}
-
-int higher_order__twice(fn_int_to_int f, int x) {
-    return f(f(x));
-}
-
-int higher_order__apply_int_bool(fn_int_to_bool f, int x) {
-    return f(x);
-}
-
-int higher_order__dbl(int x) {
-    return (x * 2);
-}
-
-int higher_order__add5(int x) {
-    return (x + 5);
+int file_handle__write_str(file_handle__File f, Array_byte s) {
+    Array_byte _a_1 = s;
+    if (ORTO_REGIONS[_a_1.slot].gen != _a_1.expected_gen) abort();
+    uint8_t* _data_2 = (uint8_t*)(ORTO_REGIONS[_a_1.slot].buffer + _a_1.offset);
+    (void)(write(f.fd, _data_2, s.len));
+    return 0;
 }
 
 int main(void) {
-    int a_1 = higher_order__twice(higher_order__inc, 10);
-    int b_2 = higher_order__twice(higher_order__dbl, 3);
-    int c_3 = higher_order__apply_int_int(higher_order__add5, 20);
-    int d_bool_4 = higher_order__apply_int_bool(higher_order__is_even, 6);
-    int tmp_1;
-    if (d_bool_4) {
-        tmp_1 = 100;
-    } else {
-        tmp_1 = 0;
-    }
-    int d_5 = tmp_1;
-    fn_int_to_int f_6 = higher_order__inc;
-    int e_7 = f_6(f_6(f_6(5)));
-    return ((((a_1 + b_2) + c_3) + d_5) + e_7);
+    file_handle__File f_1 = file_handle__open_stdout();
+    (void)(file_handle__write_str(f_1, ((Array_byte){ .slot = 0, .offset = 0, .len = 11, .expected_gen = 1 })));
+    (void)(file_handle__write_str(f_1, ((Array_byte){ .slot = 0, .offset = 11, .len = 12, .expected_gen = 1 })));
+    (void)(putchar(65));
+    (void)(putchar(10));
+    int _let_result_1 = 0;
+    file_handle__drop_File(f_1);
+    return _let_result_1;
 }
 
-int higher_order__apply_int_int(fn_int_to_int f, int x) {
-    return f(x);
+int file_handle__drop_File(file_handle__File f) {
+    (void)(close(f.fd));
+    return 0;
 }

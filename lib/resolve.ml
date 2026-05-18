@@ -245,6 +245,7 @@ let rec resolve_expr
   | EArrayData a -> EArrayData (r a)
   | EDeref p -> EDeref (r p)
   | ETryAt (a, i) -> ETryAt (r a, r i)
+  | EDrop e -> EDrop (r e)
 
 let resolve_decl
     (map : (string * string) list) (mod_name : string) (decl : top_decl)
@@ -259,16 +260,17 @@ let resolve_decl
       })
   | TopType td ->
       let type_params = td.type_params in
-      (* Within a type decl's variant types, type-parameter names like
-         T are 'locals' — they must not be looked up in the global
-         resolution map. *)
       let locals = type_params in
       let variants = List.map (fun v ->
         { ctor_name = m_name v.ctor_name;
           arg_tys = List.map (resolve_ty map locals) v.arg_tys })
         td.variants
       in
-      Some (TopType { type_name = m_name td.type_name; type_params; variants })
+      Some (TopType {
+        type_name = m_name td.type_name;
+        type_params; variants;
+        is_linear = td.is_linear;
+      })
   | TopRecord rd ->
       let type_params = rd.rec_type_params in
       let locals = type_params in
@@ -279,6 +281,7 @@ let resolve_decl
         rec_name = m_name rd.rec_name;
         rec_type_params = type_params;
         rec_fields;
+        rec_is_linear = rd.rec_is_linear;
       })
   | TopFunc f ->
       let type_params = f.type_params in
@@ -370,6 +373,7 @@ let expand_in_expr (aliases : (string * ty) list) (e : expr) : expr =
     | EArrayData a -> EArrayData (ex a)
     | EDeref p -> EDeref (ex p)
     | ETryAt (a, i) -> ETryAt (ex a, ex i)
+    | EDrop e -> EDrop (ex e)
   in
   ex e
 
@@ -379,10 +383,12 @@ let expand_in_decl (aliases : (string * ty) list) (d : top_decl) : top_decl =
   | TopType td ->
       TopType { td with variants =
         List.map (fun v ->
-          { v with arg_tys = List.map xt v.arg_tys }) td.variants }
+          { v with arg_tys = List.map xt v.arg_tys }) td.variants;
+        is_linear = td.is_linear; }
   | TopRecord rd ->
       TopRecord { rd with rec_fields =
-        List.map (fun (f, t) -> (f, xt t)) rd.rec_fields }
+        List.map (fun (f, t) -> (f, xt t)) rd.rec_fields;
+        rec_is_linear = rd.rec_is_linear; }
   | TopFunc f ->
       TopFunc { f with
         params = List.map (fun (n, t) -> (n, xt t)) f.params;

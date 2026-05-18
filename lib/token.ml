@@ -28,6 +28,8 @@ type token =
   | TExtern
   | TStruct
   | TEnum
+  | TLinear        (* linear — marks a struct/enum as move-only with user drop *)
+  | TDrop          (* drop(x) — consume and run the type's destructor *)
   | TUse           (* use mod::item; — selective import *)
   | TArray        (* array — sized buffer allocated in a region *)
   | TLen          (* len — array length *)
@@ -105,6 +107,8 @@ let show = function
   | TExtern       -> "EXTERN"
   | TStruct       -> "STRUCT"
   | TEnum         -> "ENUM"
+  | TLinear       -> "LINEAR"
+  | TDrop         -> "DROP"
   | TUse          -> "USE"
   | TArray        -> "ARRAY"
   | TLen          -> "LEN"

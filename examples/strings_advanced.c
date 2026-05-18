@@ -18,8 +18,21 @@ struct Region_slot {
     int next_free;   /* -1 if in use, else next free slot id */
     int is_stack;    /* 1 if buffer is stack memory (do not free) */
 };
+typedef struct { int slot; int expected_gen; } Region;
 static struct Region_slot ORTO_REGIONS[ORTO_REGION_SLOTS];
 static int ORTO_REGION_FREE_HEAD = -1;
+
+static void drop_Region(Region r) {
+    if (ORTO_REGIONS[r.slot].gen != r.expected_gen) return;
+    if (!ORTO_REGIONS[r.slot].is_stack)
+        free(ORTO_REGIONS[r.slot].buffer);
+    ORTO_REGIONS[r.slot].buffer = NULL;
+    ORTO_REGIONS[r.slot].buffer_size = 0;
+    ORTO_REGIONS[r.slot].used = 0;
+    ORTO_REGIONS[r.slot].gen++;
+    ORTO_REGIONS[r.slot].next_free = ORTO_REGION_FREE_HEAD;
+    ORTO_REGION_FREE_HEAD = r.slot;
+}
 
 static const uint8_t ORTO_STATIC_BYTES[3] = { 0x68, 0x69, 0x0a };
 #define ORTO_STATIC_BYTES_LEN 3
@@ -39,7 +52,6 @@ static void orto_init_regions(void) {
     ORTO_REGIONS[0].next_free = -1;
     ORTO_REGION_FREE_HEAD = 1;
 }
-typedef struct { int slot; int expected_gen; } Region;
 
 typedef struct { int slot; int offset; int len; int expected_gen; } Array_byte;
 
@@ -136,6 +148,6 @@ int main(void) {
     if (_i_15 < 0 || _i_15 >= _a_14.len) abort();
     uint8_t _idx_16 = ((uint8_t*)(ORTO_REGIONS[_a_14.slot].buffer + _a_14.offset))[_i_15];
     int _let_result_17 = ((int)(_idx_16));
-    if (ORTO_REGIONS[r_3.slot].gen == r_3.expected_gen) { if (!ORTO_REGIONS[r_3.slot].is_stack) free(ORTO_REGIONS[r_3.slot].buffer); ORTO_REGIONS[r_3.slot].buffer = NULL; ORTO_REGIONS[r_3.slot].buffer_size = 0; ORTO_REGIONS[r_3.slot].used = 0; ORTO_REGIONS[r_3.slot].gen++; ORTO_REGIONS[r_3.slot].next_free = ORTO_REGION_FREE_HEAD; ORTO_REGION_FREE_HEAD = r_3.slot; }
+    drop_Region(r_3);
     return _let_result_17;
 }

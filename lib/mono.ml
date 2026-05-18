@@ -62,6 +62,15 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
       Queue.add (name, ts) fn_queue
     end
   in
+  (* For a linear ADT/record instantiation, force-include its drop fn
+     in the mono'd output. The drop fn is non-generic and named by the
+     `drop_fn_name_for` convention applied to the mono'd type name. *)
+  let request_drop_for_linear (orig_name : string) (ts : ty list) (is_linear : bool) =
+    if is_linear then
+      let mono_name = mangle_name orig_name ts in
+      let drop_name = Check.drop_fn_name_for mono_name in
+      request_fn drop_name []
+  in
   let request_adt name ts =
     if not (Hashtbl.mem adt_seen (name, ts)) then begin
       Hashtbl.add adt_seen (name, ts) ();
@@ -80,6 +89,19 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
   List.iter (fun (rd : record_decl) ->
     Hashtbl.replace record_names rd.rec_name ()) prog.records;
   let is_record_name n = Hashtbl.mem record_names n in
+
+  let record_linear : (string, unit) Hashtbl.t =
+    Hashtbl.create (List.length prog.records)
+  in
+  List.iter (fun (rd : record_decl) ->
+    if rd.rec_is_linear then Hashtbl.replace record_linear rd.rec_name ())
+    prog.records;
+  let adt_linear : (string, unit) Hashtbl.t =
+    Hashtbl.create (List.length prog.types)
+  in
+  List.iter (fun (td : type_decl) ->
+    if td.is_linear then Hashtbl.replace adt_linear td.type_name ())
+    prog.types;
 
   let rec rewrite_ty (subst : (string * ty) list) (t : ty) : ty =
     match t with
@@ -106,8 +128,13 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         failwith "mono rewrite_ty: byte takes no type arguments"
     | TyApp (n, args) ->
         let args = List.map (rewrite_ty subst) args in
-        if is_record_name n then request_rec n args
-        else request_adt n args;
+        if is_record_name n then begin
+          request_rec n args;
+          request_drop_for_linear n args (Hashtbl.mem record_linear n)
+        end else begin
+          request_adt n args;
+          request_drop_for_linear n args (Hashtbl.mem adt_linear n)
+        end;
         TyApp (mangle_name n args, [])
     | TyFun (args, ret) ->
         TyFun (List.map (rewrite_ty subst) args, rewrite_ty subst ret)
@@ -230,6 +257,8 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         Check.T.TEReturn (rewrite_expr subst v, rt t)
     | Check.T.TETryAt (a, i, t) ->
         Check.T.TETryAt (rewrite_expr subst a, rewrite_expr subst i, rt t)
+    | Check.T.TEDrop (e, t) ->
+        Check.T.TEDrop (rewrite_expr subst e, rt t)
   in
 
   request_fn "main" [];
@@ -296,6 +325,7 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
           type_name   = mangle_name name ts;
           type_params = [];
           variants    = new_variants;
+          is_linear   = orig.is_linear;
         } in
         Hashtbl.replace mono_adts mono.type_name mono
       done;
@@ -314,6 +344,7 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
           rec_name        = mangle_name name ts;
           rec_type_params = [];
           rec_fields      = new_fields;
+          rec_is_linear   = orig.rec_is_linear;
         } in
         Hashtbl.replace mono_recs mono.rec_name mono
       done;
