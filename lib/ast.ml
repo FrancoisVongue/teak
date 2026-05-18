@@ -60,7 +60,8 @@ type expr =
   | EBreak                                (* break;    — valid only inside while *)
   | EContinue                             (* continue; — valid only inside while *)
   | EReturn of expr                       (* return v; — early exit from enclosing fn *)
-  | EMatch  of expr * (pat * expr) list
+  | EMatch  of expr * (pat * expr option * expr) list
+                                          (* (pattern, optional `if guard`, body) *)
   | EArray  of expr * expr * expr         (* array(r, N, init) — allocate N slots in region r *)
   | EArrayLit of expr * expr list         (* array(r, [v0, v1, ...]) — allocate and initialize *)
   | ERegion of expr                       (* region(N) — heap arena, malloc'd block *)
@@ -225,9 +226,13 @@ let rec show_expr = function
   | EContinue -> "continue"
   | EReturn e -> Printf.sprintf "return %s" (show_expr e)
   | EMatch (e, arms) ->
-      let arm_strs = List.map (fun (p, body) ->
-        Printf.sprintf "%s => %s" (show_pat p) (show_expr body))
-        arms
+      let arm_strs = List.map (fun (p, guard, body) ->
+        let g = match guard with
+          | None -> ""
+          | Some g -> Printf.sprintf " if %s" (show_expr g)
+        in
+        Printf.sprintf "%s%s => %s"
+          (show_pat p) g (show_expr body)) arms
       in
       Printf.sprintf "match %s { %s }"
         (show_expr e) (String.concat ", " arm_strs)

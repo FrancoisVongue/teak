@@ -39,7 +39,8 @@ module T = struct
                      auto_drop=true means: when control leaves this Let,
                      emit a runtime drop of the bound variable. Used for
                      Region bindings that are not consumed. *)
-    | TEMatch  of expr * ty * (pat * expr) list * ty
+    | TEMatch  of expr * ty * (pat * expr option * expr) list * ty
+                  (* scrut, scrut_ty, arms (pattern + optional guard + body), result_ty *)
     | TEArray  of expr * expr * expr * ty
                   (* array(r, N, init) — allocate in region r, result is Array[T] *)
     | TEArrayLit of expr * expr list * ty
@@ -725,7 +726,7 @@ let pat_kind_name = function
 let check_match_arms_structure
   (env : env)
   (kind : scrut_kind)
-  (arms : (pat * 'a) list) : unit =
+  (arms : (pat * 'g option * 'a) list) : unit =
   let all_ctors = match kind with
     | SK_Adt name ->
         let td = List.assoc name env.types in
@@ -734,7 +735,7 @@ let check_match_arms_structure
   in
   let seen_ctors = Hashtbl.create 8 in
   let catchall_seen = ref false in
-  let register_ctor c =
+  let register_ctor ~guarded c =
     if Hashtbl.mem seen_ctors c then
       raise (Type_error
         (Printf.sprintf "duplicate pattern %S in match" c));
@@ -743,9 +744,13 @@ let check_match_arms_structure
         (Printf.sprintf
            "constructor %S does not belong to %s"
            c (pat_kind_name kind)));
-    Hashtbl.add seen_ctors c ()
+    (* A guarded arm doesn't fully cover its constructor — the guard
+       could fail at runtime, leaving the case unhandled. Don't mark
+       as seen so the same ctor can appear in a later unguarded arm. *)
+    if not guarded then Hashtbl.add seen_ctors c ()
   in
-  List.iter (fun (p, _) ->
+  List.iter (fun (p, guard, _) ->
+    let guarded = guard <> None in
     if !catchall_seen then
       raise (Type_error "unreachable pattern after wildcard or bind");
     if not (pat_compatible_with_kind kind p) then
@@ -753,9 +758,10 @@ let check_match_arms_structure
         (Printf.sprintf
            "pattern %s is not valid for a %s scrutinee"
            (show_pat p) (pat_kind_name kind)));
-    if is_catchall_pat p then catchall_seen := true
+    (* Only an unguarded catch-all is truly catch-all. *)
+    if is_catchall_pat p && not guarded then catchall_seen := true
     else match p with
-    | PCtor (c, _) -> register_ctor c
+    | PCtor (c, _) -> register_ctor ~guarded c
     | POr pats ->
         List.iter (function
           | PCtor (c, vs) ->
@@ -764,7 +770,7 @@ let check_match_arms_structure
                   (Printf.sprintf
                      "or-pattern arm %S(...) must not bind variables"
                      c));
-              register_ctor c
+              register_ctor ~guarded c
           | PInt _ | PBool _ | PStr _ -> ()
           | _ ->
               raise (Type_error
@@ -773,8 +779,6 @@ let check_match_arms_structure
     | PInt _ | PBool _ | PStr _ -> ()
     | _ -> ()
   ) arms;
-  (* Exhaustivity. Only ADT and Bool can be exhaustive without a
-     catch-all — Int / Byte / Bytes always need one. *)
   if not !catchall_seen then begin
     match kind with
     | SK_Adt _ ->
@@ -787,7 +791,8 @@ let check_match_arms_structure
                (String.concat ", " missing)))
     | SK_Bool ->
         let bool_present b =
-          List.exists (fun (p, _) ->
+          List.exists (fun (p, guard, _) ->
+            guard = None &&
             let rec check = function
               | PBool b' -> b' = b
               | POr ps -> List.exists check ps
@@ -796,13 +801,13 @@ let check_match_arms_structure
         in
         if not (bool_present true && bool_present false) then
           raise (Type_error
-            "non-exhaustive bool match: must cover both `true` and `false`, \
-             or include a wildcard arm")
+            "non-exhaustive bool match: must cover both `true` and `false` \
+             unguarded, or include a catch-all arm")
     | _ ->
         raise (Type_error
           (Printf.sprintf
-             "non-exhaustive %s match: a wildcard (`_`) or bind arm is required \
-              because the value domain is not enumerable"
+             "non-exhaustive %s match: an unguarded catch-all (`_` or bind) \
+              is required because the value domain is not enumerable"
              (pat_kind_name kind)))
   end
 
@@ -1160,7 +1165,18 @@ let rec infer (env : env) (tparams : string list)
       let (tscrut, tscrut_ty) = infer env tparams vars scrut in
       let kind = scrutinee_kind env tscrut_ty in
       check_match_arms_structure env kind arms;
-      let typed_arms = List.map (fun (pat, body) ->
+      (* v1 restriction: guards are only allowed on non-ADT match.
+         For ADT match, the same effect is available by writing the
+         `if` inside the arm body. *)
+      (match kind with
+       | SK_Adt _ ->
+           List.iter (fun (_, g, _) ->
+             if g <> None then
+               raise (Type_error
+                 "match guards are not yet supported in ADT match; \
+                  put the `if` inside the arm body instead")) arms
+       | _ -> ());
+      let typed_arms = List.map (fun (pat, guard, body) ->
         let body_vars =
           match pat with
           | PBind "_" -> vars
@@ -1190,11 +1206,6 @@ let rec infer (env : env) (tparams : string list)
                 if v = "_" then acc else (v, (t, false)) :: acc)
                 vars vs arg_tys
           | POr pats ->
-              (* For ADT or-patterns: unify scrut with first ctor's
-                 owner; structural check has already verified all arms
-                 belong to the same ADT. For literal or-patterns
-                 (PInt/PBool/PStr): scrut type already constrained by
-                 scrutinee_kind, no extra unify needed. *)
               (match pats with
                | PCtor (c, _) :: _ ->
                    let info = List.assoc c env.ctors in
@@ -1211,8 +1222,20 @@ let rec infer (env : env) (tparams : string list)
               vars
           | PInt _ | PBool _ | PStr _ -> vars
         in
+        let typed_guard = match guard with
+          | None -> None
+          | Some g ->
+              let (tg, tg_ty) = infer env tparams body_vars g in
+              (try unify tg_ty TyBool
+               with Type_error _ ->
+                 raise (Type_error
+                   (Printf.sprintf
+                      "match guard must be bool, got %s"
+                      (show_ty (zonk tg_ty)))));
+              Some tg
+        in
         let (tbody, tbody_ty) = infer env tparams body_vars body in
-        ((pat, tbody), tbody_ty)) arms
+        ((pat, typed_guard, tbody), tbody_ty)) arms
       in
       let first_ty = snd (List.hd typed_arms) in
       List.iter (fun (_, t) -> unify first_ty t) typed_arms;
@@ -1597,7 +1620,9 @@ let rec zonk_expr (e : T.expr) : T.expr =
       T.TELet (x, zonk_expect vt, zonk_expr v,
                zonk_expr b, zonk_expect bt, ad)
   | T.TEMatch (s, st, arms, rt) ->
-      let arms = List.map (fun (p, b) -> (p, zonk_expr b)) arms in
+      let arms = List.map (fun (p, g, b) ->
+        (p, Option.map zonk_expr g, zonk_expr b)) arms
+      in
       T.TEMatch (zonk_expr s, zonk_expect st, arms, zonk_expect rt)
   | T.TEArray (r, n, v, t) ->
       T.TEArray (zonk_expr r, zonk_expr n, zonk_expr v, zonk_expect t)
@@ -1768,7 +1793,7 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       let (scrut', live) = check_moves_expr env live false scrut in
       (* Compute binding types for each pattern by substituting the
          scrutinee's concrete type arguments into the ctor's arg types. *)
-      let arm_data = List.map (fun (pat, body) ->
+      let arm_data = List.map (fun (pat, guard, body) ->
         let names_tys = match pat with
           | POr _ -> []
           | PInt _ | PBool _ | PStr _ -> []
@@ -1794,20 +1819,26 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
         let live_arm =
           List.fold_left (fun l (v, t) -> SM.add v t l) live names_tys
         in
+        let (guard', live_after_guard) = match guard with
+          | None -> (None, live_arm)
+          | Some g ->
+              let (g', live') = check_moves_expr env live_arm false g in
+              (Some g', live')
+        in
         let (body', live_after) =
-          check_moves_expr env live_arm in_tail body
+          check_moves_expr env live_after_guard in_tail body
         in
         let live_after_restore = List.fold_left (fun l (v, prev) ->
           match prev with
           | Some t -> SM.add v t l
           | None -> SM.remove v l) live_after outer_had
         in
-        (pat, body', live_after_restore)
+        (pat, guard', body', live_after_restore)
       ) arms in
       (match arm_data with
        | [] -> (T.TEMatch (scrut', scrut_ty, [], ty), live)
-       | (_, _, first_live) :: rest ->
-           List.iteri (fun i (_, _, l) ->
+       | (_, _, _, first_live) :: rest ->
+           List.iteri (fun i (_, _, _, l) ->
              if not (SM.equal (fun _ _ -> true) first_live l) then
                raise (Type_error
                  (Printf.sprintf
@@ -1818,7 +1849,7 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
                     (i + 2)
                     (String.concat ", " (List.map fst (SM.bindings l))))))
              rest;
-           let arms' = List.map (fun (p, b, _) -> (p, b)) arm_data in
+           let arms' = List.map (fun (p, g, b, _) -> (p, g, b)) arm_data in
            (T.TEMatch (scrut', scrut_ty, arms', ty), first_live))
 
   | T.TEArray (r, n, v, ty) ->

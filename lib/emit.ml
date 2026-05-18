@@ -136,7 +136,9 @@ let rec collect_expr (e : Check.T.expr) : unit =
       collect_ty vt; collect_expr v; collect_expr b; collect_ty bt
   | Check.T.TEMatch (s, st, arms, rt) ->
       collect_expr s; collect_ty st;
-      List.iter (fun (_, body) -> collect_expr body) arms;
+      List.iter (fun (_, g, body) ->
+        Option.iter collect_expr g;
+        collect_expr body) arms;
       collect_ty rt
   | Check.T.TEArray (r, n, v, t) ->
       collect_expr r; collect_expr n; collect_expr v; collect_ty t
@@ -291,16 +293,19 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
           TELet (x', vt, v', rn env' body, bt, ad)
     | TEMatch (s, st, arms, rt) ->
         let s' = rn env s in
+        let rn_arm (_, guard, body) (new_p, env') =
+          let g' = Option.map (rn env') guard in
+          (new_p, g', rn env' body)
+        in
         let arms' =
-          List.map (fun (p, body) ->
+          List.map (fun (p, guard, body) ->
             match p with
-            | POr _ -> (p, rn env body)
-            | PInt _ | PBool _ | PStr _ -> (p, rn env body)
-            | PBind "_" -> (p, rn env body)
+            | POr _ | PInt _ | PBool _ | PStr _ | PBind "_" ->
+                rn_arm (p, guard, body) (p, env)
             | PBind x ->
                 let x' = fresh x in
                 let env' = (x, x') :: env in
-                (PBind x', rn env' body)
+                rn_arm (p, guard, body) (PBind x', env')
             | PCtor (c, names) ->
                 let pairs =
                   List.map (fun n ->
@@ -308,7 +313,7 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
                 in
                 let new_names = List.map snd pairs in
                 let env' = pairs @ env in
-                (PCtor (c, new_names), rn env' body)) arms
+                rn_arm (p, guard, body) (PCtor (c, new_names), env')) arms
         in
         TEMatch (s', st, arms', rt)
     | TEArray (r, n, v, t) ->
@@ -682,7 +687,9 @@ let rec emit_expr
         | _ -> true
       in
       if is_adt_scrut then begin
-        let emit_arm (pat, body) =
+        let emit_arm (pat, _guard, body) =
+          (* Guards on ADT match are rejected in check.ml — no guard
+             handling needed here. *)
           let bindings = match pat with
             | POr _ -> []
             | PBind "_" -> []
@@ -724,7 +731,7 @@ let rec emit_expr
           | _ -> failwith "emit: literal pattern in ADT match"
         in
         let arm_blocks = List.concat_map emit_arm arms in
-        let has_catchall = List.exists (fun (p, _) ->
+        let has_catchall = List.exists (fun (p, _, _) ->
           match p with PBind _ -> true | _ -> false) arms in
         let trailing =
           if has_catchall then []
@@ -765,43 +772,54 @@ let rec emit_expr
           in
           single pat
         in
-        let emit_arm idx (pat, body) =
+        (* Each arm sits in its own `{ ... }` block inside a
+           `do { ... } while (0)`. A binding (PBind) becomes a local
+           declaration ABOVE the guard test, so the guard can refer
+           to the bound name. `break` exits the whole match. *)
+        let emit_arm (pat, guard, body) =
           let cb = emit_expr ctor_map body in
-          let is_catchall = is_catchall_pat_emit pat in
-          let bind_stmt = match pat with
+          let bind_decl = match pat with
             | PBind x when x <> "_" ->
-                [Printf.sprintf "    %s %s = %s;" (c_type scrut_ty) x scrut_var]
+                [Printf.sprintf "    %s %s = %s;"
+                   (c_type scrut_ty) x scrut_var]
             | _ -> []
           in
+          let test =
+            let p = pat_test pat in
+            match guard with
+            | None -> p
+            | Some g_e ->
+                let cg = emit_expr ctor_map g_e in
+                if cg.stmts <> [] then
+                  failwith "emit: match guard with side-effect stmts not supported";
+                Printf.sprintf "(%s) && (%s)" p cg.value
+          in
           let body_lines =
-            bind_stmt
-            @ (List.map (fun s -> "    " ^ s) cb.stmts)
-            @ [Printf.sprintf "    %s = %s;" result_var cb.value]
+            (List.map (fun s -> "        " ^ s) cb.stmts)
+            @ [Printf.sprintf "        %s = %s;" result_var cb.value]
+            @ ["        break;"]
           in
-          let head =
-            if idx = 0 then
-              if is_catchall then "if (1) {"
-              else Printf.sprintf "if (%s) {" (pat_test pat)
-            else if is_catchall then "else {"
-            else Printf.sprintf "else if (%s) {" (pat_test pat)
-          in
-          [head] @ body_lines @ ["}"]
+          ["{"]
+          @ bind_decl
+          @ [Printf.sprintf "    if (%s) {" test]
+          @ body_lines
+          @ ["    }"]
+          @ ["}"]
         in
-        let chain = List.concat (List.mapi emit_arm arms) in
-        let has_catchall = List.exists (fun (p, _) -> is_catchall_pat_emit p) arms in
+        let arm_blocks = List.concat_map emit_arm arms in
+        let has_unguarded_catchall = List.exists (fun (p, g, _) ->
+          is_catchall_pat_emit p && g = None) arms in
         let safety =
-          if has_catchall then []
-          else
-            (* Should be unreachable for bool that covers both; for
-               int/byte/bytes check.ml requires a catch-all so we never
-               reach here. Defensive abort just in case. *)
-            ["else { abort(); }"]
+          if has_unguarded_catchall then []
+          else ["abort();   /* exhaustive-by-construction safety net */"]
         in
         let stmts =
           cs.stmts
           @ [scrut_decl; result_decl]
-          @ chain
-          @ safety
+          @ ["do {"]
+          @ (List.map (fun s -> "    " ^ s) arm_blocks)
+          @ (List.map (fun s -> "    " ^ s) safety)
+          @ ["} while (0);"]
         in
         { stmts; value = result_var }
       end

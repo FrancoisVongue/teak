@@ -201,8 +201,8 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
                        rewrite_expr subst v,
                        rewrite_expr subst b, rt bt, ad)
     | Check.T.TEMatch (s, st, arms, rty) ->
-        let arms = List.map (fun (p, b) ->
-          (p, rewrite_expr subst b)) arms in
+        let arms = List.map (fun (p, g, b) ->
+          (p, Option.map (rewrite_expr subst) g, rewrite_expr subst b)) arms in
         Check.T.TEMatch (rewrite_expr subst s, rt st, arms, rt rty)
 
     | Check.T.TEArray (r, n, v, t) ->

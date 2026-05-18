@@ -187,21 +187,38 @@ Array_byte address_book__handle_request(Region req_r, Array_db__Person users, Ar
     Array_byte cmd_1 = str__lookup(req, ((Array_byte){ .slot = 0, .offset = 0, .len = 3, .expected_gen = 1 }));
     Array_byte scrut_1 = cmd_1;
     Array_byte match_result_2;
-    if ((scrut_1).len == 5 && memcmp(ORTO_REGIONS[(scrut_1).slot].buffer + (scrut_1).offset, ORTO_STATIC_BYTES + 409, 5) == 0) {
-        match_result_2 = address_book__handle_count(req_r, users);
-    }
-    else if ((scrut_1).len == 4 && memcmp(ORTO_REGIONS[(scrut_1).slot].buffer + (scrut_1).offset, ORTO_STATIC_BYTES + 414, 4) == 0) {
-        match_result_2 = address_book__handle_find(req_r, users, req);
-    }
-    else if ((scrut_1).len == 6 && memcmp(ORTO_REGIONS[(scrut_1).slot].buffer + (scrut_1).offset, ORTO_STATIC_BYTES + 418, 6) == 0) {
-        match_result_2 = address_book__handle_search(req_r, users, req);
-    }
-    else if ((scrut_1).len == 4 && memcmp(ORTO_REGIONS[(scrut_1).slot].buffer + (scrut_1).offset, ORTO_STATIC_BYTES + 424, 4) == 0) {
-        match_result_2 = address_book__handle_list(req_r, users);
-    }
-    else {
-        match_result_2 = address_book__handle_unknown(req_r, cmd_1);
-    }
+    do {
+        {
+            if ((scrut_1).len == 5 && memcmp(ORTO_REGIONS[(scrut_1).slot].buffer + (scrut_1).offset, ORTO_STATIC_BYTES + 409, 5) == 0) {
+                match_result_2 = address_book__handle_count(req_r, users);
+                break;
+            }
+        }
+        {
+            if ((scrut_1).len == 4 && memcmp(ORTO_REGIONS[(scrut_1).slot].buffer + (scrut_1).offset, ORTO_STATIC_BYTES + 414, 4) == 0) {
+                match_result_2 = address_book__handle_find(req_r, users, req);
+                break;
+            }
+        }
+        {
+            if ((scrut_1).len == 6 && memcmp(ORTO_REGIONS[(scrut_1).slot].buffer + (scrut_1).offset, ORTO_STATIC_BYTES + 418, 6) == 0) {
+                match_result_2 = address_book__handle_search(req_r, users, req);
+                break;
+            }
+        }
+        {
+            if ((scrut_1).len == 4 && memcmp(ORTO_REGIONS[(scrut_1).slot].buffer + (scrut_1).offset, ORTO_STATIC_BYTES + 424, 4) == 0) {
+                match_result_2 = address_book__handle_list(req_r, users);
+                break;
+            }
+        }
+        {
+            if (1) {
+                match_result_2 = address_book__handle_unknown(req_r, cmd_1);
+                break;
+            }
+        }
+    } while (0);
     return match_result_2;
 }
 

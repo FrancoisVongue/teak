@@ -509,9 +509,15 @@ and parse_arms st =
 
 and parse_arm st =
   let p = parse_pat st in
+  let guard =
+    if peek st = TIf then begin
+      advance st;
+      Some (parse_expr st)
+    end else None
+  in
   expect st TFatArrow;
   let body = parse_expr st in
-  (p, body)
+  (p, guard, body)
 
 and parse_pat st =
   let first = parse_single_pat st in

@@ -218,10 +218,11 @@ let rec resolve_expr
         | PBind "_" -> []
         | PBind x -> [x]
       in
-      let arms' = List.map (fun (p, body) ->
+      let arms' = List.map (fun (p, guard, body) ->
         let p' = resolve_pat p in
         let new_locals = pattern_locals p @ locals in
-        (p', resolve_expr map new_locals body)) arms
+        let guard' = Option.map (resolve_expr map new_locals) guard in
+        (p', guard', resolve_expr map new_locals body)) arms
       in
       EMatch (s', arms')
   | EArray (rg, n, v) -> EArray (r rg, r n, r v)
@@ -351,7 +352,9 @@ let expand_in_expr (aliases : (string * ty) list) (e : expr) : expr =
     | EAssign (x, v) -> EAssign (x, ex v)
     | EWhile (c, b) -> EWhile (ex c, ex b)
     | EReturn v -> EReturn (ex v)
-    | EMatch (s, arms) -> EMatch (ex s, List.map (fun (p, b) -> (p, ex b)) arms)
+    | EMatch (s, arms) ->
+        EMatch (ex s, List.map (fun (p, g, b) ->
+          (p, Option.map ex g, ex b)) arms)
     | EArray (r, n, v) -> EArray (ex r, ex n, ex v)
     | EArrayLit (r, elems) -> EArrayLit (ex r, List.map ex elems)
     | ERegion n -> ERegion (ex n)
