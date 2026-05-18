@@ -91,9 +91,6 @@ module T = struct
     name        : string;
     type_params : string list;
     params      : (string * ty) list;
-    param_drops : string list;
-                  (* Param names whose linear values are not consumed
-                     in the body. Emit frees them before return. *)
     return_ty   : ty;
     body        : expr;
   }
@@ -697,7 +694,7 @@ let scrutinee_kind (env : env) (t : ty) : scrut_kind =
            (show_ty (zonk t))))
 
 let is_catchall_pat = function
-  | PWild | PBind _ -> true
+  | PBind _ -> true
   | _ -> false
 
 (* Reject patterns that don't belong on this scrutinee kind. Also
@@ -705,7 +702,7 @@ let is_catchall_pat = function
    the next step. *)
 let rec pat_compatible_with_kind kind p =
   match kind, p with
-  | _, PWild | _, PBind _ -> true
+  | _, PBind _ -> true
   | SK_Adt _, PCtor _ -> true
   | SK_Int, PInt _ | SK_Byte, PInt _ -> true
   | SK_Bool, PBool _ -> true
@@ -808,163 +805,6 @@ let check_match_arms_structure
               because the value domain is not enumerable"
              (pat_kind_name kind)))
   end
-
-(* ---------- copyability ----------
-
-   A type is copyable iff a value can be passed/returned/duplicated
-   without losing track of who frees it. Region is copyable — it's
-   just a slot id + generation, fits in 8 bytes. The drop discipline
-   for Region is separate: the let-binding that holds a freshly
-   created Region drops it at end of scope. Aliasing one Region into
-   another let is rejected at type check (see ELet). *)
-let rec is_copyable (env : env) (t : ty) : bool =
-  match prune t with
-  | TyInt | TyBool -> true
-  | TyVar _        -> true
-  | TyFun _        -> true
-  | TyMeta _       -> true
-  | TyApp ("Region", _) -> true  (* handle: slot + gen, copies freely *)
-  | TyApp ("Array", _) -> true   (* region-backed handle, plain values *)
-  | TyApp ("byte", _)  -> true   (* primitive *)
-  | TyPtr _ -> true              (* raw C pointer, copied like an int *)
-  | TyApp (n, args) when List.mem_assoc n env.records ->
-      let rd = List.assoc n env.records in
-      let subst = List.combine rd.rec_type_params args in
-      List.for_all
-        (fun (_, fty) -> is_copyable env (subst_ty subst fty))
-        rd.rec_fields
-  | TyApp (n, args) when List.mem_assoc n env.types ->
-      let td = List.assoc n env.types in
-      let subst = List.combine td.type_params args in
-      List.for_all
-        (fun v ->
-          List.for_all
-            (fun aty -> is_copyable env (subst_ty subst aty))
-            v.arg_tys)
-        td.variants
-  | TyApp _ -> true   (* unknown name — should not occur after validate_ty *)
-
-(* ---------- consume analysis for Own ---------- *)
-
-(* Determines whether a name `x` is "consumed" — i.e. ownership flows
-   out of the current scope through x. Three ways this can happen:
-
-   1. `take(x)` is invoked somewhere in the expression tree.
-   2. `x` is passed (as a bare EVar) into a position that requires
-      moving — a function argument, a constructor argument, or a
-      record field value — when the type at that position is
-      non-copyable. The "position is non-copyable" test uses the
-      type of x itself (which after unification must match the
-      formal type), so this naturally subsumes both `Own[T]` and
-      any struct/ADT containing Own.
-   3. `x` appears in *tail position* — as the final result of some
-      branch of computation, meaning ownership flows out of the let
-      that bound it.
-
-   Reads that do not move ownership are NOT consumes: `unwrap(x)`,
-   `deref(x)`, `look(x)`, `x.field`. `ref(x)` is the legacy alloc
-   form; in the new model it would be a borrow that doesn't consume,
-   so we deliberately don't count it here. *)
-
-(* Used by takes_consume to recognise a bare consume in arg position. *)
-let consumed_in_arg (env : env) (x : string) (a : T.expr) : bool =
-  match a with
-  | T.TEVar (y, t) when y = x -> not (is_copyable env t)
-  | _ -> false
-
-(* takes_consume: does the expression contain a direct consume of `x`? *)
-let rec takes_consume (env : env) (x : string) (e : T.expr) : bool =
-  match e with
-  | T.TEInt _ | T.TEBool _ | T.TEStringLit _ | T.TEVar _ | T.TEFnRef _ -> false
-  | T.TECall (callee, args, _) ->
-      takes_consume env x callee
-      || List.exists (takes_consume env x) args
-      || List.exists (consumed_in_arg env x) args
-  | T.TEBinop (_, a, b, _) ->
-      takes_consume env x a || takes_consume env x b
-  | T.TEUnop (_, a, _) -> takes_consume env x a
-  | T.TECtor (_, _, args, _) ->
-      List.exists (takes_consume env x) args
-      || List.exists (consumed_in_arg env x) args
-  | T.TERecord (_, _, fields, _) ->
-      List.exists (fun (_, e) -> takes_consume env x e) fields
-      || List.exists (fun (_, e) -> consumed_in_arg env x e) fields
-  | T.TEField (e, _, _) -> takes_consume env x e
-  | T.TEIf (c, t, el, _) ->
-      takes_consume env x c
-      || takes_consume env x t
-      || takes_consume env x el
-  | T.TELet (y, _, v, b, _, _) ->
-      (* `let y = x` where x is non-copyable consumes x (move into y). *)
-      takes_consume env x v
-      || consumed_in_arg env x v
-      || (y <> x && takes_consume env x b)
-  | T.TEMatch (s, _, arms, _) ->
-      takes_consume env x s
-      || List.exists (fun (p, body) ->
-        let shadowed = match p with
-          | PWild -> false
-          | PCtor (_, names) -> List.mem x names
-          | POr _ -> false
-          | PInt _ | PBool _ | PStr _ -> false
-          | PBind y -> y = x
-        in
-        not shadowed && takes_consume env x body) arms
-  | T.TEArray (r, n, v, _) ->
-      takes_consume env x r || takes_consume env x n || takes_consume env x v
-  | T.TEArrayLit (r, elems, _) ->
-      takes_consume env x r
-      || List.exists (takes_consume env x) elems
-  | T.TERegion (n, _) -> takes_consume env x n
-  | T.TEStackRegion (n, _) -> takes_consume env x n
-  | T.TEAlignedRegion (n, a, _) ->
-      takes_consume env x n || takes_consume env x a
-  | T.TEIndex (a, i, _) ->
-      takes_consume env x a || takes_consume env x i
-  | T.TEAssignIdx (a, i, v, _) ->
-      takes_consume env x a || takes_consume env x i || takes_consume env x v
-  | T.TELen (e, _) -> takes_consume env x e
-  | T.TESlice (a, lo, hi, _) ->
-      takes_consume env x a
-      || takes_consume env x lo
-      || takes_consume env x hi
-  | T.TEToInt e  -> takes_consume env x e
-  | T.TEToByte e -> takes_consume env x e
-  | T.TECAlloc (_, n, _) -> takes_consume env x n
-  | T.TECFree p -> takes_consume env x p
-  | T.TENullPtr _ -> false
-  | T.TEIsNull p -> takes_consume env x p
-  | T.TEArrayData (a, _) -> takes_consume env x a
-  | T.TEDeref (p, _) -> takes_consume env x p
-  | T.TEAssign (_, v, _) -> takes_consume env x v
-  | T.TEWhile (c, b) -> takes_consume env x c || takes_consume env x b
-  | T.TEBreak | T.TEContinue -> false
-  | T.TEReturn (v, _) -> takes_consume env x v
-  | T.TETryAt (a, i, _) ->
-      takes_consume env x a || takes_consume env x i
-  | T.TEDrop (e, _) -> takes_consume env x e
-
-(* tail_consume: does x reach the tail position of the expression? *)
-let rec tail_consume (x : string) (e : T.expr) : bool =
-  match e with
-  | T.TEVar (y, _) -> y = x
-  | T.TELet (y, _, _, body, _, _) ->
-      y <> x && tail_consume x body
-  | T.TEIf (_, t, el, _) -> tail_consume x t || tail_consume x el
-  | T.TEMatch (_, _, arms, _) ->
-      List.exists (fun (p, body) ->
-        let shadowed = match p with
-          | PWild -> false
-          | PCtor (_, names) -> List.mem x names
-          | POr _ -> false
-          | PInt _ | PBool _ | PStr _ -> false
-          | PBind y -> y = x
-        in
-        not shadowed && tail_consume x body) arms
-  | _ -> false   (* any other terminal: int, ctor, call result, ... — not x *)
-
-let is_consumed (env : env) (x : string) (e : T.expr) : bool =
-  takes_consume env x e || tail_consume x e
 
 (* vars carries (name, (type, is_mut)) so EAssign can verify mutability. *)
 let rec infer (env : env) (tparams : string list)
@@ -1323,13 +1163,10 @@ let rec infer (env : env) (tparams : string list)
       let typed_arms = List.map (fun (pat, body) ->
         let body_vars =
           match pat with
-          | PWild -> vars
+          | PBind "_" -> vars
           | PBind x ->
-              if x = "_" then vars
-              else begin
-                check_not_c_reserved "pattern bind" x;
-                (x, (tscrut_ty, false)) :: vars
-              end
+              check_not_c_reserved "pattern bind" x;
+              (x, (tscrut_ty, false)) :: vars
           | PCtor (c, vs) ->
               let info = List.assoc c env.ctors in
               if List.length vs <> List.length info.ctor_args then
@@ -1873,21 +1710,21 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
   | T.TECall (callee, args, ty) ->
       let (callee', live) = check_moves_expr env live false callee in
       let (args_rev, live) = List.fold_left (fun (acc, live) a ->
-        let (a', live) = consume_arg env live a in
+        let (a', live) = check_moves_expr env live false a in
         (a' :: acc, live)) ([], live) args
       in
       (T.TECall (callee', List.rev args_rev, ty), live)
 
   | T.TECtor (c, ts, args, ty) ->
       let (args_rev, live) = List.fold_left (fun (acc, live) a ->
-        let (a', live) = consume_arg env live a in
+        let (a', live) = check_moves_expr env live false a in
         (a' :: acc, live)) ([], live) args
       in
       (T.TECtor (c, ts, List.rev args_rev, ty), live)
 
   | T.TERecord (n, ts, fields, ty) ->
       let (fields_rev, live) = List.fold_left (fun (acc, live) (f, e) ->
-        let (e', live) = consume_arg env live e in
+        let (e', live) = check_moves_expr env live false e in
         ((f, e') :: acc, live)) ([], live) fields
       in
       (T.TERecord (n, ts, List.rev fields_rev, ty), live)
@@ -1909,7 +1746,7 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       (T.TEIf (cond', t', el', ty), live_t)
 
   | T.TELet (x, vt, v, b, bt, ad) ->
-      let (v', live) = consume_arg env live v in
+      let (v', live) = check_moves_expr env live false v in
       if x = "_" then
         let (b', live) = check_moves_expr env live in_tail b in
         (T.TELet ("_", vt, v', b', bt, ad), live)
@@ -1933,10 +1770,9 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
          scrutinee's concrete type arguments into the ctor's arg types. *)
       let arm_data = List.map (fun (pat, body) ->
         let names_tys = match pat with
-          | PWild -> []
           | POr _ -> []
           | PInt _ | PBool _ | PStr _ -> []
-          | PBind x when x = "_" -> []
+          | PBind "_" -> []
           | PBind x -> [(x, scrut_ty)]
           | PCtor (c, vs) ->
               let info = List.assoc c env.ctors in
@@ -2020,7 +1856,7 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
   | T.TEAssignIdx (a, i, v, ty) ->
       let (a', live) = check_moves_expr env live false a in
       let (i', live) = check_moves_expr env live false i in
-      let (v', live) = consume_arg env live v in
+      let (v', live) = check_moves_expr env live false v in
       (T.TEAssignIdx (a', i', v', ty), live)
 
   | T.TELen (sub, ty) ->
@@ -2093,13 +1929,6 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       in
       (T.TEDrop (sub', t), live)
 
-and consume_arg (env : env) (live : ty SM.t) (e : T.expr)
-  : T.expr * ty SM.t =
-  let (e', live) = check_moves_expr env live false e in
-  match e' with
-  | T.TEVar (x, t) when not (is_copyable env t) -> (e', SM.remove x live)
-  | _ -> (e', live)
-
 (* ---------- check a function ---------- *)
 
 let check_func (env : env) (f : func) : T.func =
@@ -2121,11 +1950,10 @@ let check_func (env : env) (f : func) : T.func =
           f.name (show_ty (zonk tbody_ty)) (show_ty (zonk ret_ty)))));
   let tbody = zonk_expr tbody in
   let param_tys = List.map zonk param_tys in
-  (* Region params are borrowed from the caller — the caller's
-     creating scope frees them. Functions don't drop received Regions.
-     param_drops is reserved for future linear param types. *)
-  let _ = is_consumed in
-  let param_drops = [] in
+  (* Linear params (Region and user `linear` types) are borrowed from
+     the caller — caller's creating scope frees them. Callees never
+     drop received linear values, so there is no per-param drop logic
+     in the typed AST. *)
   let initial_live =
     List.fold_left2 (fun m (p, _) t -> SM.add p t m)
       SM.empty f.params param_tys
@@ -2137,7 +1965,6 @@ let check_func (env : env) (f : func) : T.func =
     T.type_params = f.type_params;
     T.params = List.combine
       (List.map fst f.params) param_tys;
-    T.param_drops;
     T.return_ty = ret_ty;
     T.body = body_with_moves }
 

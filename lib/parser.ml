@@ -529,7 +529,7 @@ and parse_pat st =
 
 and parse_single_pat st =
   match eat st with
-  | TUnderscore  -> PWild
+  | TUnderscore  -> PBind "_"
   | TCtorIdent c ->
       if peek st = TLParen then begin
         advance st;

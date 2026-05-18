@@ -26,13 +26,12 @@ and ty =
   | TyMeta of meta               (* unification variable, only inside the checker *)
 
 type pat =
-  | PWild
+  | PBind of string                      (* lowercase ident — binds scrutinee to name; "_" = wildcard *)
   | PCtor of string * string list
-  | POr   of pat list                    (* a | b | c — all must be PCtor with no bindings *)
+  | POr   of pat list                    (* a | b | c — all must be PCtor or literals, no bindings *)
   | PInt  of int                         (* literal int pattern *)
   | PBool of bool                        (* literal bool pattern *)
   | PStr  of string                      (* literal Array[byte] pattern *)
-  | PBind of string                      (* lowercase ident — binds scrutinee to name *)
 
 type binop =
   | OpAdd | OpSub | OpMul | OpDiv | OpMod
@@ -162,7 +161,7 @@ let rec show_ty = function
   | TyMeta { id; resolved = None } -> Printf.sprintf "?%d" id
 
 let rec show_pat = function
-  | PWild              -> "_"
+  | PBind x            -> x       (* "_" is the wildcard *)
   | PCtor (c, [])      -> c
   | PCtor (c, vs)      ->
       Printf.sprintf "%s(%s)" c (String.concat ", " vs)
@@ -171,7 +170,6 @@ let rec show_pat = function
   | PInt n  -> string_of_int n
   | PBool b -> if b then "true" else "false"
   | PStr s  -> Printf.sprintf "%S" s
-  | PBind x -> x
 
 let show_binop = function
   | OpAdd -> "+"  | OpSub -> "-"

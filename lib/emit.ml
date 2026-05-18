@@ -294,10 +294,9 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
         let arms' =
           List.map (fun (p, body) ->
             match p with
-            | PWild -> (p, rn env body)
             | POr _ -> (p, rn env body)
             | PInt _ | PBool _ | PStr _ -> (p, rn env body)
-            | PBind x when x = "_" -> (p, rn env body)
+            | PBind "_" -> (p, rn env body)
             | PBind x ->
                 let x' = fresh x in
                 let env' = (x, x') :: env in
@@ -493,7 +492,7 @@ let ty_of_expr : Check.T.expr -> ty = function
    surrounding C function returns. Used by let-scope auto_drop and
    function-end param drops. *)
 let is_catchall_pat_emit = function
-  | PWild | PBind _ -> true
+  | PBind _ -> true
   | _ -> false
 
 (* Emit a call to the right drop function for a linear type. After mono,
@@ -685,11 +684,10 @@ let rec emit_expr
       if is_adt_scrut then begin
         let emit_arm (pat, body) =
           let bindings = match pat with
-            | PWild -> []
             | POr _ -> []
-            | PBind x when x <> "_" ->
+            | PBind "_" -> []
+            | PBind x ->
                 [Printf.sprintf "    %s %s = %s;" (c_type scrut_ty) x scrut_var]
-            | PBind _ -> []
             | PCtor (c, vs) ->
                 let (_, v, _) = Hashtbl.find ctor_map c in
                 List.filter_map (fun ((var, t), i) ->
@@ -709,7 +707,7 @@ let rec emit_expr
             @ ["    break;"]
           in
           match pat with
-          | PWild | PBind _ ->
+          | PBind _ ->
               ["default: {"] @ bindings @ body_lines @ ["}"]
           | PCtor (c, _) ->
               let (_, _, tag) = Hashtbl.find ctor_map c in
@@ -727,7 +725,7 @@ let rec emit_expr
         in
         let arm_blocks = List.concat_map emit_arm arms in
         let has_catchall = List.exists (fun (p, _) ->
-          match p with PWild | PBind _ -> true | _ -> false) arms in
+          match p with PBind _ -> true | _ -> false) arms in
         let trailing =
           if has_catchall then []
           else ["default: abort();"]
@@ -762,7 +760,7 @@ let rec emit_expr
                   "(%s).len == %d && memcmp(ORTO_REGIONS[(%s).slot].buffer + (%s).offset, ORTO_STATIC_BYTES + %d, %d) == 0"
                   scrut_var len scrut_var scrut_var off len
             | POr ps -> String.concat " || " (List.map single ps)
-            | PWild | PBind _ -> "1"
+            | PBind _ -> "1"
             | PCtor _ -> failwith "emit: ctor pattern in non-ADT match"
           in
           single pat
@@ -1256,21 +1254,7 @@ let emit_func_def ctor_map (f : Check.T.func) : string =
   in
   let cb = emit_expr ctor_map f.body in
   let body_lines =
-    if f.param_drops = [] then
-      cb.stmts @ [Printf.sprintf "return %s;" cb.value]
-    else
-      let ret_var = "_ret" in
-      let param_drop_calls =
-        List.filter_map (fun pname ->
-          match List.assoc_opt pname f.params with
-          | Some pt -> Some (drop_call_stmt pname pt)
-          | None -> None) f.param_drops
-      in
-      cb.stmts
-      @ [Printf.sprintf "%s %s = %s;"
-           (c_type f.return_ty) ret_var cb.value]
-      @ param_drop_calls
-      @ [Printf.sprintf "return %s;" ret_var]
+    cb.stmts @ [Printf.sprintf "return %s;" cb.value]
   in
   let indented = List.map (fun s -> "    " ^ s) body_lines in
   Printf.sprintf "%s %s(%s) {\n%s\n}"

@@ -303,7 +303,6 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
           name        = mangle_name name ts;
           type_params = [];
           params      = new_params;
-          param_drops = orig.param_drops;
           return_ty   = new_ret;
           body        = new_body;
         } in

@@ -206,19 +206,16 @@ let rec resolve_expr
       let s' = r s in
       let rec resolve_pat p =
         match p with
-        | PWild -> PWild
         | PCtor (c, vs) -> PCtor (resolve_name map locals c, vs)
         | POr pats -> POr (List.map resolve_pat pats)
-        | PInt _ | PBool _ | PStr _ -> p
-        | PBind _ -> p
+        | PInt _ | PBool _ | PStr _ | PBind _ -> p
       in
       let pattern_locals p =
         match p with
-        | PWild -> []
         | PCtor (_, vs) -> List.filter (fun v -> v <> "_") vs
         | POr _ -> []
         | PInt _ | PBool _ | PStr _ -> []
-        | PBind x when x = "_" -> []
+        | PBind "_" -> []
         | PBind x -> [x]
       in
       let arms' = List.map (fun (p, body) ->
