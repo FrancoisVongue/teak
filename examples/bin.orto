@@ -1,0 +1,66 @@
+// std::bin — read/write multi-byte integers from/to Array[byte].
+//
+// Both endiannesses. Native serialization is just one of them; the
+// caller picks. Bounds aren't checked here — caller knows the layout.
+// Use this for netlink, sockets, file formats, anything binary.
+
+// ---------- 16-bit ----------
+
+fn read_u16_le(buf: Array[byte], off: int) -> int {
+    to_int(buf[off]) + to_int(buf[off + 1]) * 256
+}
+
+fn read_u16_be(buf: Array[byte], off: int) -> int {
+    to_int(buf[off]) * 256 + to_int(buf[off + 1])
+}
+
+fn write_u16_le(buf: Array[byte], off: int, v: int) -> int {
+    buf[off]     := to_byte(v % 256);
+    buf[off + 1] := to_byte((v / 256) % 256);
+    0
+}
+
+fn write_u16_be(buf: Array[byte], off: int, v: int) -> int {
+    buf[off]     := to_byte((v / 256) % 256);
+    buf[off + 1] := to_byte(v % 256);
+    0
+}
+
+// ---------- 32-bit ----------
+
+fn read_u32_le(buf: Array[byte], off: int) -> int {
+    to_int(buf[off])
+    + to_int(buf[off + 1]) * 256
+    + to_int(buf[off + 2]) * 65536
+    + to_int(buf[off + 3]) * 16777216
+}
+
+fn read_u32_be(buf: Array[byte], off: int) -> int {
+    to_int(buf[off]) * 16777216
+    + to_int(buf[off + 1]) * 65536
+    + to_int(buf[off + 2]) * 256
+    + to_int(buf[off + 3])
+}
+
+fn write_u32_le(buf: Array[byte], off: int, v: int) -> int {
+    buf[off]     := to_byte(v % 256);
+    buf[off + 1] := to_byte((v / 256) % 256);
+    buf[off + 2] := to_byte((v / 65536) % 256);
+    buf[off + 3] := to_byte((v / 16777216) % 256);
+    0
+}
+
+fn write_u32_be(buf: Array[byte], off: int, v: int) -> int {
+    buf[off]     := to_byte((v / 16777216) % 256);
+    buf[off + 1] := to_byte((v / 65536) % 256);
+    buf[off + 2] := to_byte((v / 256) % 256);
+    buf[off + 3] := to_byte(v % 256);
+    0
+}
+
+// ---------- detect native endianness ----------
+
+fn is_little_endian(r: Region) -> bool {
+    let probe = array(r, [to_byte(1), to_byte(0)]);
+    read_u16_le(probe, 0) == 1
+}

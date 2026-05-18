@@ -93,17 +93,20 @@
 orto-код, не compiler) и крупные архитектурные шаги, требующие
 обсуждения с Francois.
 
-### 1. Stdlib *(следующее)*
+### 1. Stdlib *(в работе)*
 
-Когда понадобится:
-- `std::gen_arena` — generational arena поверх `Array[Slot[T]]`. Handle tables, resource pools, evicting caches (где Region — bump-only).
+Сейчас в `examples/` есть прото-stdlib:
+- `str.orto` — операции над `Array[byte]`: eq, find, parse_int, concat, concat_all, split_byte, bytes_join, trim, to_lower/upper, c_str, etc.
+- `io.orto` — print, println, putchar.
+- `sys.orto` — `linear Fd` + syscall wrappers (open, read, write, close, socket, bind, sendto, recvfrom, etc.).
+- `bin.orto` — binary read/write helpers (u16/u32 LE/BE) для netlink/network protocols.
+
+Что нужно добавить (по приоритету из netlink анализа в `NETLINK_ANALYSIS.md`):
+- **Hashmap** — линейный scan `Array[(K, V)]` болезнен at scale. Hand-written without generics, или через monomorphization. Большая stdlib работа.
+- `std::gen_arena` — generational arena для resource pools, evicting caches.
 - `std::slab` — slab pool для homogeneous-size объектов.
-- `std::ring` — ring buffer / circular array для стримов.
-- `std::str` — расширить: `bytes_copy(r, s)`, `bytes_find`, `starts_with`, `ends_with`, `split`, etc.
-- `std::int` — `min`, `max`, `abs`.
-- `std::option` — `unwrap_or`, и (когда будут closures) `map`, `and_then`.
-
-Все — orto code, не compiler features. Сейчас `str.orto`, `io.orto`, `db.orto` в `examples/` — это прото-stdlib.
+- `std::ring` — ring buffer.
+- `std::result` — convention для error handling (или сами enum'ы).
 
 ---
 
@@ -113,7 +116,11 @@ orto-код, не compiler) и крупные архитектурные шаг�
 
 - **Closures / lambdas.** Сейчас только именованные функции. Closures открывают callbacks, higher-order patterns (`map`, `fold`, `filter`). Усложнение — capture analysis, runtime representation (fat pointer), interaction с linear типами.
 
-- **Threading.** Region линейный = одно владение. Передача через channel-like API. Atomic gen-counter для копий handle'ов. Базовая модель не меняется, но дизайн сборки требует разговора.
+- **Threading.** Уже expressible через linear типы — `linear struct Thread { id: int } drop_Thread = pthread_join`. Channels — `linear Sender`, `linear Receiver` с send/recv. Atomic primitives через `extern fn` (memory barriers от C). Не требует новой концепции — большая работа в stdlib + extern wrappers. См. `NETLINK_ANALYSIS.md`.
+
+- **Variadic format `format(r, "...", a, b, c)`** — сильно болит в практике (netlink error messages, debug print). Без неё `concat_all + int_to_bytes` chains.
+
+- **Generic Option/Result для linear types** — сейчас `Option[Fd]` запрещён (Fd linear, Option не linear). Workaround: возвращать raw int + wrap manually (`fd_wrap`). Чище — разрешить linear-aware generic instantiation: если T linear, container становится linear.
 
 - **`format(r, "...", a, b, c)` variadic.** Текущее `concat_all(r, array(r, [...]))` многословно. Variadic + типизированные args существенно улучшат, но variadic — серьёзная фича.
 

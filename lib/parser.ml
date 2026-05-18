@@ -266,7 +266,7 @@ and parse_args st =
 
 and parse_atom st =
   match peek st with
-  | TInt _ | TFloat _ | TTrue | TFalse | TLParen
+  | TInt _ | TFloat _ | TTrue | TFalse | TLParen | TLBrace
   | TIdent _ | TCtorIdent _
   | TStringLit _
   | TIf | TMatch | TWhile | TBreak | TContinue | TFor | TReturn
@@ -278,6 +278,12 @@ and parse_atom st =
     (Printf.sprintf "expected expression, got %s" (Token.show t)))
 
 and parse_atom_consume st =
+  match peek st with
+  | TLBrace ->
+      (* Bare `{ ... }` as an expression — a block. Useful in match
+         arm bodies where you want let-bindings before the result. *)
+      parse_block st
+  | _ ->
   match eat st with
   | TInt n      -> EInt n
   | TFloat f    -> EFloat f

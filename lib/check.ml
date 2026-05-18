@@ -504,14 +504,20 @@ let build_env
           let arg_tys =
             List.map (validate_ty type_env record_env in_scope) v.arg_tys
           in
-          List.iter (fun aty ->
-            if ty_contains_linear aty then
-              raise (Type_error
-                (Printf.sprintf
-                   "constructor %S of %S: a linear type (Own/Array) cannot \
-                    be a variant argument — linear types must be top-level \
-                    types of a name"
-                   v.ctor_name td.type_name))) arg_tys;
+          (* A non-linear ADT cannot carry linear data — its drop is
+             a no-op and the resource would silently leak. A `linear`
+             ADT can carry linears; its user-written drop_T is
+             responsible for releasing them via match + drop. *)
+          if not td.is_linear then
+            List.iter (fun aty ->
+              if ty_contains_linear aty then
+                raise (Type_error
+                  (Printf.sprintf
+                     "constructor %S of %S: a linear type cannot \
+                      be a variant argument of a non-linear ADT — \
+                      mark the ADT `linear` if you want it to own \
+                      the resource"
+                     v.ctor_name td.type_name))) arg_tys;
           { v with arg_tys })
           td.variants
       in
@@ -523,12 +529,12 @@ let build_env
       let fields =
         List.map (fun (fname, fty) ->
           let fty = validate_ty type_env record_env in_scope fty in
-          if ty_contains_linear fty then
+          if not rd.rec_is_linear && ty_contains_linear fty then
             raise (Type_error
               (Printf.sprintf
-                 "field %S of record %S: a linear type (Own/Array) cannot \
-                  be a record field — linear types must be top-level types \
-                  of a name"
+                 "field %S of record %S: a linear type cannot be a \
+                  field of a non-linear struct — mark the struct \
+                  `linear` if you want it to own the resource"
                  fname rd.rec_name));
           (fname, fty))
           rd.rec_fields

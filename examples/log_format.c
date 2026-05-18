@@ -163,22 +163,56 @@ Array_byte str__int_to_bytes(Region r, int n) {
     for (int _i_5 = 0; _i_5 < _n_2; _i_5++) _slots_4[_i_5] = ((uint8_t)(0));
     Array_byte _arr_6 = ((Array_byte){ .slot = _r_1.slot, .offset = _off_3, .len = _n_2, .expected_gen = _r_1.expected_gen });
     Array_byte dst_2 = _arr_6;
-    int pos_3 = (k_1 - 1);
-    int x_4 = n;
-    while ((pos_3 >= 0)) {
-        Array_byte _a_7 = dst_2;
-        int _i_8 = pos_3;
-        if (ORTO_REGIONS[_a_7.slot].gen != _a_7.expected_gen) abort();
-        if (_i_8 < 0 || _i_8 >= _a_7.len) abort();
-        ((uint8_t*)(ORTO_REGIONS[_a_7.slot].buffer + _a_7.offset))[_i_8] = ((uint8_t)((48 + (x_4 % 10))));
+    int neg_3 = (n < 0);
+    int tmp_7;
+    if (neg_3) {
+        tmp_7 = (0 - n);
+    } else {
+        tmp_7 = n;
+    }
+    int x_4 = tmp_7;
+    int pos_5 = (k_1 - 1);
+    int tmp_10;
+    if ((x_4 == 0)) {
+        Array_byte _a_8 = dst_2;
+        int _i_9 = 0;
+        if (ORTO_REGIONS[_a_8.slot].gen != _a_8.expected_gen) abort();
+        if (_i_9 < 0 || _i_9 >= _a_8.len) abort();
+        ((uint8_t*)(ORTO_REGIONS[_a_8.slot].buffer + _a_8.offset))[_i_9] = ((uint8_t)(48));
+        (void)(0);
+        return dst_2;
+        tmp_10 = 0;
+    } else {
+        tmp_10 = 0;
+    }
+    (void)(tmp_10);
+    while ((x_4 > 0)) {
+        Array_byte _a_11 = dst_2;
+        int _i_12 = pos_5;
+        if (ORTO_REGIONS[_a_11.slot].gen != _a_11.expected_gen) abort();
+        if (_i_12 < 0 || _i_12 >= _a_11.len) abort();
+        ((uint8_t*)(ORTO_REGIONS[_a_11.slot].buffer + _a_11.offset))[_i_12] = ((uint8_t)((48 + (x_4 % 10))));
         (void)(0);
         x_4 = (x_4 / 10);
         (void)(0);
-        pos_3 = (pos_3 - 1);
+        pos_5 = (pos_5 - 1);
         (void)(0);
         (void)(0);
     }
     (void)(0);
+    int tmp_15;
+    if (neg_3) {
+        Array_byte _a_13 = dst_2;
+        int _i_14 = 0;
+        if (ORTO_REGIONS[_a_13.slot].gen != _a_13.expected_gen) abort();
+        if (_i_14 < 0 || _i_14 >= _a_13.len) abort();
+        ((uint8_t*)(ORTO_REGIONS[_a_13.slot].buffer + _a_13.offset))[_i_14] = ((uint8_t)(45));
+        (void)(0);
+        tmp_15 = 0;
+    } else {
+        tmp_15 = 0;
+    }
+    (void)(tmp_15);
     return dst_2;
 }
 
@@ -450,34 +484,71 @@ int str__copy_into(Array_byte dst, Array_byte src, int at) {
 int str__parse_int(Array_byte s) {
     int acc_1 = 0;
     int i_2 = 0;
+    int neg_3 = 0;
+    Array_byte _a_1 = s;
+    int _i_2 = 0;
+    if (ORTO_REGIONS[_a_1.slot].gen != _a_1.expected_gen) abort();
+    if (_i_2 < 0 || _i_2 >= _a_1.len) abort();
+    uint8_t _idx_3 = ((uint8_t*)(ORTO_REGIONS[_a_1.slot].buffer + _a_1.offset))[_i_2];
+    int tmp_4;
+    if (((s.len > 0) && (_idx_3 == ((uint8_t)(45))))) {
+        neg_3 = 1;
+        (void)(0);
+        i_2 = 1;
+        (void)(0);
+        tmp_4 = 0;
+    } else {
+        tmp_4 = 0;
+    }
+    (void)(tmp_4);
     while ((i_2 < s.len)) {
-        Array_byte _a_1 = s;
-        int _i_2 = i_2;
-        if (ORTO_REGIONS[_a_1.slot].gen != _a_1.expected_gen) abort();
-        if (_i_2 < 0 || _i_2 >= _a_1.len) abort();
-        uint8_t _idx_3 = ((uint8_t*)(ORTO_REGIONS[_a_1.slot].buffer + _a_1.offset))[_i_2];
-        int n_3 = ((int)(_idx_3));
-        int tmp_4;
-        if (((n_3 < 48) || (n_3 > 57))) {
+        Array_byte _a_5 = s;
+        int _i_6 = i_2;
+        if (ORTO_REGIONS[_a_5.slot].gen != _a_5.expected_gen) abort();
+        if (_i_6 < 0 || _i_6 >= _a_5.len) abort();
+        uint8_t _idx_7 = ((uint8_t*)(ORTO_REGIONS[_a_5.slot].buffer + _a_5.offset))[_i_6];
+        int n_4 = ((int)(_idx_7));
+        int tmp_8;
+        if (((n_4 < 48) || (n_4 > 57))) {
             break;
-            tmp_4 = 0;
+            tmp_8 = 0;
         } else {
-            tmp_4 = 0;
+            tmp_8 = 0;
         }
-        (void)(tmp_4);
-        acc_1 = ((acc_1 * 10) + (n_3 - 48));
+        (void)(tmp_8);
+        acc_1 = ((acc_1 * 10) + (n_4 - 48));
         (void)(0);
         i_2 = (i_2 + 1);
         (void)(0);
         (void)(0);
     }
     (void)(0);
-    return acc_1;
+    int tmp_9;
+    if (neg_3) {
+        tmp_9 = (0 - acc_1);
+    } else {
+        tmp_9 = acc_1;
+    }
+    return tmp_9;
 }
 
 int str__digits_count(int n) {
-    int count_1 = 1;
-    int x_2 = (n / 10);
+    int tmp_1;
+    if ((n == 0)) {
+        return 1;
+        tmp_1 = 0;
+    } else {
+        tmp_1 = 0;
+    }
+    (void)(tmp_1);
+    int count_1 = 0;
+    int tmp_2;
+    if ((n < 0)) {
+        tmp_2 = (0 - n);
+    } else {
+        tmp_2 = n;
+    }
+    int x_2 = tmp_2;
     while ((x_2 > 0)) {
         count_1 = (count_1 + 1);
         (void)(0);
@@ -486,7 +557,13 @@ int str__digits_count(int n) {
         (void)(0);
     }
     (void)(0);
-    return count_1;
+    int tmp_3;
+    if ((n < 0)) {
+        tmp_3 = (count_1 + 1);
+    } else {
+        tmp_3 = count_1;
+    }
+    return tmp_3;
 }
 
 int main(void) {

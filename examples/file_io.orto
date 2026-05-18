@@ -1,0 +1,44 @@
+// File I/O via raw syscalls (open/read/write/close) wrapped in
+// linear Fd. Writes a string to /tmp, reads it back, prints to stdout.
+//
+// Pattern for descriptor-returning syscalls:
+//   - sys_*  fn returns raw int (or -1).
+//   - caller checks raw >= 0 then wraps with `fd_wrap(raw)`.
+//   - the Fd auto-closes at scope exit.
+//
+// No leaks possible: forgetting to wrap means the fd leaks at the
+// kernel level (programmer's bug, visible in syscall trace);
+// forgetting to close after wrap is impossible — drop fires.
+
+use sys::{Fd, fd_wrap, fd_read, fd_write,
+          sys_open, o_wronly, o_rdonly, o_creat, o_trunc};
+use str::c_str;
+use io::print;
+
+fn do_write(path: Array[byte]) -> int {
+    let raw = sys_open(path, o_wronly() + o_creat() + o_trunc(), 420);
+    if raw < 0 { return 1 }
+    let f = fd_wrap(raw);
+    fd_write(f, "hello from orto\n");
+    0
+    // f drops here — close(raw) is called
+}
+
+fn do_read(r: Region, path: Array[byte]) -> int {
+    let raw = sys_open(path, o_rdonly(), 0);
+    if raw < 0 { return 2 }
+    let f = fd_wrap(raw);
+    let buf = array(r, 256, to_byte(0));
+    let n = fd_read(f, buf);
+    if n <= 0 { return 3 }
+    print(slice(buf, 0, n));
+    0
+}
+
+fn main() -> int {
+    let r = region(4096);
+    let path = c_str(r, "/tmp/orto_file_io_demo.txt");
+    let w = do_write(path);
+    if w != 0 { return w }
+    do_read(r, path)
+}

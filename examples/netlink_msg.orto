@@ -1,0 +1,89 @@
+// Demo: building and parsing a Linux netlink message header,
+// without actually sending it.
+//
+// struct nlmsghdr (16 bytes):
+//   u32 nlmsg_len    — total length including header
+//   u16 nlmsg_type   — RTM_GETLINK = 18, etc.
+//   u16 nlmsg_flags  — NLM_F_REQUEST | NLM_F_DUMP = 0x0001 | 0x0300
+//   u32 nlmsg_seq    — caller-chosen sequence number
+//   u32 nlmsg_pid    — sender's PID (0 = kernel)
+//
+// Goal: prove that "build header, serialize to bytes, parse back"
+// works in plain orto with our stdlib. No `unsafe`, no reflection;
+// every byte is explicit.
+
+use io::{print, println};
+use str::{int_to_bytes, concat_all};
+use bin::{read_u32_le, read_u16_le, write_u32_le, write_u16_le};
+
+struct NlMsgHdr {
+    length:   int,
+    type_: int,
+    flags: int,
+    seq:   int,
+    pid:   int,
+}
+
+fn nl_hdr_serialize(r: Region, h: NlMsgHdr) -> Array[byte] {
+    let buf = array(r, 16, to_byte(0));
+    write_u32_le(buf, 0,  h.length);
+    write_u16_le(buf, 4,  h.type_);
+    write_u16_le(buf, 6,  h.flags);
+    write_u32_le(buf, 8,  h.seq);
+    write_u32_le(buf, 12, h.pid);
+    buf
+}
+
+fn nl_hdr_parse(buf: Array[byte]) -> NlMsgHdr {
+    NlMsgHdr {
+        length:   read_u32_le(buf, 0),
+        type_: read_u16_le(buf, 4),
+        flags: read_u16_le(buf, 6),
+        seq:   read_u32_le(buf, 8),
+        pid:   read_u32_le(buf, 12),
+    }
+}
+
+// Format a header for human display (decimal). Built piece-by-piece;
+// when we have variadic format(), this would be one line.
+fn nl_hdr_show(r: Region, h: NlMsgHdr) -> Array[byte] {
+    concat_all(r, array(r, [
+        "NlMsgHdr { len=", int_to_bytes(r, h.length),
+        " type=", int_to_bytes(r, h.type_),
+        " flags=", int_to_bytes(r, h.flags),
+        " seq=", int_to_bytes(r, h.seq),
+        " pid=", int_to_bytes(r, h.pid),
+        " }\n",
+    ]))
+}
+
+fn main() -> int {
+    let r = region(4096);
+
+    // Build a RTM_GETLINK request header.
+    let req = NlMsgHdr {
+        length:   32,          // header(16) + ifinfomsg(16)
+        type_: 18,          // RTM_GETLINK
+        flags: 769,         // NLM_F_REQUEST(1) | NLM_F_DUMP(768)
+        seq:   42,
+        pid:   0,
+    };
+
+    // Serialize.
+    let bytes = nl_hdr_serialize(r, req);
+    if len(bytes) != 16 { return 1 }
+
+    // Round-trip parse.
+    let parsed = nl_hdr_parse(bytes);
+
+    // Verify each field survived.
+    if parsed.length   != 32  { return 2 }
+    if parsed.type_ != 18  { return 3 }
+    if parsed.flags != 769 { return 4 }
+    if parsed.seq   != 42  { return 5 }
+    if parsed.pid   != 0   { return 6 }
+
+    println(nl_hdr_show(r, parsed));
+
+    0
+}
