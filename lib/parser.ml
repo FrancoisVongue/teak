@@ -124,7 +124,7 @@ let rec parse_expr st = parse_assign st
      `a[i] := v` — array slot assignment (always allowed)
      `x := v`    — variable reassignment (requires `let mut x = ...`) *)
 and parse_assign st =
-  let lhs = parse_or st in
+  let lhs = parse_pipe st in
   if peek st = TColonEq then begin
     advance st;
     let rhs = parse_assign st in
@@ -134,6 +134,25 @@ and parse_assign st =
     | _ -> raise (Parse_error
         "`:=` requires a variable name or array indexing on the left")
   end else lhs
+
+(* Pipeline: `x |> f` rewrites to `f(x)`. `x |> f(a, b)` rewrites to
+   `f(x, a, b)` — x is threaded in as the FIRST argument. Left-
+   associative: `x |> f |> g` is `g(f(x))`. Lower precedence than
+   any binary operator, higher than assignment. *)
+and parse_pipe st =
+  let lhs = parse_or st in
+  let rec loop lhs =
+    if peek st = TPipeArrow then begin
+      advance st;
+      let rhs = parse_or st in
+      let combined = match rhs with
+        | ECall (f, args) -> ECall (f, lhs :: args)
+        | _ -> ECall (rhs, [lhs])
+      in
+      loop combined
+    end else lhs
+  in
+  loop lhs
 
 and parse_or st =
   parse_binop_chain st [TOrOr, OpOr] parse_and
@@ -249,10 +268,10 @@ and parse_atom st =
   | TInt _ | TTrue | TFalse | TLParen
   | TIdent _ | TCtorIdent _
   | TStringLit _
-  | TIf | TMatch | TWhile | TBreak | TContinue
+  | TIf | TMatch | TWhile | TBreak | TContinue | TFor | TReturn
   | TArray | TLen | TSlice
   | TToInt | TToByte
-  | TCAlloc | TCFree | TNullPtr | TIsNull | TArrayData
+  | TCAlloc | TCFree | TNullPtr | TIsNull | TArrayData | TTryAt
   | TRegion | TStackRegion | TAlignedRegion -> parse_atom_consume st
   | t -> raise (Parse_error
     (Printf.sprintf "expected expression, got %s" (Token.show t)))
@@ -289,6 +308,39 @@ and parse_atom_consume st =
       EWhile (cond, body)
   | TBreak -> EBreak
   | TContinue -> EContinue
+  | TFor ->
+      (* for <var> in <lo>..<hi> { <body> }
+         desugars to:
+           let _hi_N = <hi>;
+           let mut <var> = <lo>;
+           while <var> < _hi_N {
+               <body>;
+               <var> := <var> + 1;
+           }
+         <hi> is evaluated once, before the loop starts. *)
+      let var = match eat st with
+        | TIdent s -> s
+        | t -> raise (Parse_error
+          (Printf.sprintf "expected loop variable name after `for`, got %s"
+             (Token.show t)))
+      in
+      expect st TIn;
+      let lo = parse_expr st in
+      expect st TDotDot;
+      let hi = parse_expr st in
+      let body = parse_block st in
+      let hi_var = Printf.sprintf "_for_hi_%d" (Hashtbl.hash (var, hi)) in
+      let bump = EAssign (var, EBinop (OpAdd, EVar var, EInt 1)) in
+      let new_body =
+        ELet ("_", false, None, body,
+          ELet ("_", false, None, bump, EInt 0))
+      in
+      ELet (hi_var, false, None, hi,
+        ELet (var, true, None, lo,
+          EWhile (EBinop (OpLt, EVar var, EVar hi_var), new_body)))
+  | TReturn ->
+      let v = parse_expr st in
+      EReturn v
   | TArray ->
       expect st TLParen;
       let r = parse_expr st in
@@ -377,6 +429,13 @@ and parse_atom_consume st =
       let a = parse_expr st in
       expect st TRParen;
       EArrayData a
+  | TTryAt ->
+      expect st TLParen;
+      let a = parse_expr st in
+      expect st TComma;
+      let i = parse_expr st in
+      expect st TRParen;
+      ETryAt (a, i)
   | TStackRegion ->
       (* stack_region(N) — N must be an int literal (compile-time size).
          The block lives in the surrounding C function's frame; the
@@ -450,6 +509,20 @@ and parse_arm st =
   (p, body)
 
 and parse_pat st =
+  let first = parse_single_pat st in
+  if peek st = TPipe then begin
+    let rec collect acc =
+      if peek st = TPipe then begin
+        advance st;
+        let p = parse_single_pat st in
+        collect (p :: acc)
+      end else
+        List.rev acc
+    in
+    POr (first :: collect [])
+  end else first
+
+and parse_single_pat st =
   match eat st with
   | TUnderscore  -> PWild
   | TCtorIdent c ->
@@ -512,11 +585,15 @@ and parse_block_body st =
       let body = parse_block_body st in
       ELet (name, is_mut, ascription, value, body)
   | _ ->
-      let e = parse_expr st in
-      let is_block_like = match e with
-        | EIf _ | EMatch _ | EWhile _ -> true
+      (* Whether the upcoming expression starts with a `{...}`-bearing
+         keyword. If so, an implicit `;` is allowed after the closing
+         `}` (the for-desugar wraps the EWhile in lets, so peeking AFTER
+         parse_expr can't see this — we peek BEFORE). *)
+      let starts_block_like = match peek st with
+        | TIf | TMatch | TWhile | TFor -> true
         | _ -> false
       in
+      let e = parse_expr st in
       if peek st = TSemi then begin
         advance st;
         if peek st = TRBrace then
@@ -527,10 +604,9 @@ and parse_block_body st =
           let rest = parse_block_body st in
           ELet ("_", false, None, e, rest)
       end
-      else if is_block_like && peek st <> TRBrace then
-        (* Block-like expression (if/match/while) followed by another
-           statement without a `;` between — treat the implicit boundary
-           as a discard. Same as Rust's optional-`;` rule after `}`. *)
+      else if starts_block_like && peek st <> TRBrace then
+        (* Block-like construct followed by another statement without a
+           `;` between — implicit boundary, treat as discard. *)
         let rest = parse_block_body st in
         ELet ("_", false, None, e, rest)
       else e
@@ -736,8 +812,17 @@ let parse (toks : token list) : program =
         let td = parse_enum st in
         loop (td :: acc)
     | TType ->
-        raise (Parse_error
-          "`type` keyword is reserved for future aliases; use `struct` or `enum`")
+        advance st;
+        let name = match eat st with
+          | TCtorIdent s -> s
+          | t -> raise (Parse_error
+            (Printf.sprintf "expected type alias name after `type`, got %s"
+               (Token.show t)))
+        in
+        expect st TEq;
+        let target = parse_ty st in
+        expect st TSemi;
+        loop (TopAlias { alias_name = name; alias_ty = target } :: acc)
     | TExtern ->
         let e = parse_extern st in
         loop (TopExtern e :: acc)

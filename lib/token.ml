@@ -15,6 +15,9 @@ type token =
   | TWhile        (* while cond { body } *)
   | TBreak        (* break; — early exit from while *)
   | TContinue     (* continue; — skip to next iteration *)
+  | TFor          (* for i in lo..hi { body } — sugar for while+mut *)
+  | TIn           (* in — used in `for i in lo..hi` *)
+  | TReturn       (* return expr; — early exit from a function *)
   | TTrue
   | TFalse
   | TIntTy
@@ -36,6 +39,7 @@ type token =
   | TNullPtr      (* null_ptr[T]() — typed NULL *)
   | TIsNull       (* is_null(p) — NULL check *)
   | TArrayData    (* array_data(a) — *T pointing at the bytes of Array[T] *)
+  | TTryAt        (* try_at(a, i) — defensive read, returns Option[T] *)
   | TRegion       (* region(N) — heap arena, malloc'd block *)
   | TStackRegion  (* stack_region(N) — N literal, block on stack *)
   | TAlignedRegion (* aligned_region(N, A) — heap, A-byte aligned *)
@@ -55,6 +59,7 @@ type token =
   | TArrow        (* -> *)
   | TFatArrow     (* => *)
   | TPipe         (* |  *)
+  | TPipeArrow    (* |> — pipeline: x |> f means f(x) *)
   | TPlus         (* +  *)
   | TMinus        (* -  *)
   | TStar         (* *  *)
@@ -87,6 +92,9 @@ let show = function
   | TWhile        -> "WHILE"
   | TBreak        -> "BREAK"
   | TContinue     -> "CONTINUE"
+  | TFor          -> "FOR"
+  | TIn           -> "IN"
+  | TReturn       -> "RETURN"
   | TTrue         -> "TRUE"
   | TFalse        -> "FALSE"
   | TIntTy        -> "INT_TY"
@@ -108,6 +116,7 @@ let show = function
   | TNullPtr      -> "NULL_PTR"
   | TIsNull       -> "IS_NULL"
   | TArrayData    -> "ARRAY_DATA"
+  | TTryAt        -> "TRY_AT"
   | TRegion       -> "REGION"
   | TStackRegion  -> "STACK_REGION"
   | TAlignedRegion -> "ALIGNED_REGION"
@@ -126,6 +135,7 @@ let show = function
   | TArrow        -> "->"
   | TFatArrow     -> "=>"
   | TPipe         -> "|"
+  | TPipeArrow    -> "|>"
   | TPlus         -> "+"
   | TMinus        -> "-"
   | TStar         -> "*"

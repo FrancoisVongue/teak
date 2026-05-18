@@ -226,6 +226,10 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
     | Check.T.TEWhile (c, b) ->
         Check.T.TEWhile (rewrite_expr subst c, rewrite_expr subst b)
     | Check.T.TEBreak | Check.T.TEContinue -> e
+    | Check.T.TEReturn (v, t) ->
+        Check.T.TEReturn (rewrite_expr subst v, rt t)
+    | Check.T.TETryAt (a, i, t) ->
+        Check.T.TETryAt (rewrite_expr subst a, rewrite_expr subst i, rt t)
   in
 
   request_fn "main" [];

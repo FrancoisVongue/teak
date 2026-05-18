@@ -72,6 +72,8 @@ module T = struct
                   (* is_null(p) -> bool *)
     | TEArrayData of expr * ty
                   (* array_data(a: Array[T]) -> TyPtr T *)
+    | TETryAt of expr * expr * ty
+                  (* try_at(a, i) — third field is result Option[T] *)
     | TEDeref  of expr * ty
                   (* p deref — second field is element type T *)
     | TEAssign of string * expr * ty
@@ -80,6 +82,8 @@ module T = struct
                   (* while cond { body } — always int 0 *)
     | TEBreak
     | TEContinue
+    | TEReturn of expr * ty
+                  (* return v — second field is the enclosing fn's return ty *)
 
   type func = {
     name        : string;
@@ -156,6 +160,10 @@ let drop_name_counter = ref 0
 (* Depth of the current while loop nest. break/continue require > 0.
    Reset at each function-body entry. *)
 let loop_depth = ref 0
+
+(* The return type of the function currently being checked, so EReturn
+   can verify the type of its expression. Reset on every check_func. *)
+let current_return_ty : ty option ref = ref None
 let fresh_meta () : meta =
   incr meta_counter;
   { id = !meta_counter; resolved = None }
@@ -259,6 +267,9 @@ let split_program (prog : program)
     | TopUse _    :: _    ->
         failwith "check: TopUse left in program — \
                   the resolver should have eliminated all `use` decls"
+    | TopAlias _  :: _    ->
+        failwith "check: TopAlias left in program — \
+                  the resolver should have inlined all `type` aliases"
   in
   loop [] [] [] [] prog
 
@@ -604,21 +615,37 @@ let check_match_arms_structure
   let all_ctors = List.map (fun v -> v.ctor_name) td.variants in
   let seen = Hashtbl.create 8 in
   let has_wildcard = ref false in
+  let register_ctor c =
+    if Hashtbl.mem seen c then
+      raise (Type_error
+        (Printf.sprintf "duplicate pattern %S in match" c));
+    if not (List.mem c all_ctors) then
+      raise (Type_error
+        (Printf.sprintf
+           "constructor %S does not belong to type %S"
+           c type_name));
+    Hashtbl.add seen c ()
+  in
   List.iter (fun (p, _) ->
     if !has_wildcard then
       raise (Type_error "unreachable pattern after wildcard");
     match p with
     | PWild -> has_wildcard := true
-    | PCtor (c, _) ->
-        if Hashtbl.mem seen c then
-          raise (Type_error
-            (Printf.sprintf "duplicate pattern %S in match" c));
-        if not (List.mem c all_ctors) then
-          raise (Type_error
-            (Printf.sprintf
-               "constructor %S does not belong to type %S"
-               c type_name));
-        Hashtbl.add seen c ()) arms;
+    | PCtor (c, _) -> register_ctor c
+    | POr pats ->
+        List.iter (function
+          | PCtor (c, vs) ->
+              if vs <> [] then
+                raise (Type_error
+                  (Printf.sprintf
+                     "or-pattern arm %S(...) must not bind variables — \
+                      or-patterns cannot introduce names"
+                     c));
+              register_ctor c
+          | _ ->
+              raise (Type_error
+                "or-patterns may only contain bare constructor names")) pats
+  ) arms;
   if not !has_wildcard then begin
     let missing =
       List.filter (fun c -> not (Hashtbl.mem seen c)) all_ctors
@@ -725,6 +752,7 @@ let rec takes_consume (env : env) (x : string) (e : T.expr) : bool =
         let shadowed = match p with
           | PWild -> false
           | PCtor (_, names) -> List.mem x names
+          | POr _ -> false  (* or-patterns bind nothing *)
         in
         not shadowed && takes_consume env x body) arms
   | T.TEArray (r, n, v, _) ->
@@ -756,6 +784,9 @@ let rec takes_consume (env : env) (x : string) (e : T.expr) : bool =
   | T.TEAssign (_, v, _) -> takes_consume env x v
   | T.TEWhile (c, b) -> takes_consume env x c || takes_consume env x b
   | T.TEBreak | T.TEContinue -> false
+  | T.TEReturn (v, _) -> takes_consume env x v
+  | T.TETryAt (a, i, _) ->
+      takes_consume env x a || takes_consume env x i
 
 (* tail_consume: does x reach the tail position of the expression? *)
 let rec tail_consume (x : string) (e : T.expr) : bool =
@@ -769,6 +800,7 @@ let rec tail_consume (x : string) (e : T.expr) : bool =
         let shadowed = match p with
           | PWild -> false
           | PCtor (_, names) -> List.mem x names
+          | POr _ -> false  (* or-patterns bind nothing *)
         in
         not shadowed && tail_consume x body) arms
   | _ -> false   (* any other terminal: int, ctor, call result, ... — not x *)
@@ -1032,6 +1064,13 @@ let rec infer (env : env) (tparams : string list)
                  region(...) / stack_region(...) / aligned_region(...) call"
                 x src))
        | _ -> ());
+      (* When `_ = <diverging-expr>` (break/continue/return), the value
+         type is an unresolved TyMeta — there's nothing in the context
+         to constrain it. Pin it to int so zonk doesn't fail. *)
+      if x = "_" then
+        (match prune tv_ty with
+         | TyMeta _ -> unify tv_ty TyInt
+         | _ -> ());
       let x_actual =
         if x = "_" then
           (match prune tv_ty with
@@ -1101,6 +1140,21 @@ let rec infer (env : env) (tparams : string list)
         raise (Type_error "continue used outside of a while loop");
       (T.TEContinue, TyMeta (fresh_meta ()))
 
+  | EReturn v_e ->
+      let (tv, tv_ty) = infer env tparams vars v_e in
+      let ret_ty =
+        match !current_return_ty with
+        | Some t -> t
+        | None -> failwith "check: EReturn outside of a function body"
+      in
+      (try unify tv_ty ret_ty
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "return: expression has type %s, function returns %s"
+              (show_ty (zonk tv_ty)) (show_ty (zonk ret_ty)))));
+      (T.TEReturn (tv, ret_ty), TyMeta (fresh_meta ()))
+
   | EMatch (scrut, arms) ->
       if arms = [] then
         raise (Type_error "match must have at least one arm");
@@ -1142,6 +1196,25 @@ let rec infer (env : env) (tparams : string list)
               List.fold_left2 (fun acc v t ->
                 if v = "_" then acc else (v, (t, false)) :: acc)
                 vars vs arg_tys
+          | POr pats ->
+              (* All sub-patterns are PCtor with no bindings (checked by
+                 check_match_arms_structure). Unify scrut type against
+                 the first ctor's owner; the others must match the same
+                 ADT by structural rule. *)
+              (match pats with
+               | PCtor (c, _) :: _ ->
+                   let info = List.assoc c env.ctors in
+                   let (subst, _) =
+                     make_instantiation info.ctor_owner_params
+                   in
+                   let owner_args =
+                     List.map (subst_ty subst)
+                       (List.map (fun p -> TyVar p) info.ctor_owner_params)
+                   in
+                   let inst_result = TyApp (info.ctor_owner, owner_args) in
+                   unify inst_result tscrut_ty
+               | _ -> ());
+              vars
         in
         let (tbody, tbody_ty) = infer env tparams body_vars body in
         ((pat, tbody), tbody_ty)) arms
@@ -1447,6 +1520,25 @@ let rec infer (env : env) (tparams : string list)
               (show_ty (zonk tp_ty)))));
       (T.TEDeref (tp, elem), elem)
 
+  | ETryAt (a_e, i_e) ->
+      let (ta, ta_ty) = infer env tparams vars a_e in
+      let elem = TyMeta (fresh_meta ()) in
+      (try unify ta_ty (TyApp ("Array", [elem]))
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "try_at expects Array[T], got %s"
+              (show_ty (zonk ta_ty)))));
+      let (ti, ti_ty) = infer env tparams vars i_e in
+      (try unify ti_ty TyInt
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "try_at(_, i): i must be int, got %s"
+              (show_ty (zonk ti_ty)))));
+      let result_ty = TyApp ("Option", [elem]) in
+      (T.TETryAt (ta, ti, result_ty), result_ty)
+
 and check_args env tparams vars callee_name param_tys args : T.expr list =
   let n_expected = List.length param_tys in
   let n_got = List.length args in
@@ -1531,6 +1623,9 @@ let rec zonk_expr (e : T.expr) : T.expr =
   | T.TEAssign (x, v, t) -> T.TEAssign (x, zonk_expr v, zonk_expect t)
   | T.TEWhile (c, b) -> T.TEWhile (zonk_expr c, zonk_expr b)
   | T.TEBreak | T.TEContinue -> e
+  | T.TEReturn (v, t) -> T.TEReturn (zonk_expr v, zonk_expect t)
+  | T.TETryAt (a, i, t) ->
+      T.TETryAt (zonk_expr a, zonk_expr i, zonk_expect t)
 
 and zonk_expect (t : ty) : ty =
   let t = zonk t in
@@ -1665,6 +1760,7 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       let arm_data = List.map (fun (pat, body) ->
         let names_tys = match pat with
           | PWild -> []
+          | POr _ -> []   (* or-patterns bind nothing *)
           | PCtor (c, vs) ->
               let info = List.assoc c env.ctors in
               let scrut_now = prune scrut_ty in
@@ -1801,6 +1897,15 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
 
   | T.TEBreak | T.TEContinue -> (e, live)
 
+  | T.TEReturn (v, t) ->
+      let (v', live) = check_moves_expr env live false v in
+      (T.TEReturn (v', t), live)
+
+  | T.TETryAt (a, i, t) ->
+      let (a', live) = check_moves_expr env live false a in
+      let (i', live) = check_moves_expr env live false i in
+      (T.TETryAt (a', i', t), live)
+
 and consume_arg (env : env) (live : ty SM.t) (e : T.expr)
   : T.expr * ty SM.t =
   let (e', live) = check_moves_expr env live false e in
@@ -1813,12 +1918,14 @@ and consume_arg (env : env) (live : ty SM.t) (e : T.expr)
 let check_func (env : env) (f : func) : T.func =
   let (_, (param_tys, ret_ty)) = List.assoc f.name env.fns in
   loop_depth := 0;
+  current_return_ty := Some ret_ty;
   let vars =
     List.combine (List.map fst f.params)
       (List.map (fun t -> (t, false)) param_tys)
   in
   let tparams = f.type_params in
   let (tbody, tbody_ty) = infer env tparams vars f.body in
+  current_return_ty := None;
   (try unify ret_ty tbody_ty
    with Type_error _ ->
      raise (Type_error

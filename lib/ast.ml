@@ -28,6 +28,7 @@ and ty =
 type pat =
   | PWild
   | PCtor of string * string list
+  | POr   of pat list                    (* a | b | c — all must be PCtor with no bindings *)
 
 type binop =
   | OpAdd | OpSub | OpMul | OpDiv | OpMod
@@ -55,6 +56,7 @@ type expr =
   | EWhile  of expr * expr                (* while cond { body } — result is int 0 *)
   | EBreak                                (* break;    — valid only inside while *)
   | EContinue                             (* continue; — valid only inside while *)
+  | EReturn of expr                       (* return v; — early exit from enclosing fn *)
   | EMatch  of expr * (pat * expr) list
   | EArray  of expr * expr * expr         (* array(r, N, init) — allocate N slots in region r *)
   | EArrayLit of expr * expr list         (* array(r, [v0, v1, ...]) — allocate and initialize *)
@@ -72,6 +74,7 @@ type expr =
   | ENullPtr of ty                        (* null_ptr[T]() — typed NULL *)
   | EIsNull of expr                       (* is_null(p) — NULL check *)
   | EArrayData of expr                    (* array_data(a) — *T view of Array[T] bytes *)
+  | ETryAt  of expr * expr                (* try_at(a, i) — None on dangling/oob *)
   | EDeref  of expr                       (* *p — pointer deref *)
 
 and record_init_elem =
@@ -116,12 +119,20 @@ type use_decl = {
   use_items  : string list;
 }
 
+(* `type Bytes = Array[byte];` — a plain alias. Resolved away by the
+   resolver before type checking; no runtime presence. Non-generic only. *)
+type alias_decl = {
+  alias_name : string;
+  alias_ty   : ty;
+}
+
 type top_decl =
   | TopType   of type_decl
   | TopRecord of record_decl
   | TopFunc   of func
   | TopExtern of extern_decl
   | TopUse    of use_decl
+  | TopAlias  of alias_decl
 
 type program = top_decl list
 
@@ -143,11 +154,13 @@ let rec show_ty = function
   | TyMeta { resolved = Some t; _ } -> show_ty t
   | TyMeta { id; resolved = None } -> Printf.sprintf "?%d" id
 
-let show_pat = function
+let rec show_pat = function
   | PWild              -> "_"
   | PCtor (c, [])      -> c
   | PCtor (c, vs)      ->
       Printf.sprintf "%s(%s)" c (String.concat ", " vs)
+  | POr pats ->
+      String.concat " | " (List.map show_pat pats)
 
 let show_binop = function
   | OpAdd -> "+"  | OpSub -> "-"
@@ -201,6 +214,7 @@ let rec show_expr = function
   | EWhile (c, b) -> Printf.sprintf "while %s { %s }" (show_expr c) (show_expr b)
   | EBreak    -> "break"
   | EContinue -> "continue"
+  | EReturn e -> Printf.sprintf "return %s" (show_expr e)
   | EMatch (e, arms) ->
       let arm_strs = List.map (fun (p, body) ->
         Printf.sprintf "%s => %s" (show_pat p) (show_expr body))
@@ -232,4 +246,5 @@ let rec show_expr = function
   | ENullPtr t -> Printf.sprintf "null_ptr[%s]()" (show_ty t)
   | EIsNull p -> Printf.sprintf "is_null(%s)" (show_expr p)
   | EArrayData a -> Printf.sprintf "array_data(%s)" (show_expr a)
+  | ETryAt (a, i) -> Printf.sprintf "try_at(%s, %s)" (show_expr a) (show_expr i)
   | EDeref p -> Printf.sprintf "*%s" (show_expr p)

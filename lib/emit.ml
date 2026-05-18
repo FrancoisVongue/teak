@@ -164,6 +164,8 @@ let rec collect_expr (e : Check.T.expr) : unit =
   | Check.T.TEAssign (_, v, t) -> collect_expr v; collect_ty t
   | Check.T.TEWhile (c, b) -> collect_expr c; collect_expr b
   | Check.T.TEBreak | Check.T.TEContinue -> ()
+  | Check.T.TEReturn (v, t) -> collect_expr v; collect_ty t
+  | Check.T.TETryAt (a, i, t) -> collect_expr a; collect_expr i; collect_ty t
 
 let collect_program (prog : Check.T.program) : unit =
   Hashtbl.clear fn_types_seen;
@@ -292,6 +294,7 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
           List.map (fun (p, body) ->
             match p with
             | PWild -> (p, rn env body)
+            | POr _ -> (p, rn env body)   (* or-patterns bind no names *)
             | PCtor (c, names) ->
                 let pairs =
                   List.map (fun n ->
@@ -329,6 +332,8 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
         TEAssign (x', rn env v, t)
     | TEWhile (c, b) -> TEWhile (rn env c, rn env b)
     | TEBreak | TEContinue -> e
+    | TEReturn (v, t) -> TEReturn (rn env v, t)
+    | TETryAt (a, i, t) -> TETryAt (rn env a, rn env i, t)
   in
   let initial_env = List.map (fun (p, _) -> (p, p)) f.params in
   { f with body = rn initial_env f.body }
@@ -470,6 +475,8 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TEAssign (_, _, _) -> TyInt
   | Check.T.TEWhile (_, _) -> TyInt
   | Check.T.TEBreak | Check.T.TEContinue -> TyInt
+  | Check.T.TEReturn (_, _) -> TyInt
+  | Check.T.TETryAt (_, _, t) -> t
 
 (* Release a Region's buffer (if it's heap-allocated), bump the
    generation, and push the slot back onto the free list. Stack
@@ -655,6 +662,7 @@ let rec emit_expr
       let emit_arm (pat, body) =
         let bindings = match pat with
           | PWild -> []
+          | POr _ -> []   (* no bindings inside or-patterns *)
           | PCtor (c, vs) ->
               let (_, v, _) = Hashtbl.find ctor_map c in
               List.filter_map (fun ((var, t), i) ->
@@ -679,9 +687,18 @@ let rec emit_expr
             let (_, _, tag) = Hashtbl.find ctor_map c in
             [Printf.sprintf "case %d: { /* %s */" tag c]
             @ bindings @ body_lines @ ["}"]
+        | POr pats ->
+            let labels = List.map (function
+              | PCtor (c, _) ->
+                  let (_, _, tag) = Hashtbl.find ctor_map c in
+                  Printf.sprintf "case %d: /* %s */" tag c
+              | _ -> failwith "emit: malformed or-pattern") pats
+            in
+            labels @ ["{"] @ bindings @ body_lines @ ["}"]
       in
       let arm_blocks = List.concat_map emit_arm arms in
-      let has_wild = List.exists (fun (p, _) -> p = PWild) arms in
+      let has_wild = List.exists (fun (p, _) ->
+        match p with PWild -> true | _ -> false) arms in
       let trailing =
         if has_wild then []
         else ["default: abort();"]
@@ -1031,6 +1048,43 @@ let rec emit_expr
 
   | Check.T.TEBreak    -> { stmts = ["break;"];    value = "0" }
   | Check.T.TEContinue -> { stmts = ["continue;"]; value = "0" }
+
+  | Check.T.TEReturn (v_e, _) ->
+      let cv = emit_expr ctor_map v_e in
+      let stmts = cv.stmts @ [Printf.sprintf "return %s;" cv.value] in
+      { stmts; value = "0" }
+
+  | Check.T.TETryAt (a_e, i_e, result_ty) ->
+      (* try_at(a, i): Some(a[i]) if gen+bounds OK, else None. *)
+      let ca = emit_expr ctor_map a_e in
+      let ci = emit_expr ctor_map i_e in
+      let a_var = fresh "_a" in
+      let i_var = fresh "_i" in
+      let res_var = fresh "_try" in
+      let arr_c = c_type (ty_of_expr a_e) in
+      let opt_c = c_type result_ty in
+      let elem_ty = match ty_of_expr a_e with
+        | TyApp ("Array", [inner]) -> inner
+        | _ -> failwith "emit TETryAt: scrutinee not Array[_]"
+      in
+      let elem_c = c_type elem_ty in
+      let stmts = ca.stmts @ ci.stmts @ [
+        Printf.sprintf "%s %s = %s;" arr_c a_var ca.value;
+        Printf.sprintf "int %s = %s;" i_var ci.value;
+        Printf.sprintf "%s %s;" opt_c res_var;
+        Printf.sprintf
+          "if (ORTO_REGIONS[%s.slot].gen == %s.expected_gen \
+           && %s >= 0 && %s < %s.len) {"
+          a_var a_var i_var i_var a_var;
+        Printf.sprintf
+          "    %s = ((%s){ .tag = 0, .as = { .Some = { .f0 = \
+           ((%s*)(ORTO_REGIONS[%s.slot].buffer + %s.offset))[%s] } } });"
+          res_var opt_c elem_c a_var a_var i_var;
+        "} else {";
+        Printf.sprintf "    %s = ((%s){ .tag = 1 });" res_var opt_c;
+        "}";
+      ] in
+      { stmts; value = res_var }
 
 (* Shared setup for a[i] and a[i] := v. Returns the array/index codes,
    fresh names, the array's C type, the abort-checks, and the C

@@ -46,6 +46,7 @@ type module_summary = {
   record_names  : (string * string) list;
   fn_names      : (string * string) list;
   ctor_names    : (string * string) list;
+  alias_names   : (string * string) list;
   extern_names  : string list;
 }
 
@@ -55,6 +56,7 @@ let summarize (module_name : string) (prog : program) : module_summary =
   let records = ref [] in
   let fns     = ref [] in
   let ctors   = ref [] in
+  let aliases = ref [] in
   let externs = ref [] in
   List.iter (fun decl ->
     match decl with
@@ -68,12 +70,15 @@ let summarize (module_name : string) (prog : program) : module_summary =
         fns := (f.name, m f.name) :: !fns
     | TopExtern e ->
         externs := e.ext_name :: !externs
+    | TopAlias a ->
+        aliases := (a.alias_name, m a.alias_name) :: !aliases
     | TopUse _ -> ()) prog;
   { mod_name = module_name;
     type_names   = !types;
     record_names = !records;
     fn_names     = !fns;
     ctor_names   = !ctors;
+    alias_names  = !aliases;
     extern_names = !externs }
 
 (* For a module M, build the resolution table that maps bare names
@@ -88,6 +93,7 @@ let build_resolution_map
     @ m_summary.record_names
     @ m_summary.fn_names
     @ m_summary.ctor_names
+    @ m_summary.alias_names
     @ List.map (fun e -> (e, e)) m_summary.extern_names
   in
   let imports =
@@ -111,6 +117,9 @@ let build_resolution_map
         | Some m -> (item, m)
         | None ->
         match lookup item other.ctor_names with
+        | Some m -> (item, m)
+        | None ->
+        match lookup item other.alias_names with
         | Some m -> (item, m)
         | None ->
           if List.mem item other.extern_names then (item, item)
@@ -192,15 +201,24 @@ let rec resolve_expr
   | EAssign (x, v) -> EAssign (resolve_name map locals x, r v)
   | EWhile (c, b) -> EWhile (r c, r b)
   | EBreak | EContinue -> e
+  | EReturn v -> EReturn (r v)
   | EMatch (s, arms) ->
       let s' = r s in
+      let rec resolve_pat p =
+        match p with
+        | PWild -> PWild
+        | PCtor (c, vs) -> PCtor (resolve_name map locals c, vs)
+        | POr pats -> POr (List.map resolve_pat pats)
+      in
+      let pattern_locals p =
+        match p with
+        | PWild -> []
+        | PCtor (_, vs) -> List.filter (fun v -> v <> "_") vs
+        | POr _ -> []   (* or-patterns forbid bindings; check.ml enforces it *)
+      in
       let arms' = List.map (fun (p, body) ->
-        let (p', new_locals) = match p with
-          | PWild -> (PWild, locals)
-          | PCtor (c, vs) ->
-              (PCtor (resolve_name map locals c, vs),
-               (List.filter (fun v -> v <> "_") vs) @ locals)
-        in
+        let p' = resolve_pat p in
+        let new_locals = pattern_locals p @ locals in
         (p', resolve_expr map new_locals body)) arms
       in
       EMatch (s', arms')
@@ -221,6 +239,7 @@ let rec resolve_expr
   | EIsNull p -> EIsNull (r p)
   | EArrayData a -> EArrayData (r a)
   | EDeref p -> EDeref (r p)
+  | ETryAt (a, i) -> ETryAt (r a, r i)
 
 let resolve_decl
     (map : (string * string) list) (mod_name : string) (decl : top_decl)
@@ -228,6 +247,11 @@ let resolve_decl
   let m_name n = mangle_for_module mod_name n in
   match decl with
   | TopUse _ -> None
+  | TopAlias a ->
+      Some (TopAlias {
+        alias_name = m_name a.alias_name;
+        alias_ty   = resolve_ty map [] a.alias_ty;
+      })
   | TopType td ->
       let type_params = td.type_params in
       (* Within a type decl's variant types, type-parameter names like
@@ -276,6 +300,95 @@ let resolve_decl
         ext_return_ty = return_ty;
       })
 
+(* Expand type aliases transitively, with cycle detection. *)
+let rec expand_alias_ty
+    (aliases : (string * ty) list) (visited : string list) (t : ty) : ty =
+  match t with
+  | TyInt | TyBool -> t
+  | TyVar _ -> t
+  | TyMeta _ -> t
+  | TyApp (n, args) ->
+      let args = List.map (expand_alias_ty aliases visited) args in
+      (match List.assoc_opt n aliases with
+       | Some target ->
+           if List.mem n visited then
+             raise (Resolve_error
+               (Printf.sprintf "cyclic type alias: %s"
+                  (String.concat " -> " (List.rev (n :: visited)))));
+           if args <> [] then
+             raise (Resolve_error
+               (Printf.sprintf
+                  "type alias %S cannot take type arguments" n));
+           expand_alias_ty aliases (n :: visited) target
+       | None -> TyApp (n, args))
+  | TyFun (args, ret) ->
+      TyFun (List.map (expand_alias_ty aliases visited) args,
+             expand_alias_ty aliases visited ret)
+  | TyPtr inner -> TyPtr (expand_alias_ty aliases visited inner)
+
+let expand_in_expr (aliases : (string * ty) list) (e : expr) : expr =
+  let xt t = expand_alias_ty aliases [] t in
+  let rec ex e =
+    match e with
+    | EInt _ | EBool _ | EStringLit _ | EVar _
+    | EBreak | EContinue -> e
+    | EBinop (op, a, b) -> EBinop (op, ex a, ex b)
+    | EUnop (op, a) -> EUnop (op, ex a)
+    | ECall (c, args) -> ECall (ex c, List.map ex args)
+    | ECtor (c, args) -> ECtor (c, List.map ex args)
+    | ERecord (n, elems) ->
+        ERecord (n, List.map (function
+          | RAssign (f, v) -> RAssign (f, ex v)
+          | RSpread b -> RSpread (ex b)) elems)
+    | EField (e, f) -> EField (ex e, f)
+    | EIf (c, t, e) -> EIf (ex c, ex t, ex e)
+    | ELet (x, m, asc, v, b) -> ELet (x, m, Option.map xt asc, ex v, ex b)
+    | EAssign (x, v) -> EAssign (x, ex v)
+    | EWhile (c, b) -> EWhile (ex c, ex b)
+    | EReturn v -> EReturn (ex v)
+    | EMatch (s, arms) -> EMatch (ex s, List.map (fun (p, b) -> (p, ex b)) arms)
+    | EArray (r, n, v) -> EArray (ex r, ex n, ex v)
+    | EArrayLit (r, elems) -> EArrayLit (ex r, List.map ex elems)
+    | ERegion n -> ERegion (ex n)
+    | EStackRegion n -> EStackRegion (ex n)
+    | EAlignedRegion (n, a) -> EAlignedRegion (ex n, ex a)
+    | EIndex (a, i) -> EIndex (ex a, ex i)
+    | EAssignIdx (a, i, v) -> EAssignIdx (ex a, ex i, ex v)
+    | ELen e -> ELen (ex e)
+    | ESlice (a, lo, hi) -> ESlice (ex a, ex lo, ex hi)
+    | EToInt e -> EToInt (ex e)
+    | EToByte e -> EToByte (ex e)
+    | ECAlloc (t, n) -> ECAlloc (xt t, ex n)
+    | ECFree p -> ECFree (ex p)
+    | ENullPtr t -> ENullPtr (xt t)
+    | EIsNull p -> EIsNull (ex p)
+    | EArrayData a -> EArrayData (ex a)
+    | EDeref p -> EDeref (ex p)
+    | ETryAt (a, i) -> ETryAt (ex a, ex i)
+  in
+  ex e
+
+let expand_in_decl (aliases : (string * ty) list) (d : top_decl) : top_decl =
+  let xt t = expand_alias_ty aliases [] t in
+  match d with
+  | TopType td ->
+      TopType { td with variants =
+        List.map (fun v ->
+          { v with arg_tys = List.map xt v.arg_tys }) td.variants }
+  | TopRecord rd ->
+      TopRecord { rd with rec_fields =
+        List.map (fun (f, t) -> (f, xt t)) rd.rec_fields }
+  | TopFunc f ->
+      TopFunc { f with
+        params = List.map (fun (n, t) -> (n, xt t)) f.params;
+        return_ty = xt f.return_ty;
+        body = expand_in_expr aliases f.body; }
+  | TopExtern e ->
+      TopExtern { e with
+        ext_params = List.map (fun (n, t) -> (n, xt t)) e.ext_params;
+        ext_return_ty = xt e.ext_return_ty; }
+  | TopUse _ | TopAlias _ -> d
+
 (* Top-level entry: take an ordered list of (module_name, parsed program),
    resolve all references, return one merged program ready for the type
    checker. Externs are deduplicated by name. *)
@@ -292,6 +405,17 @@ let resolve (modules : (string * program) list) : program =
   ) modules
   in
   let combined = List.concat resolved_per_module in
+  (* Collect aliases by their mangled name, then expand all references
+     to them throughout the program. *)
+  let aliases =
+    List.filter_map (function
+      | TopAlias a -> Some (a.alias_name, a.alias_ty)
+      | _ -> None) combined
+  in
+  let expanded = List.map (expand_in_decl aliases) combined in
+  let no_aliases = List.filter (function
+    | TopAlias _ -> false | _ -> true) expanded
+  in
   (* Deduplicate externs by name — multiple modules can declare the
      same C function (e.g. putchar). First occurrence wins; later
      duplicates with different signatures are caught later by check. *)
@@ -300,4 +424,4 @@ let resolve (modules : (string * program) list) : program =
     | TopExtern e ->
         if Hashtbl.mem seen_externs e.ext_name then false
         else (Hashtbl.add seen_externs e.ext_name (); true)
-    | _ -> true) combined
+    | _ -> true) no_aliases

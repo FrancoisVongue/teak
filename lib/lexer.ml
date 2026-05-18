@@ -25,6 +25,9 @@ let lower_ident_or_keyword s =
   | "while" -> TWhile
   | "break" -> TBreak
   | "continue" -> TContinue
+  | "for"   -> TFor
+  | "in"    -> TIn
+  | "return" -> TReturn
   | "true"  -> TTrue
   | "false" -> TFalse
   | "int"   -> TIntTy
@@ -46,6 +49,7 @@ let lower_ident_or_keyword s =
   | "null_ptr" -> TNullPtr
   | "is_null" -> TIsNull
   | "array_data" -> TArrayData
+  | "try_at" -> TTryAt
   | "region" -> TRegion
   | "stack_region" -> TStackRegion
   | "aligned_region" -> TAlignedRegion
@@ -126,6 +130,9 @@ let lex (src : string) : token list =
 
     | '|' when !i + 1 < n && src.[!i + 1] = '|' ->
         push TOrOr; i := !i + 2
+
+    | '|' when !i + 1 < n && src.[!i + 1] = '>' ->
+        push TPipeArrow; i := !i + 2
 
     | '|' -> push TPipe; incr i
 
