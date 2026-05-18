@@ -66,6 +66,14 @@
 - `null_ptr[T]() -> *T`, `is_null(p) -> bool` — для NULL-returning C-API.
 - `array_data(a: Array[T]) -> *T` — отдать байты Array в libc/C-функцию.
 
+**I/O — через io_uring:**
+- Целевые ядра: Linux 5.6+. Не Windows, не macOS, не старые ядра.
+- Все file/socket/timer/pipe I/O идут через `iouring.orto` ring API.
+- Direct syscalls (`sys.orto`) остаются только для setup и того что в io_uring нет (process control, signals).
+- Stage 1 (есть): synchronous façade — один SQE submit + один CQE wait per call. `examples/file_io_uring.orto` показывает.
+- Stage 2 (план): batched submit + multiple in-flight ops.
+- Stage 3 (большая работа): `async fn`/`await` с corutines. См. `IO_URING.md`.
+
 **Управление:**
 - Всё — выражения. `if`/`match`/`let` возвращают значения.
 - Dead-name tracking — use-after-move = compile error.

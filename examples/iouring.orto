@@ -1,0 +1,113 @@
+// std::iouring — synchronous façade over Linux io_uring.
+//
+// io_uring is the modern Linux async I/O interface. Even when we drive
+// it synchronously (one-op-submit-wait per call), it has the advantages:
+//   - one syscall instead of many for batched workloads
+//   - fewer copies in some ops (registered buffers, splice)
+//   - the SAME API for file/socket/timer/pipe — no per-domain split
+//   - first-class linkat/openat/statx (not all wired up here yet)
+//
+// This module is the V1: synchronous wrapper. Each operation submits
+// one SQE and blocks until the CQE returns. Real concurrency comes
+// later when the language gets coroutines / `async fn`.
+//
+// Build: link with examples/iouring_helpers.c and -luring.
+//   cc your_app.c examples/iouring_helpers.c -luring -o your_app
+//
+// Targets: Linux 5.6+ (modern io_uring). We don't care about older
+// kernels, Windows, or macOS.
+
+// ---------- C-side helpers (thin glue over liburing) ----------
+
+extern fn orto_ring_create(entries: int) -> *byte
+extern fn orto_ring_exit(handle: *byte) -> int
+
+extern fn orto_ring_read(handle: *byte, fd: int,
+                          buf: *byte, len_: int, offset: int) -> int
+extern fn orto_ring_write(handle: *byte, fd: int,
+                           buf: *byte, len_: int, offset: int) -> int
+extern fn orto_ring_openat(handle: *byte, path: *byte,
+                            flags: int, mode: int) -> int
+extern fn orto_ring_close(handle: *byte, fd: int) -> int
+extern fn orto_ring_fsync(handle: *byte, fd: int) -> int
+
+extern fn orto_ring_socket(handle: *byte,
+                            domain: int, type_: int, protocol: int) -> int
+extern fn orto_ring_connect(handle: *byte, fd: int,
+                             addr: *byte, addrlen: int) -> int
+extern fn orto_ring_accept(handle: *byte, fd: int) -> int
+extern fn orto_ring_send(handle: *byte, fd: int,
+                          buf: *byte, len_: int, flags: int) -> int
+extern fn orto_ring_recv(handle: *byte, fd: int,
+                          buf: *byte, len_: int, flags: int) -> int
+
+// ---------- linear ring handle ----------
+
+linear struct Ring { handle: *byte }
+
+fn drop_Ring(r: Ring) -> int {
+    orto_ring_exit(r.handle);
+    0
+}
+
+// Create a ring with capacity for `entries` in-flight ops. Returned
+// Ring drops automatically (releases kernel resources). If creation
+// fails the inner handle is NULL — the drop is still safe (no-op).
+fn ring_new(entries: int) -> Ring {
+    Ring { handle: orto_ring_create(entries) }
+}
+
+fn ring_failed(r: Ring) -> bool { is_null(r.handle) }
+
+// ---------- I/O operations ----------
+//
+// All ops borrow the ring (don't consume), block, and return the
+// io_uring `res`:
+//   >= 0  — success, bytes transferred / new fd / etc.
+//   < 0   — -errno (negate to get the C errno value).
+//
+// File descriptors here are plain `int`. Pair with `sys::Fd` to get
+// the linear close-at-scope behaviour: wrap with `fd_wrap(raw)`
+// after `uring_open`.
+
+fn uring_read(r: Ring, fd: int, buf: Array[byte], offset: int) -> int {
+    orto_ring_read(r.handle, fd, array_data(buf), len(buf), offset)
+}
+
+fn uring_write(r: Ring, fd: int, buf: Array[byte], offset: int) -> int {
+    orto_ring_write(r.handle, fd, array_data(buf), len(buf), offset)
+}
+
+fn uring_open(r: Ring, path: Array[byte], flags: int, mode: int) -> int {
+    orto_ring_openat(r.handle, array_data(path), flags, mode)
+}
+
+fn uring_close(r: Ring, fd: int) -> int {
+    orto_ring_close(r.handle, fd)
+}
+
+fn uring_fsync(r: Ring, fd: int) -> int {
+    orto_ring_fsync(r.handle, fd)
+}
+
+// ---------- socket operations ----------
+
+fn uring_socket(r: Ring, domain: int, type_: int, protocol: int) -> int {
+    orto_ring_socket(r.handle, domain, type_, protocol)
+}
+
+fn uring_connect(r: Ring, fd: int, addr: Array[byte]) -> int {
+    orto_ring_connect(r.handle, fd, array_data(addr), len(addr))
+}
+
+fn uring_accept(r: Ring, fd: int) -> int {
+    orto_ring_accept(r.handle, fd)
+}
+
+fn uring_send(r: Ring, fd: int, buf: Array[byte], flags: int) -> int {
+    orto_ring_send(r.handle, fd, array_data(buf), len(buf), flags)
+}
+
+fn uring_recv(r: Ring, fd: int, buf: Array[byte], flags: int) -> int {
+    orto_ring_recv(r.handle, fd, array_data(buf), len(buf), flags)
+}
