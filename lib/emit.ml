@@ -85,19 +85,35 @@ let register_async_extern (name : string) =
 let is_async_extern (name : string) : bool =
   Hashtbl.mem async_externs name
 
-(* Map of async-function names to their parameter list. Populated in
-   collect_program for every monomorphised function whose body is
-   async (i.e. lowered into a Frame_<name> + <name>_step). The spawn
-   site reads this to know which fields to initialise on the new
-   frame. *)
+(* Map of async-function names to their parameter list and return
+   type. Populated in collect_program for every monomorphised function
+   whose body is async (i.e. lowered into a Frame_<name> + <name>_step).
+   spawn / await sites read it for arg initialisation and for the
+   T-typed conversion across the long long header slot. *)
 let async_func_params : (string, (string * ty) list) Hashtbl.t =
   Hashtbl.create 8
+let async_func_returns : (string, ty) Hashtbl.t = Hashtbl.create 8
 
-let register_async_func (name : string) (params : (string * ty) list) =
-  Hashtbl.replace async_func_params name params
+let register_async_func (name : string) (params : (string * ty) list) (ret_ty : ty) =
+  Hashtbl.replace async_func_params name params;
+  Hashtbl.replace async_func_returns name ret_ty
 
 let is_async_func (name : string) : bool =
   Hashtbl.mem async_func_params name
+
+let async_func_return_ty (name : string) : ty option =
+  Hashtbl.find_opt async_func_returns name
+
+(* Is the type scalar-shaped — fits in long long, can be assigned via
+   implicit C conversion? Aggregate types (Region, Task[T], records,
+   Arrays) need memcpy to / from the long long header slot. *)
+let scalar_like (t : ty) : bool =
+  match t with
+  | TyInt | TyBool -> true
+  | TyApp ("byte", []) -> true
+  | TyApp ("float", []) -> true
+  | TyPtr _ -> true
+  | _ -> false
 
 let register_string (s : string) : int =
   match Hashtbl.find_opt string_pool s with
@@ -266,7 +282,7 @@ let collect_program (prog : Check.T.program) : unit =
     List.iter (fun (_, t) -> collect_ty t) f.params;
     collect_ty f.return_ty;
     collect_expr f.body;
-    if f.is_async then register_async_func f.name f.params) prog.funcs
+    if f.is_async then register_async_func f.name f.params f.return_ty) prog.funcs
 
 (* ---------- rendering C types ---------- *)
 
@@ -1684,7 +1700,7 @@ let rec emit_has_suspension (e : Check.T.expr) : bool =
    without suspension closes the current segment with `continue`,
    driving the surrounding `for(;;) switch` loop to the next state
    without leaving the step function. *)
-let async_split_segments ctor_map (body : Check.T.expr) : (int * string list) list =
+let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int * string list) list =
   let open Check.T in
   let segments = ref [] in
   let curr_state = ref 0 in
@@ -1824,10 +1840,14 @@ let async_split_segments ctor_map (body : Check.T.expr) : (int * string list) li
       let id = fresh_spawn () in
       let slot_v = id ^ "_slot" in
       let gen_v  = id ^ "_gen" in
+      (* Sync targets don't register a return type (they're not
+         async functions). Best-effort widening to long long works for
+         every scalar return — and sync spawn was already limited to
+         scalar returns by the older `(int)(...)` cast. *)
       emit_into [
         Printf.sprintf "int %s = orto_slot_alloc();" slot_v;
         Printf.sprintf "int %s = ORTO_SLOTS[%s].gen;" gen_v slot_v;
-        Printf.sprintf "ORTO_SLOTS[%s].result = (int)(%s);" slot_v call_expr;
+        Printf.sprintf "ORTO_SLOTS[%s].result = (long long)(%s);" slot_v call_expr;
         Printf.sprintf "ORTO_SLOTS[%s].status = ORTO_SLOT_DONE_NO_WAITER;" slot_v;
       ];
       Some (slot_v, gen_v)
@@ -1852,23 +1872,74 @@ let async_split_segments ctor_map (body : Check.T.expr) : (int * string list) li
     loop_stack := List.tl !loop_stack;
     r
   in
-  (* The destination for an expression's value. *)
+  (* The destination for an expression's value. Carries the destination
+     type so we know how to cross the long long ⇄ T boundary at the
+     frame header (return_value / last_res are long long; Frame_X
+     fields hold T). *)
   let module D = struct
     type t =
-      | Local of string   (* fr->name = value; *)
-      | Return            (* fr->return_value = value; return 0; *)
-      | Discard           (* statement context; value ignored *)
+      | Local of string * ty   (* fr->name = value; *)
+      | Return of ty            (* fr->return_value = value; return 0; *)
+      | Discard                 (* statement context; value ignored *)
   end in
+  (* Assignment into a long long header slot (return_value/last_res). *)
+  let assign_to_blob lvalue value_str ty =
+    if scalar_like ty then
+      [Printf.sprintf "%s = (long long)(%s);" lvalue value_str]
+    else
+      let c_ty = c_type ty in
+      let temp = fresh "_blob" in
+      [
+        Printf.sprintf "{ %s %s = (%s);" c_ty temp value_str;
+        Printf.sprintf "  memcpy(&%s, &%s, sizeof(%s)); }" lvalue temp temp;
+      ]
+  in
+  (* Read a T-typed value from a long long header slot. *)
+  let read_from_blob target_lvalue source_lvalue ty =
+    if scalar_like ty then
+      [Printf.sprintf "%s = (%s)(%s);" target_lvalue (c_type ty) source_lvalue]
+    else
+      let c_ty = c_type ty in
+      let temp = fresh "_blob" in
+      [
+        Printf.sprintf "{ %s %s;" c_ty temp;
+        Printf.sprintf "  memcpy(&%s, &%s, sizeof(%s));" temp source_lvalue temp;
+        Printf.sprintf "  %s = %s; }" target_lvalue temp;
+      ]
+  in
   let store_at (d : D.t) value =
     match d with
-    | D.Local x ->
+    | D.Local (x, _) ->
         emit_into [Printf.sprintf "fr->%s = %s;" x value]
-    | D.Return ->
+    | D.Return ty ->
         finish_segment
-          [ Printf.sprintf "fr->return_value = %s;" value;
-            "return 0;" ]
+          (assign_to_blob "fr->return_value" value ty
+           @ ["return 0;"])
     | D.Discard ->
         emit_into [Printf.sprintf "(void)(%s);" value]
+  in
+  (* Store a value that lives in a long long header slot (typed
+     long long expr like `fr->last_res` or `ORTO_SLOTS[s].result`)
+     into the destination, converting through T. *)
+  let store_blob_at (d : D.t) blob_lvalue =
+    match d with
+    | D.Local (x, ty) ->
+        emit_into (read_from_blob (Printf.sprintf "fr->%s" x) blob_lvalue ty)
+    | D.Return ty ->
+        let temp = fresh "_ret" in
+        let c_ty = c_type ty in
+        let block =
+          if scalar_like ty then
+            [ Printf.sprintf "fr->return_value = %s;" blob_lvalue;
+              "return 0;" ]
+          else
+            [ Printf.sprintf "{ %s %s;" c_ty temp;
+              Printf.sprintf "  memcpy(&%s, &%s, sizeof(%s));" temp blob_lvalue temp;
+              Printf.sprintf "  memcpy(&fr->return_value, &%s, sizeof(%s)); }" temp temp;
+              "return 0;" ]
+        in
+        finish_segment block
+    | D.Discard -> ()
   in
   (* Walk an expression, storing its value into `dst`. If the value
      is produced by a suspension point or branches with suspension,
@@ -1888,16 +1959,18 @@ let async_split_segments ctor_map (body : Check.T.expr) : (int * string list) li
         let n = alloc_state () in
         async_call_then_state name args n;
         start_segment n;
-        store_at dst "fr->last_res"
+        (* async extern result lives in fr->last_res as a CQE-shaped
+           int — known scalar shape. *)
+        store_blob_at dst "fr->last_res"
     | TEAwait (inner, _)
       when (match match_await_task inner with Some _ -> true | None -> false) ->
         (* await on a Task[T] variable: check the slot's state. If the
            child already finished synchronously, deliver inline; else
            register us as the waiter and suspend. Either path resumes
            at state N, where the result lives in fr->last_res. *)
-        let (task_var, inner_ty) = match match_await_task inner with
+        let (task_var, _inner_ty) = match match_await_task inner with
           | Some r -> r | None -> assert false in
-        let task_c = c_type (TyApp ("Task", [inner_ty])) in
+        let task_c = c_type (TyApp ("Task", [_inner_ty])) in
         let n = alloc_state () in
         let id = fresh_await () in
         let task_v = id ^ "_task" in
@@ -1920,7 +1993,7 @@ let async_split_segments ctor_map (body : Check.T.expr) : (int * string list) li
           "return 1;";
         ];
         start_segment n;
-        store_at dst "fr->last_res"
+        store_blob_at dst "fr->last_res"
     | TESpawn (inner, spawn_ty)
       when (match match_spawn_inner inner with Some _ -> true | None -> false) ->
         let (name, args, is_async) = match match_spawn_inner inner with
@@ -1952,11 +2025,11 @@ let async_split_segments ctor_map (body : Check.T.expr) : (int * string list) li
                 slot pair, but we ignore it — detached state self-frees
                 on completion. *)
              emit_into ["(void)0;"])
-    | TELet (x, _, v, b, _, _) ->
+    | TELet (x, ty, v, b, _, _) ->
         (* Bind v, then walk b. v may suspend — walk recursively
            with destination = the binder. *)
         let v_dst =
-          if x = "_" then D.Discard else D.Local x
+          if x = "_" then D.Discard else D.Local (x, ty)
         in
         walk v_dst v;
         walk dst b
@@ -1966,7 +2039,7 @@ let async_split_segments ctor_map (body : Check.T.expr) : (int * string list) li
         let t_state = alloc_state () in
         let e_state = alloc_state () in
         let join = match dst with
-          | D.Return -> -1   (* both branches terminate by return *)
+          | D.Return _ -> -1   (* both branches terminate by return *)
           | _ -> alloc_state ()
         in
         finish_segment [
@@ -2006,8 +2079,8 @@ let async_split_segments ctor_map (body : Check.T.expr) : (int * string list) li
     | TEContinue when !loop_stack <> [] ->
         let (head_s, _) = List.hd !loop_stack in
         finish_segment (goto_state head_s)
-    | TEReturn (v, _) ->
-        walk D.Return v
+    | TEReturn (v, ty) ->
+        walk (D.Return ty) v
     | _ when not (emit_has_suspension e) ->
         let cv = emit_expr ctor_map e in
         emit_into cv.stmts;
@@ -2022,7 +2095,7 @@ let async_split_segments ctor_map (body : Check.T.expr) : (int * string list) li
              not yet supported for splitting. Lift the awaiting call \
              into a `let` first.")
   in
-  walk D.Return body;
+  walk (D.Return return_ty) body;
   List.rev !segments
 
 (* Emit a Frame struct for an async function. Layout matches
@@ -2042,12 +2115,14 @@ let emit_async_frame_struct (f : Check.T.func) : string =
     List.map (fun (x, t) ->
       Printf.sprintf "    %s %s;" (c_type t) x) locals
   in
+  (* Must match OrtoFrameHeader exactly — the dispatcher and
+     orto_complete cast Frame_<X>* to OrtoFrameHeader* to read these. *)
   let header = [
     "    OrtoStepFn step;";
     "    int state;";
-    "    int last_res;";    (* dispatcher writes the CQE result here before resume *)
-    "    int return_value;"; (* step writes this before `return 0` *)
-    "    int _orto_slot;";   (* slot index, or -1 if frame is stack-owned *)
+    "    int _orto_slot;";          (* slot index, or -1 if frame is stack-owned *)
+    "    long long last_res;";      (* dispatcher writes the CQE result here before resume *)
+    "    long long return_value;";  (* step writes this before `return 0` *)
   ] in
   Printf.sprintf "typedef struct {\n%s\n} Frame_%s;"
     (String.concat "\n" (header @ params_lines @ local_lines))
@@ -2061,7 +2136,7 @@ let emit_async_step ctor_map (f : Check.T.func) : string =
   List.iter (fun (x, _) -> Hashtbl.add frame_set x ()) locals;
   List.iter (fun (p, _) -> Hashtbl.add frame_set p ()) f.params;
   let body' = async_rewrite_to_frame frame_set f.body in
-  let segments = async_split_segments ctor_map body' in
+  let segments = async_split_segments ctor_map f.return_ty body' in
   let case_lines =
     List.concat_map (fun (state, lines) ->
       let indented = List.map (fun s -> "        " ^ s) lines in
@@ -2121,6 +2196,16 @@ let emit_async_sync_wrapper (f : Check.T.func) : string =
     List.map (fun (p, _) ->
       Printf.sprintf "    fr.%s = %s;" p p) f.params
   in
+  let return_stmt =
+    if scalar_like f.return_ty then
+      Printf.sprintf "    return (%s)fr.return_value;" (c_type f.return_ty)
+    else
+      Printf.sprintf
+        "    %s _ret;\n\
+         \    memcpy(&_ret, &fr.return_value, sizeof(_ret));\n\
+         \    return _ret;"
+        (c_type f.return_ty)
+  in
   Printf.sprintf
     "%s %s(%s) {\n\
      \    Frame_%s fr;\n\
@@ -2135,12 +2220,13 @@ let emit_async_sync_wrapper (f : Check.T.func) : string =
      \        ORTO_PENDING++;\n\
      \        orto_dispatch();\n\
      \    }\n\
-     \    return fr.return_value;\n\
+     %s\n\
      }"
     (c_type f.return_ty) f.name params_s
     f.name f.name
     (String.concat "\n" param_inits)
     f.name
+    return_stmt
 
 (* Render the static byte pool as a C array literal. Every "..." literal
    from the program ends up in this buffer at its assigned offset. The
@@ -2223,12 +2309,20 @@ let emit (prog : Check.T.program) : string =
            \ * / _orto_slot), so the dispatcher reads and writes those\n\
            \ * fields generically through an OrtoFrameHeader pointer. */\n\
            #include <liburing.h>\n\
+           #include <string.h>\n\
+           /* The header lives at the prefix of every Frame_<X>. We use\n\
+            * long long for last_res and return_value so any T up to 8\n\
+            * bytes (int, byte, bool, Region, Task, Stream, raw pointer,\n\
+            * double via bitcast) can travel through the slot pool\n\
+            * without per-T machinery. Wider returns (Array's 16-byte\n\
+            * handle, user structs > 8 bytes) need either a Region-\n\
+            * allocated boxed result or future work to widen this slot. */\n\
            typedef struct {\n\
            \    OrtoStepFn step;\n\
            \    int state;\n\
-           \    int last_res;\n\
-           \    int return_value;\n\
            \    int _orto_slot;   /* slot index in ORTO_SLOTS, -1 if stack-owned */\n\
+           \    long long last_res;\n\
+           \    long long return_value;\n\
            } OrtoFrameHeader;\n\
            /* ORTO_RING is intentionally non-static so user-side\n\
             * async-extern glue (extern fn read/write/recv/...) can\n\
@@ -2254,7 +2348,7 @@ let emit (prog : Check.T.program) : string =
            \    int next_free;\n\
            \    int status;\n\
            \    int waiter_state;\n\
-           \    int result;\n\
+           \    long long result;\n\
            \    OrtoFrameHeader *waiter;\n\
            \    OrtoSlotFrames frame;\n\
            } OrtoSlot;\n\
