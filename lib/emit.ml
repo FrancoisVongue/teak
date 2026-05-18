@@ -249,10 +249,13 @@ let c_binop = function
   | OpLt  -> "<"  | OpGt  -> ">"
   | OpLe  -> "<=" | OpGe  -> ">="
   | OpAnd -> "&&" | OpOr  -> "||"
+  | OpBOr -> "|"  | OpBAnd -> "&" | OpBXor -> "^"
+  | OpShl -> "<<" | OpShr -> ">>"
 
 let c_unop = function
-  | OpNeg -> "-"
-  | OpNot -> "!"
+  | OpNeg  -> "-"
+  | OpNot  -> "!"
+  | OpBNot -> "~"
 
 (* ---------- ADT emission ---------- *)
 

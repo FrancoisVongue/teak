@@ -65,6 +65,11 @@ type token =
   | TFatArrow     (* => *)
   | TPipe         (* |  *)
   | TPipeArrow    (* |> — pipeline: x |> f means f(x) *)
+  | TAmp          (* &  bitwise AND *)
+  | TCaret        (* ^  bitwise XOR *)
+  | TTilde        (* ~  bitwise NOT *)
+  | TShl          (* << *)
+  | TShr          (* >> *)
   | TPlus         (* +  *)
   | TMinus        (* -  *)
   | TStar         (* *  *)
@@ -146,6 +151,11 @@ let show = function
   | TFatArrow     -> "=>"
   | TPipe         -> "|"
   | TPipeArrow    -> "|>"
+  | TAmp          -> "&"
+  | TCaret        -> "^"
+  | TTilde        -> "~"
+  | TShl          -> "<<"
+  | TShr          -> ">>"
   | TPlus         -> "+"
   | TMinus        -> "-"
   | TStar         -> "*"

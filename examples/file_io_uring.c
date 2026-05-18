@@ -119,6 +119,20 @@ extern int orto_ring_send(uint8_t* handle, int fd, uint8_t* buf, int len_, int f
 
 extern int orto_ring_recv(uint8_t* handle, int fd, uint8_t* buf, int len_, int flags);
 
+extern int orto_ring_submit_read(uint8_t* handle, int fd, uint8_t* buf, int len_, int offset, int user_data);
+
+extern int orto_ring_submit_write(uint8_t* handle, int fd, uint8_t* buf, int len_, int offset, int user_data);
+
+extern int orto_ring_submit_send(uint8_t* handle, int fd, uint8_t* buf, int len_, int flags, int user_data);
+
+extern int orto_ring_submit_recv(uint8_t* handle, int fd, uint8_t* buf, int len_, int flags, int user_data);
+
+extern int orto_ring_flush(uint8_t* handle);
+
+extern int orto_ring_wait_one(uint8_t* handle, int* out_id);
+
+extern int orto_ring_peek_one(uint8_t* handle, int* out_id, int* out_res);
+
 extern int open(uint8_t* path, int flags, int mode);
 
 extern int close(int fd);

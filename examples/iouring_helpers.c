@@ -135,3 +135,92 @@ int orto_ring_recv(void *handle, int fd, void *buf, int len, int flags) {
     return submit_and_wait(ring);
 }
 
+/* ---------- Stage 2: non-blocking submit + manual completion drain ----------
+ *
+ * Pattern from the caller (orto side):
+ *
+ *   uring_submit_read(r, fd, buf1, 0, 1)   // tag = 1
+ *   uring_submit_read(r, fd, buf2, 0, 2)   // tag = 2
+ *   uring_submit_read(r, fd, buf3, 0, 3)   // tag = 3
+ *   uring_flush(r)                          // one syscall for all three
+ *
+ *   for i in 0..3 {
+ *       let c = uring_wait_one(r);
+ *       // c.id tells which one completed, c.res is its result
+ *   }
+ *
+ * Tag (user_data) is just an int the kernel echoes back in the CQE.
+ * Caller assigns it; common patterns: 0..N indices, struct pointer,
+ * enum tag. */
+
+int orto_ring_submit_read(void *handle, int fd, void *buf, int len,
+                          int offset, int user_data) {
+    struct io_uring *ring = handle;
+    struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
+    if (!sqe) return -ENOMEM;
+    io_uring_prep_read(sqe, fd, buf, (unsigned)len, (unsigned long long)offset);
+    io_uring_sqe_set_data(sqe, (void *)(long)user_data);
+    return 0;
+}
+
+int orto_ring_submit_write(void *handle, int fd, const void *buf, int len,
+                           int offset, int user_data) {
+    struct io_uring *ring = handle;
+    struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
+    if (!sqe) return -ENOMEM;
+    io_uring_prep_write(sqe, fd, buf, (unsigned)len, (unsigned long long)offset);
+    io_uring_sqe_set_data(sqe, (void *)(long)user_data);
+    return 0;
+}
+
+int orto_ring_submit_send(void *handle, int fd, const void *buf, int len,
+                          int flags, int user_data) {
+    struct io_uring *ring = handle;
+    struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
+    if (!sqe) return -ENOMEM;
+    io_uring_prep_send(sqe, fd, buf, (size_t)len, flags);
+    io_uring_sqe_set_data(sqe, (void *)(long)user_data);
+    return 0;
+}
+
+int orto_ring_submit_recv(void *handle, int fd, void *buf, int len,
+                          int flags, int user_data) {
+    struct io_uring *ring = handle;
+    struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
+    if (!sqe) return -ENOMEM;
+    io_uring_prep_recv(sqe, fd, buf, (size_t)len, flags);
+    io_uring_sqe_set_data(sqe, (void *)(long)user_data);
+    return 0;
+}
+
+int orto_ring_flush(void *handle) {
+    return io_uring_submit((struct io_uring *)handle);
+}
+
+/* Block until one CQE arrives. Write user_data to *out_id; return
+ * the CQE's res. */
+int orto_ring_wait_one(void *handle, int *out_id) {
+    struct io_uring *ring = handle;
+    struct io_uring_cqe *cqe;
+    int rc = io_uring_wait_cqe(ring, &cqe);
+    if (rc < 0) { if (out_id) *out_id = 0; return rc; }
+    if (out_id) *out_id = (int)(long)io_uring_cqe_get_data(cqe);
+    int res = cqe->res;
+    io_uring_cqe_seen(ring, cqe);
+    return res;
+}
+
+/* Non-blocking peek: returns 0 if no CQE ready, 1 if one consumed
+ * (out_res and out_id written), negative on error. */
+int orto_ring_peek_one(void *handle, int *out_id, int *out_res) {
+    struct io_uring *ring = handle;
+    struct io_uring_cqe *cqe;
+    int rc = io_uring_peek_cqe(ring, &cqe);
+    if (rc == -EAGAIN) return 0;
+    if (rc < 0) return rc;
+    if (out_id)  *out_id  = (int)(long)io_uring_cqe_get_data(cqe);
+    if (out_res) *out_res = cqe->res;
+    io_uring_cqe_seen(ring, cqe);
+    return 1;
+}
+

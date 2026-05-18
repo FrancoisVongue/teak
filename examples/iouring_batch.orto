@@ -1,0 +1,86 @@
+// Stage 2: batch I/O via io_uring.
+//
+// Open three files, submit one read on each WITHOUT blocking, flush all
+// submissions in a single `io_uring_submit` syscall, then drain three
+// CQEs. The same shape scales to thousands of in-flight ops.
+//
+// Build:
+//   dune exec bin/main.exe -- examples/iouring_batch.orto
+//   cc examples/iouring_batch.c examples/iouring_helpers.c \
+//      -luring -fsanitize=address,leak -g -o /tmp/iouring_batch
+//   /tmp/iouring_batch
+
+use iouring::{Ring, Completion, ring_new, ring_failed,
+              uring_open, uring_close, uring_write,
+              submit_read, flush, wait_one};
+use sys::{o_wronly, o_rdonly, o_creat, o_trunc};
+use str::{c_str, int_to_bytes, concat_all};
+use io::{print, println};
+
+fn write_temp(ring: Ring, path: Array[byte], content: Array[byte]) -> int {
+    let fd = uring_open(ring, path, o_wronly() + o_creat() + o_trunc(), 420);
+    if fd < 0 { return 1 }
+    uring_write(ring, fd, content, 0);
+    uring_close(ring, fd);
+    0
+}
+
+fn main() -> int {
+    let r = region(8192);
+    let ring = ring_new(16);
+    if ring_failed(ring) { return 10 }
+
+    // ---- prep: write three small files ----
+    let p1 = c_str(r, "/tmp/orto_batch_1.txt");
+    let p2 = c_str(r, "/tmp/orto_batch_2.txt");
+    let p3 = c_str(r, "/tmp/orto_batch_3.txt");
+
+    write_temp(ring, p1, "AAA");
+    write_temp(ring, p2, "BB");
+    write_temp(ring, p3, "CCCC");
+
+    // ---- open all three for read (sync — opens don't batch well here) ----
+    let fd1 = uring_open(ring, p1, o_rdonly(), 0);
+    let fd2 = uring_open(ring, p2, o_rdonly(), 0);
+    let fd3 = uring_open(ring, p3, o_rdonly(), 0);
+    if fd1 < 0 || fd2 < 0 || fd3 < 0 { return 11 }
+
+    // ---- batch: queue three reads, one flush, drain three CQEs ----
+    let buf1 = array(r, 16, to_byte(0));
+    let buf2 = array(r, 16, to_byte(0));
+    let buf3 = array(r, 16, to_byte(0));
+
+    submit_read(ring, fd1, buf1, 0, 101);
+    submit_read(ring, fd2, buf2, 0, 102);
+    submit_read(ring, fd3, buf3, 0, 103);
+
+    let submitted = flush(ring);
+    if submitted != 3 { return 12 }
+
+    let mut completed = 0;
+    let mut total_bytes = 0;
+    while completed < 3 {
+        let c = wait_one(ring);
+        if c.res < 0 { return 13 }
+        total_bytes := total_bytes + c.res;
+        completed := completed + 1;
+    }
+
+    uring_close(ring, fd1);
+    uring_close(ring, fd2);
+    uring_close(ring, fd3);
+
+    print(slice(buf1, 0, 3));   // AAA
+    print(slice(buf2, 0, 2));   // BB
+    print(slice(buf3, 0, 4));   // CCCC
+
+    println(concat_all(r, array(r, [
+        "\nbatched reads: ",
+        int_to_bytes(r, completed),
+        " ops, ",
+        int_to_bytes(r, total_bytes),
+        " bytes, 1 submit syscall",
+    ])));
+
+    0
+}

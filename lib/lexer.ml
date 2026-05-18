@@ -117,11 +117,15 @@ let lex (src : string) : token list =
     | '<' ->
         if !i + 1 < n && src.[!i + 1] = '=' then begin
           push TLe; i := !i + 2
+        end else if !i + 1 < n && src.[!i + 1] = '<' then begin
+          push TShl; i := !i + 2
         end else begin push TLt; incr i end
 
     | '>' ->
         if !i + 1 < n && src.[!i + 1] = '=' then begin
           push TGe; i := !i + 2
+        end else if !i + 1 < n && src.[!i + 1] = '>' then begin
+          push TShr; i := !i + 2
         end else begin push TGt; incr i end
 
     | '!' ->
@@ -131,6 +135,12 @@ let lex (src : string) : token list =
 
     | '&' when !i + 1 < n && src.[!i + 1] = '&' ->
         push TAndAnd; i := !i + 2
+
+    | '&' -> push TAmp; incr i
+
+    | '^' -> push TCaret; incr i
+
+    | '~' -> push TTilde; incr i
 
     | '|' when !i + 1 < n && src.[!i + 1] = '|' ->
         push TOrOr; i := !i + 2
@@ -181,45 +191,73 @@ let lex (src : string) : token list =
         push (TStringLit (Buffer.contents buf))
 
     | c when is_digit c ->
-        Buffer.clear buf;
-        while !i < n && is_digit src.[!i] do
-          Buffer.add_char buf src.[!i];
-          incr i
-        done;
-        (* Float literal if the integer part is followed by '.' + digit
-           or by 'e'/'E' (scientific). Plain `3.` is rejected — require
-           an explicit `3.0` to avoid ambiguity with method calls later. *)
-        let is_float =
-          (!i + 1 < n && src.[!i] = '.' && is_digit src.[!i + 1])
-          || (!i < n && (src.[!i] = 'e' || src.[!i] = 'E'))
-        in
-        if is_float then begin
-          if !i < n && src.[!i] = '.' then begin
-            Buffer.add_char buf '.';
-            incr i;
-            while !i < n && is_digit src.[!i] do
-              Buffer.add_char buf src.[!i];
-              incr i
-            done
-          end;
-          if !i < n && (src.[!i] = 'e' || src.[!i] = 'E') then begin
+        (* Detect 0x.../0b... prefixes BEFORE consuming digits. *)
+        if c = '0' && !i + 1 < n
+           && (src.[!i + 1] = 'x' || src.[!i + 1] = 'X') then begin
+          i := !i + 2;
+          Buffer.clear buf;
+          let is_hex ch =
+            is_digit ch || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')
+          in
+          while !i < n && is_hex src.[!i] do
+            Buffer.add_char buf src.[!i]; incr i
+          done;
+          if Buffer.length buf = 0 then
+            raise (Lex_error ("hex literal needs at least one digit", !i));
+          push (TInt (int_of_string ("0x" ^ Buffer.contents buf)))
+        end
+        else if c = '0' && !i + 1 < n
+                && (src.[!i + 1] = 'b' || src.[!i + 1] = 'B') then begin
+          i := !i + 2;
+          Buffer.clear buf;
+          while !i < n && (src.[!i] = '0' || src.[!i] = '1') do
+            Buffer.add_char buf src.[!i]; incr i
+          done;
+          if Buffer.length buf = 0 then
+            raise (Lex_error ("binary literal needs at least one digit", !i));
+          push (TInt (int_of_string ("0b" ^ Buffer.contents buf)))
+        end
+        else begin
+          Buffer.clear buf;
+          while !i < n && is_digit src.[!i] do
             Buffer.add_char buf src.[!i];
-            incr i;
-            if !i < n && (src.[!i] = '+' || src.[!i] = '-') then begin
-              Buffer.add_char buf src.[!i];
-              incr i
+            incr i
+          done;
+          (* Float literal if the integer part is followed by '.' + digit
+             or by 'e'/'E' (scientific). Plain `3.` is rejected — require
+             an explicit `3.0` to avoid ambiguity with method calls later. *)
+          let is_float =
+            (!i + 1 < n && src.[!i] = '.' && is_digit src.[!i + 1])
+            || (!i < n && (src.[!i] = 'e' || src.[!i] = 'E'))
+          in
+          if is_float then begin
+            if !i < n && src.[!i] = '.' then begin
+              Buffer.add_char buf '.';
+              incr i;
+              while !i < n && is_digit src.[!i] do
+                Buffer.add_char buf src.[!i];
+                incr i
+              done
             end;
-            if not (!i < n && is_digit src.[!i]) then
-              raise (Lex_error
-                ("malformed float exponent — digits required after `e`", !i));
-            while !i < n && is_digit src.[!i] do
+            if !i < n && (src.[!i] = 'e' || src.[!i] = 'E') then begin
               Buffer.add_char buf src.[!i];
-              incr i
-            done
-          end;
-          push (TFloat (float_of_string (Buffer.contents buf)))
-        end else
-          push (TInt (int_of_string (Buffer.contents buf)))
+              incr i;
+              if !i < n && (src.[!i] = '+' || src.[!i] = '-') then begin
+                Buffer.add_char buf src.[!i];
+                incr i
+              end;
+              if not (!i < n && is_digit src.[!i]) then
+                raise (Lex_error
+                  ("malformed float exponent — digits required after `e`", !i));
+              while !i < n && is_digit src.[!i] do
+                Buffer.add_char buf src.[!i];
+                incr i
+              done
+            end;
+            push (TFloat (float_of_string (Buffer.contents buf)))
+          end else
+            push (TInt (int_of_string (Buffer.contents buf)))
+        end
 
     | c when is_lower_ident_start c ->
         Buffer.clear buf;

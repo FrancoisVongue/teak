@@ -133,10 +133,13 @@ let binop_typing = function
   | OpLt | OpGt | OpLe | OpGe              -> OpComparison
   | OpAnd | OpOr                            -> OpFixed (TyBool, TyBool)
   | OpEq | OpNeq                            -> OpEqual
+  | OpBOr | OpBAnd | OpBXor                 -> OpFixed (TyInt, TyInt)
+  | OpShl | OpShr                           -> OpFixed (TyInt, TyInt)
 
 let unop_typing = function
-  | OpNeg -> (TyInt, TyInt)
-  | OpNot -> (TyBool, TyBool)
+  | OpNeg  -> (TyInt, TyInt)
+  | OpNot  -> (TyBool, TyBool)
+  | OpBNot -> (TyInt, TyInt)
 
 (* ---------- C reserved words ----------
 

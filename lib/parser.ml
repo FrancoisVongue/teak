@@ -155,11 +155,33 @@ and parse_pipe st =
   in
   loop lhs
 
+(* Operator precedence, low → high (mirrors C so it's familiar):
+     ||           — parse_or
+     &&           — parse_and
+     |            — parse_bor       (bitwise OR)
+     ^            — parse_bxor      (bitwise XOR)
+     &            — parse_band      (bitwise AND)
+     == !=        — parse_eq
+     < > <= >=    — parse_cmp
+     << >>        — parse_shift
+     + -          — parse_add
+     * / %        — parse_mul
+     ! - * ~      — parse_unary (prefix)
+*)
 and parse_or st =
   parse_binop_chain st [TOrOr, OpOr] parse_and
 
 and parse_and st =
-  parse_binop_chain st [TAndAnd, OpAnd] parse_eq
+  parse_binop_chain st [TAndAnd, OpAnd] parse_bor
+
+and parse_bor st =
+  parse_binop_chain st [TPipe, OpBOr] parse_bxor
+
+and parse_bxor st =
+  parse_binop_chain st [TCaret, OpBXor] parse_band
+
+and parse_band st =
+  parse_binop_chain st [TAmp, OpBAnd] parse_eq
 
 and parse_eq st =
   parse_binop_chain st [TEqEq, OpEq; TNeq, OpNeq] parse_cmp
@@ -167,7 +189,10 @@ and parse_eq st =
 and parse_cmp st =
   parse_binop_chain st
     [TLt, OpLt; TGt, OpGt; TLe, OpLe; TGe, OpGe]
-    parse_add
+    parse_shift
+
+and parse_shift st =
+  parse_binop_chain st [TShl, OpShl; TShr, OpShr] parse_add
 
 and parse_add st =
   parse_binop_chain st [TPlus, OpAdd; TMinus, OpSub] parse_mul
@@ -183,6 +208,10 @@ and parse_unary st =
       advance st;
       let inner = parse_unary st in
       EUnop (OpNot, inner)
+  | TTilde ->
+      advance st;
+      let inner = parse_unary st in
+      EUnop (OpBNot, inner)
   | TMinus ->
       advance st;
       let inner = parse_unary st in

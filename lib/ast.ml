@@ -38,8 +38,10 @@ type binop =
   | OpEq  | OpNeq
   | OpLt  | OpGt  | OpLe  | OpGe
   | OpAnd | OpOr
+  | OpBOr | OpBAnd | OpBXor             (* bitwise on int *)
+  | OpShl | OpShr                       (* shifts on int *)
 
-type unop = OpNeg | OpNot
+type unop = OpNeg | OpNot | OpBNot
 
 type expr =
   | EInt    of int
@@ -181,10 +183,13 @@ let show_binop = function
   | OpLt  -> "<"  | OpGt  -> ">"
   | OpLe  -> "<=" | OpGe  -> ">="
   | OpAnd -> "&&" | OpOr  -> "||"
+  | OpBOr -> "|"  | OpBAnd -> "&" | OpBXor -> "^"
+  | OpShl -> "<<" | OpShr -> ">>"
 
 let show_unop = function
-  | OpNeg -> "-"
-  | OpNot -> "!"
+  | OpNeg  -> "-"
+  | OpNot  -> "!"
+  | OpBNot -> "~"
 
 let rec show_expr = function
   | EInt n          -> string_of_int n

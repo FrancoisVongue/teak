@@ -111,3 +111,79 @@ fn uring_send(r: Ring, fd: int, buf: Array[byte], flags: int) -> int {
 fn uring_recv(r: Ring, fd: int, buf: Array[byte], flags: int) -> int {
     orto_ring_recv(r.handle, fd, array_data(buf), len(buf), flags)
 }
+
+// ---------- Stage 2: queue many ops, drain completions manually ----------
+
+extern fn orto_ring_submit_read(handle: *byte, fd: int,
+                                 buf: *byte, len_: int, offset: int,
+                                 user_data: int) -> int
+extern fn orto_ring_submit_write(handle: *byte, fd: int,
+                                  buf: *byte, len_: int, offset: int,
+                                  user_data: int) -> int
+extern fn orto_ring_submit_send(handle: *byte, fd: int,
+                                 buf: *byte, len_: int, flags: int,
+                                 user_data: int) -> int
+extern fn orto_ring_submit_recv(handle: *byte, fd: int,
+                                 buf: *byte, len_: int, flags: int,
+                                 user_data: int) -> int
+extern fn orto_ring_flush(handle: *byte) -> int
+extern fn orto_ring_wait_one(handle: *byte, out_id: *int) -> int
+extern fn orto_ring_peek_one(handle: *byte, out_id: *int, out_res: *int) -> int
+
+// One I/O completion. `id` is whatever tag the caller assigned to
+// the corresponding submit_*; `res` is io_uring's result code.
+struct Completion {
+    id:  int,
+    res: int,
+}
+
+// Queue a read. `user_data` is your tag — pick any int; you'll see
+// it back in `wait_one().id`. Returns 0 on success, -errno if the
+// submission queue is full.
+fn submit_read(r: Ring, fd: int, buf: Array[byte], offset: int, id: int) -> int {
+    orto_ring_submit_read(r.handle, fd, array_data(buf), len(buf), offset, id)
+}
+
+fn submit_write(r: Ring, fd: int, buf: Array[byte], offset: int, id: int) -> int {
+    orto_ring_submit_write(r.handle, fd, array_data(buf), len(buf), offset, id)
+}
+
+fn submit_send(r: Ring, fd: int, buf: Array[byte], flags: int, id: int) -> int {
+    orto_ring_submit_send(r.handle, fd, array_data(buf), len(buf), flags, id)
+}
+
+fn submit_recv(r: Ring, fd: int, buf: Array[byte], flags: int, id: int) -> int {
+    orto_ring_submit_recv(r.handle, fd, array_data(buf), len(buf), flags, id)
+}
+
+// Hand the kernel everything we've queued. One syscall regardless of
+// how many ops we batched. Returns number of SQEs accepted, -errno
+// on failure.
+fn flush(r: Ring) -> int {
+    orto_ring_flush(r.handle)
+}
+
+// Block until one CQE is available. Returns (id, res) as Completion.
+fn wait_one(r: Ring) -> Completion {
+    let id_buf = c_alloc[int](1);
+    let res = orto_ring_wait_one(r.handle, id_buf);
+    let id = id_buf[0];
+    c_free(id_buf);
+    Completion { id: id, res: res }
+}
+
+// Try to pick a completion without blocking. Returns None if none
+// ready, Some(Completion) if one was consumed.
+fn try_wait_one(r: Ring) -> Option[Completion] {
+    let id_buf  = c_alloc[int](1);
+    let res_buf = c_alloc[int](1);
+    let rc = orto_ring_peek_one(r.handle, id_buf, res_buf);
+    let result = if rc == 1 {
+        Some(Completion { id: id_buf[0], res: res_buf[0] })
+    } else {
+        None
+    };
+    c_free(id_buf);
+    c_free(res_buf);
+    result
+}
