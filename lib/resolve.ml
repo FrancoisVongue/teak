@@ -245,6 +245,11 @@ let rec resolve_expr
   | EDeref p -> EDeref (r p)
   | ETryAt (a, i) -> ETryAt (r a, r i)
   | EDrop e -> EDrop (r e)
+  | EAwait e -> EAwait (r e)
+  | EAwaitAll branches -> EAwaitAll (List.map r branches)
+  | EAwaitAllDyn e -> EAwaitAllDyn (r e)
+  | ESpawn e -> ESpawn (r e)
+  | EYield -> EYield
 
 let resolve_decl
     (map : (string * string) list) (mod_name : string) (decl : top_decl)
@@ -376,6 +381,11 @@ let expand_in_expr (aliases : (string * ty) list) (e : expr) : expr =
     | EDeref p -> EDeref (ex p)
     | ETryAt (a, i) -> ETryAt (ex a, ex i)
     | EDrop e -> EDrop (ex e)
+    | EAwait e -> EAwait (ex e)
+    | EAwaitAll branches -> EAwaitAll (List.map ex branches)
+    | EAwaitAllDyn e -> EAwaitAllDyn (ex e)
+    | ESpawn e -> ESpawn (ex e)
+    | EYield -> EYield
   in
   ex e
 

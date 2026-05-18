@@ -1635,6 +1635,14 @@ let rec infer (env : env) (tparams : string list)
              (show_ty (zonk tx_ty))));
       (T.TEDrop (tx, tx_ty), TyInt)
 
+  (* Stage 3 concurrency surface — parsed but typing + lowering not
+     yet implemented. See STAGE3_ASYNC.md §13. *)
+  | EAwait _ | EAwaitAll _ | EAwaitAllDyn _ | ESpawn _ | EYield ->
+      raise (Type_error
+        "Stage 3 concurrency (`await`, `await all`, `spawn`, `yield`) is \
+         not yet implemented — only the surface syntax is in place. See \
+         STAGE3_ASYNC.md.")
+
 and check_args env tparams vars callee_name param_tys args : T.expr list =
   let n_expected = List.length param_tys in
   let n_got = List.length args in

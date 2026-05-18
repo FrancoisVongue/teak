@@ -85,6 +85,12 @@ type expr =
   | ETryAt  of expr * expr                (* try_at(a, i) — None on dangling/oob *)
   | EDrop   of expr                       (* drop(x) — consume linear value, run its drop fn *)
   | EDeref  of expr                       (* *p — pointer deref *)
+  (* Stage 3 — completion-based concurrency. See STAGE3_ASYNC.md. *)
+  | EAwait    of expr                     (* await op — suspend until op completes *)
+  | EAwaitAll of expr list                (* await all { e1, e2, ... } — static concurrent block *)
+  | EAwaitAllDyn of expr                  (* await all <iterable> — dynamic concurrent join *)
+  | ESpawn  of expr                       (* spawn f(args) — detached or joinable task *)
+  | EYield                                (* yield — voluntary scheduling point *)
 
 and record_init_elem =
   | RAssign of string * expr   (* field: value *)
@@ -272,3 +278,10 @@ let rec show_expr = function
   | ETryAt (a, i) -> Printf.sprintf "try_at(%s, %s)" (show_expr a) (show_expr i)
   | EDrop e -> Printf.sprintf "drop(%s)" (show_expr e)
   | EDeref p -> Printf.sprintf "*%s" (show_expr p)
+  | EAwait e -> Printf.sprintf "await %s" (show_expr e)
+  | EAwaitAll branches ->
+      Printf.sprintf "await all { %s }"
+        (String.concat ", " (List.map show_expr branches))
+  | EAwaitAllDyn e -> Printf.sprintf "await all %s" (show_expr e)
+  | ESpawn e -> Printf.sprintf "spawn %s" (show_expr e)
+  | EYield -> "yield"
