@@ -44,22 +44,6 @@ typedef struct { int slot; int offset; int len; int expected_gen; } Array_byte;
 
 typedef int (*fn_Array_byte_int_int_to_int)(Array_byte, int, int);
 
-typedef int (*fn_int_to_int)(int);
-
-typedef Array_byte (*fn_Array_byte_Array_byte_int_to_Array_byte)(Array_byte, Array_byte, int);
-
-typedef int (*fn_Array_byte_Array_byte_int_to_bool)(Array_byte, Array_byte, int);
-
-typedef int (*fn_Array_byte_byte_int_to_int)(Array_byte, uint8_t, int);
-
-typedef int (*fn_Array_byte_Array_byte_int_to_int)(Array_byte, Array_byte, int);
-
-typedef uint8_t (*fn_byte_to_byte)(uint8_t);
-
-typedef int (*fn_Array_byte_Array_byte_to_bool)(Array_byte, Array_byte);
-
-typedef int (*fn_Array_byte_byte_to_int)(Array_byte, uint8_t);
-
 typedef Array_byte (*fn_Array_byte_Array_byte_to_Array_byte)(Array_byte, Array_byte);
 
 typedef int (*fn_Array_byte_to_int)(Array_byte);
@@ -70,53 +54,69 @@ typedef Array_byte (*fn_Region_int_to_Array_byte)(Region, int);
 
 typedef Array_byte (*fn_Region_Array_byte_Array_byte_to_Array_byte)(Region, Array_byte, Array_byte);
 
-typedef int (*fn_Array_byte_Array_byte_int_int_to_int)(Array_byte, Array_byte, int, int);
+typedef int (*fn_int_to_int)(int);
 
 typedef int (*fn_Array_byte_int_to_int)(Array_byte, int);
 
+typedef Array_byte (*fn_Array_byte_Array_byte_int_to_Array_byte)(Array_byte, Array_byte, int);
+
+typedef int (*fn_Array_byte_Array_byte_int_to_bool)(Array_byte, Array_byte, int);
+
+typedef uint8_t (*fn_byte_to_byte)(uint8_t);
+
+typedef int (*fn_Array_byte_Array_byte_int_to_int)(Array_byte, Array_byte, int);
+
+typedef int (*fn_Array_byte_byte_int_to_int)(Array_byte, uint8_t, int);
+
+typedef int (*fn_Array_byte_Array_byte_int_int_to_int)(Array_byte, Array_byte, int, int);
+
+typedef int (*fn_Array_byte_Array_byte_to_bool)(Array_byte, Array_byte);
+
+typedef int (*fn_Array_byte_byte_to_int)(Array_byte, uint8_t);
+
 extern int putchar(int c);
 
-int strings_real__write_digits(Array_byte dst, int n, int pos);
+int str__write_digits(Array_byte dst, int n, int pos);
 
-uint8_t strings_real__upper_byte(uint8_t b);
+Array_byte log_format__format_log(Region r, Array_byte input);
 
-Array_byte strings_real__int_to_bytes(Region r, int n);
+int str__parse_int_loop(Array_byte s, int i, int acc);
 
-Array_byte strings_real__lookup(Array_byte s, Array_byte key);
+int io__print_loop(Array_byte s, int i);
 
-int strings_real__bytes_eq(Array_byte a, Array_byte b);
+Array_byte str__int_to_bytes(Region r, int n);
 
-int strings_real__index_of_loop(Array_byte s, uint8_t c, int i);
+Array_byte str__lookup(Array_byte s, Array_byte key);
 
-Array_byte strings_real__to_upper(Region r, Array_byte s);
+int str__bytes_eq(Array_byte a, Array_byte b);
 
-int strings_real__to_upper_loop(Array_byte src, Array_byte dst, int i);
+int str__to_upper_loop(Array_byte src, Array_byte dst, int i);
 
-int strings_real__parse_int_loop(Array_byte s, int i, int acc);
+uint8_t str__upper_byte(uint8_t b);
 
-Array_byte strings_real__field_after(Array_byte s, Array_byte key, int from);
+int str__index_of(Array_byte s, uint8_t c);
 
-int strings_real__bytes_eq_loop(Array_byte a, Array_byte b, int i);
+int str__bytes_eq_loop(Array_byte a, Array_byte b, int i);
 
-Array_byte strings_real__format_log(Region r, Array_byte input);
+Array_byte str__to_upper(Region r, Array_byte s);
 
-int strings_real__parse_int(Array_byte s);
+int str__copy_into(Array_byte dst, Array_byte src, int at, int i);
 
-int strings_real__copy_into(Array_byte dst, Array_byte src, int at, int i);
+int str__index_of_loop(Array_byte s, uint8_t c, int i);
 
-int strings_real__index_of(Array_byte s, uint8_t c);
+int str__parse_int(Array_byte s);
 
-int strings_real__digits_count(int n);
+int str__digits_count(int n);
+
+Array_byte str__concat(Region r, Array_byte a, Array_byte b);
+
+Array_byte str__field_after(Array_byte s, Array_byte key, int from);
 
 int main(void);
 
-int strings_real__println(Array_byte s);
+int io__println(Array_byte s);
 
-int strings_real__print(Array_byte s, int i);
-
-Array_byte strings_real__concat(Region r, Array_byte a, Array_byte b);
-
-int strings_real__write_digits(Array_byte dst, int n, int pos) {
+int str__write_digits(Array_byte dst, int n, int pos) {
     int tmp_5;
     if ((n < 10)) {
         Array_byte _a_1 = dst;
@@ -133,24 +133,65 @@ int strings_real__write_digits(Array_byte dst, int n, int pos) {
         if (_i_4 < 0 || _i_4 >= _a_3.len) abort();
         ((uint8_t*)(ORTO_REGIONS[_a_3.slot].buffer + _a_3.offset))[_i_4] = ((uint8_t)((48 + (n % 10))));
         (void)(0);
-        tmp_5 = strings_real__write_digits(dst, (n / 10), (pos - 1));
+        tmp_5 = str__write_digits(dst, (n / 10), (pos - 1));
     }
     return tmp_5;
 }
 
-uint8_t strings_real__upper_byte(uint8_t b) {
-    int n_1 = ((int)(b));
-    uint8_t tmp_1;
-    if (((n_1 >= 97) && (n_1 <= 122))) {
-        tmp_1 = ((uint8_t)((n_1 - 32)));
-    } else {
-        tmp_1 = b;
-    }
-    return tmp_1;
+Array_byte log_format__format_log(Region r, Array_byte input) {
+    Array_byte name_1 = str__lookup(input, ((Array_byte){ .slot = 0, .offset = 0, .len = 4, .expected_gen = 1 }));
+    int age_2 = str__parse_int(str__lookup(input, ((Array_byte){ .slot = 0, .offset = 4, .len = 3, .expected_gen = 1 })));
+    Array_byte city_3 = str__lookup(input, ((Array_byte){ .slot = 0, .offset = 7, .len = 4, .expected_gen = 1 }));
+    Array_byte upper_name_4 = str__to_upper(r, name_1);
+    Array_byte age_bytes_5 = str__int_to_bytes(r, age_2);
+    Array_byte p1_6 = str__concat(r, ((Array_byte){ .slot = 0, .offset = 11, .len = 3, .expected_gen = 1 }), upper_name_4);
+    Array_byte p2_7 = str__concat(r, p1_6, ((Array_byte){ .slot = 0, .offset = 14, .len = 2, .expected_gen = 1 }));
+    Array_byte p3_8 = str__concat(r, p2_7, age_bytes_5);
+    Array_byte p4_9 = str__concat(r, p3_8, ((Array_byte){ .slot = 0, .offset = 16, .len = 11, .expected_gen = 1 }));
+    Array_byte p5_10 = str__concat(r, p4_9, city_3);
+    return str__concat(r, p5_10, ((Array_byte){ .slot = 0, .offset = 27, .len = 3, .expected_gen = 1 }));
 }
 
-Array_byte strings_real__int_to_bytes(Region r, int n) {
-    int k_1 = strings_real__digits_count(n);
+int str__parse_int_loop(Array_byte s, int i, int acc) {
+    int tmp_5;
+    if ((i >= s.len)) {
+        tmp_5 = acc;
+    } else {
+        Array_byte _a_1 = s;
+        int _i_2 = i;
+        if (ORTO_REGIONS[_a_1.slot].gen != _a_1.expected_gen) abort();
+        if (_i_2 < 0 || _i_2 >= _a_1.len) abort();
+        uint8_t _idx_3 = ((uint8_t*)(ORTO_REGIONS[_a_1.slot].buffer + _a_1.offset))[_i_2];
+        int n_1 = ((int)(_idx_3));
+        int tmp_4;
+        if (((n_1 >= 48) && (n_1 <= 57))) {
+            tmp_4 = str__parse_int_loop(s, (i + 1), ((acc * 10) + (n_1 - 48)));
+        } else {
+            tmp_4 = acc;
+        }
+        tmp_5 = tmp_4;
+    }
+    return tmp_5;
+}
+
+int io__print_loop(Array_byte s, int i) {
+    int tmp_4;
+    if ((i >= s.len)) {
+        tmp_4 = 0;
+    } else {
+        Array_byte _a_1 = s;
+        int _i_2 = i;
+        if (ORTO_REGIONS[_a_1.slot].gen != _a_1.expected_gen) abort();
+        if (_i_2 < 0 || _i_2 >= _a_1.len) abort();
+        uint8_t _idx_3 = ((uint8_t*)(ORTO_REGIONS[_a_1.slot].buffer + _a_1.offset))[_i_2];
+        (void)(putchar(((int)(_idx_3))));
+        tmp_4 = io__print_loop(s, (i + 1));
+    }
+    return tmp_4;
+}
+
+Array_byte str__int_to_bytes(Region r, int n) {
+    int k_1 = str__digits_count(n);
     Region _r_1 = r;
     if (ORTO_REGIONS[_r_1.slot].gen != _r_1.expected_gen) abort();
     int _n_2 = k_1;
@@ -162,62 +203,25 @@ Array_byte strings_real__int_to_bytes(Region r, int n) {
     for (int _i_5 = 0; _i_5 < _n_2; _i_5++) _slots_4[_i_5] = ((uint8_t)(0));
     Array_byte _arr_6 = ((Array_byte){ .slot = _r_1.slot, .offset = _off_3, .len = _n_2, .expected_gen = _r_1.expected_gen });
     Array_byte dst_2 = _arr_6;
-    (void)(strings_real__write_digits(dst_2, n, (k_1 - 1)));
+    (void)(str__write_digits(dst_2, n, (k_1 - 1)));
     return dst_2;
 }
 
-Array_byte strings_real__lookup(Array_byte s, Array_byte key) {
-    return strings_real__field_after(s, key, 0);
+Array_byte str__lookup(Array_byte s, Array_byte key) {
+    return str__field_after(s, key, 0);
 }
 
-int strings_real__bytes_eq(Array_byte a, Array_byte b) {
+int str__bytes_eq(Array_byte a, Array_byte b) {
     int tmp_1;
     if ((a.len == b.len)) {
-        tmp_1 = strings_real__bytes_eq_loop(a, b, 0);
+        tmp_1 = str__bytes_eq_loop(a, b, 0);
     } else {
         tmp_1 = 0;
     }
     return tmp_1;
 }
 
-int strings_real__index_of_loop(Array_byte s, uint8_t c, int i) {
-    int tmp_5;
-    if ((i >= s.len)) {
-        tmp_5 = (0 - 1);
-    } else {
-        Array_byte _a_1 = s;
-        int _i_2 = i;
-        if (ORTO_REGIONS[_a_1.slot].gen != _a_1.expected_gen) abort();
-        if (_i_2 < 0 || _i_2 >= _a_1.len) abort();
-        uint8_t _idx_3 = ((uint8_t*)(ORTO_REGIONS[_a_1.slot].buffer + _a_1.offset))[_i_2];
-        int tmp_4;
-        if ((_idx_3 == c)) {
-            tmp_4 = i;
-        } else {
-            tmp_4 = strings_real__index_of_loop(s, c, (i + 1));
-        }
-        tmp_5 = tmp_4;
-    }
-    return tmp_5;
-}
-
-Array_byte strings_real__to_upper(Region r, Array_byte s) {
-    Region _r_1 = r;
-    if (ORTO_REGIONS[_r_1.slot].gen != _r_1.expected_gen) abort();
-    int _n_2 = s.len;
-    if (_n_2 < 0) abort();
-    if (ORTO_REGIONS[_r_1.slot].used + (size_t)_n_2 * sizeof(uint8_t) > ORTO_REGIONS[_r_1.slot].buffer_size) abort();
-    int _off_3 = (int)ORTO_REGIONS[_r_1.slot].used;
-    ORTO_REGIONS[_r_1.slot].used += (size_t)_n_2 * sizeof(uint8_t);
-    uint8_t* _slots_4 = (uint8_t*)(ORTO_REGIONS[_r_1.slot].buffer + _off_3);
-    for (int _i_5 = 0; _i_5 < _n_2; _i_5++) _slots_4[_i_5] = ((uint8_t)(0));
-    Array_byte _arr_6 = ((Array_byte){ .slot = _r_1.slot, .offset = _off_3, .len = _n_2, .expected_gen = _r_1.expected_gen });
-    Array_byte dst_1 = _arr_6;
-    (void)(strings_real__to_upper_loop(s, dst_1, 0));
-    return dst_1;
-}
-
-int strings_real__to_upper_loop(Array_byte src, Array_byte dst, int i) {
+int str__to_upper_loop(Array_byte src, Array_byte dst, int i) {
     int tmp_6;
     if ((i >= src.len)) {
         tmp_6 = 0;
@@ -231,36 +235,144 @@ int strings_real__to_upper_loop(Array_byte src, Array_byte dst, int i) {
         int _i_2 = i;
         if (ORTO_REGIONS[_a_1.slot].gen != _a_1.expected_gen) abort();
         if (_i_2 < 0 || _i_2 >= _a_1.len) abort();
-        ((uint8_t*)(ORTO_REGIONS[_a_1.slot].buffer + _a_1.offset))[_i_2] = strings_real__upper_byte(_idx_5);
+        ((uint8_t*)(ORTO_REGIONS[_a_1.slot].buffer + _a_1.offset))[_i_2] = str__upper_byte(_idx_5);
         (void)(0);
-        tmp_6 = strings_real__to_upper_loop(src, dst, (i + 1));
+        tmp_6 = str__to_upper_loop(src, dst, (i + 1));
     }
     return tmp_6;
 }
 
-int strings_real__parse_int_loop(Array_byte s, int i, int acc) {
+uint8_t str__upper_byte(uint8_t b) {
+    int n_1 = ((int)(b));
+    uint8_t tmp_1;
+    if (((n_1 >= 97) && (n_1 <= 122))) {
+        tmp_1 = ((uint8_t)((n_1 - 32)));
+    } else {
+        tmp_1 = b;
+    }
+    return tmp_1;
+}
+
+int str__index_of(Array_byte s, uint8_t c) {
+    return str__index_of_loop(s, c, 0);
+}
+
+int str__bytes_eq_loop(Array_byte a, Array_byte b, int i) {
+    int tmp_8;
+    if ((i >= a.len)) {
+        tmp_8 = 1;
+    } else {
+        Array_byte _a_1 = a;
+        int _i_2 = i;
+        if (ORTO_REGIONS[_a_1.slot].gen != _a_1.expected_gen) abort();
+        if (_i_2 < 0 || _i_2 >= _a_1.len) abort();
+        uint8_t _idx_3 = ((uint8_t*)(ORTO_REGIONS[_a_1.slot].buffer + _a_1.offset))[_i_2];
+        Array_byte _a_4 = b;
+        int _i_5 = i;
+        if (ORTO_REGIONS[_a_4.slot].gen != _a_4.expected_gen) abort();
+        if (_i_5 < 0 || _i_5 >= _a_4.len) abort();
+        uint8_t _idx_6 = ((uint8_t*)(ORTO_REGIONS[_a_4.slot].buffer + _a_4.offset))[_i_5];
+        int tmp_7;
+        if ((_idx_3 == _idx_6)) {
+            tmp_7 = str__bytes_eq_loop(a, b, (i + 1));
+        } else {
+            tmp_7 = 0;
+        }
+        tmp_8 = tmp_7;
+    }
+    return tmp_8;
+}
+
+Array_byte str__to_upper(Region r, Array_byte s) {
+    Region _r_1 = r;
+    if (ORTO_REGIONS[_r_1.slot].gen != _r_1.expected_gen) abort();
+    int _n_2 = s.len;
+    if (_n_2 < 0) abort();
+    if (ORTO_REGIONS[_r_1.slot].used + (size_t)_n_2 * sizeof(uint8_t) > ORTO_REGIONS[_r_1.slot].buffer_size) abort();
+    int _off_3 = (int)ORTO_REGIONS[_r_1.slot].used;
+    ORTO_REGIONS[_r_1.slot].used += (size_t)_n_2 * sizeof(uint8_t);
+    uint8_t* _slots_4 = (uint8_t*)(ORTO_REGIONS[_r_1.slot].buffer + _off_3);
+    for (int _i_5 = 0; _i_5 < _n_2; _i_5++) _slots_4[_i_5] = ((uint8_t)(0));
+    Array_byte _arr_6 = ((Array_byte){ .slot = _r_1.slot, .offset = _off_3, .len = _n_2, .expected_gen = _r_1.expected_gen });
+    Array_byte dst_1 = _arr_6;
+    (void)(str__to_upper_loop(s, dst_1, 0));
+    return dst_1;
+}
+
+int str__copy_into(Array_byte dst, Array_byte src, int at, int i) {
+    int tmp_6;
+    if ((i >= src.len)) {
+        tmp_6 = 0;
+    } else {
+        Array_byte _a_3 = src;
+        int _i_4 = i;
+        if (ORTO_REGIONS[_a_3.slot].gen != _a_3.expected_gen) abort();
+        if (_i_4 < 0 || _i_4 >= _a_3.len) abort();
+        uint8_t _idx_5 = ((uint8_t*)(ORTO_REGIONS[_a_3.slot].buffer + _a_3.offset))[_i_4];
+        Array_byte _a_1 = dst;
+        int _i_2 = (at + i);
+        if (ORTO_REGIONS[_a_1.slot].gen != _a_1.expected_gen) abort();
+        if (_i_2 < 0 || _i_2 >= _a_1.len) abort();
+        ((uint8_t*)(ORTO_REGIONS[_a_1.slot].buffer + _a_1.offset))[_i_2] = _idx_5;
+        (void)(0);
+        tmp_6 = str__copy_into(dst, src, at, (i + 1));
+    }
+    return tmp_6;
+}
+
+int str__index_of_loop(Array_byte s, uint8_t c, int i) {
     int tmp_5;
     if ((i >= s.len)) {
-        tmp_5 = acc;
+        tmp_5 = (0 - 1);
     } else {
         Array_byte _a_1 = s;
         int _i_2 = i;
         if (ORTO_REGIONS[_a_1.slot].gen != _a_1.expected_gen) abort();
         if (_i_2 < 0 || _i_2 >= _a_1.len) abort();
         uint8_t _idx_3 = ((uint8_t*)(ORTO_REGIONS[_a_1.slot].buffer + _a_1.offset))[_i_2];
-        int n_1 = ((int)(_idx_3));
         int tmp_4;
-        if (((n_1 >= 48) && (n_1 <= 57))) {
-            tmp_4 = strings_real__parse_int_loop(s, (i + 1), ((acc * 10) + (n_1 - 48)));
+        if ((_idx_3 == c)) {
+            tmp_4 = i;
         } else {
-            tmp_4 = acc;
+            tmp_4 = str__index_of_loop(s, c, (i + 1));
         }
         tmp_5 = tmp_4;
     }
     return tmp_5;
 }
 
-Array_byte strings_real__field_after(Array_byte s, Array_byte key, int from) {
+int str__parse_int(Array_byte s) {
+    return str__parse_int_loop(s, 0, 0);
+}
+
+int str__digits_count(int n) {
+    int tmp_1;
+    if ((n < 10)) {
+        tmp_1 = 1;
+    } else {
+        tmp_1 = (1 + str__digits_count((n / 10)));
+    }
+    return tmp_1;
+}
+
+Array_byte str__concat(Region r, Array_byte a, Array_byte b) {
+    Region _r_1 = r;
+    if (ORTO_REGIONS[_r_1.slot].gen != _r_1.expected_gen) abort();
+    int _n_2 = (a.len + b.len);
+    if (_n_2 < 0) abort();
+    if (ORTO_REGIONS[_r_1.slot].used + (size_t)_n_2 * sizeof(uint8_t) > ORTO_REGIONS[_r_1.slot].buffer_size) abort();
+    int _off_3 = (int)ORTO_REGIONS[_r_1.slot].used;
+    ORTO_REGIONS[_r_1.slot].used += (size_t)_n_2 * sizeof(uint8_t);
+    uint8_t* _slots_4 = (uint8_t*)(ORTO_REGIONS[_r_1.slot].buffer + _off_3);
+    for (int _i_5 = 0; _i_5 < _n_2; _i_5++) _slots_4[_i_5] = ((uint8_t)(0));
+    Array_byte _arr_6 = ((Array_byte){ .slot = _r_1.slot, .offset = _off_3, .len = _n_2, .expected_gen = _r_1.expected_gen });
+    Array_byte dst_1 = _arr_6;
+    (void)(str__copy_into(dst_1, a, 0, 0));
+    (void)(str__copy_into(dst_1, b, a.len, 0));
+    return dst_1;
+}
+
+Array_byte str__field_after(Array_byte s, Array_byte key, int from) {
     Array_byte tmp_31;
     if ((from >= s.len)) {
         Array_byte _a_1 = s;
@@ -283,7 +395,7 @@ Array_byte strings_real__field_after(Array_byte s, Array_byte key, int from) {
         if (_i_10 < 0 || _i_10 >= _a_9.len) abort();
         uint8_t _idx_11 = ((uint8_t*)(ORTO_REGIONS[_a_9.slot].buffer + _a_9.offset))[_i_10];
         Array_byte tmp_30;
-        if ((((((from + key.len) + 1) <= s.len) && strings_real__bytes_eq(_sl_8, key)) && (_idx_11 == ((uint8_t)(61))))) {
+        if ((((((from + key.len) + 1) <= s.len) && str__bytes_eq(_sl_8, key)) && (_idx_11 == ((uint8_t)(61))))) {
             int val_start_3 = ((from + key.len) + 1);
             Array_byte _a_12 = s;
             int _lo_13 = val_start_3;
@@ -292,7 +404,7 @@ Array_byte strings_real__field_after(Array_byte s, Array_byte key, int from) {
             if (_lo_13 < 0 || _hi_14 < _lo_13 || _hi_14 > _a_12.len) abort();
             Array_byte _sl_15 = ((Array_byte){ .slot = _a_12.slot, .offset = _a_12.offset + _lo_13 * (int)sizeof(uint8_t), .len = _hi_14 - _lo_13, .expected_gen = _a_12.expected_gen });
             Array_byte rest_4 = _sl_15;
-            int comma_5 = strings_real__index_of(rest_4, ((uint8_t)(44)));
+            int comma_5 = str__index_of(rest_4, ((uint8_t)(44)));
             Array_byte tmp_20;
             if ((comma_5 == (0 - 1))) {
                 tmp_20 = rest_4;
@@ -314,7 +426,7 @@ Array_byte strings_real__field_after(Array_byte s, Array_byte key, int from) {
             if (_lo_22 < 0 || _hi_23 < _lo_22 || _hi_23 > _a_21.len) abort();
             Array_byte _sl_24 = ((Array_byte){ .slot = _a_21.slot, .offset = _a_21.offset + _lo_22 * (int)sizeof(uint8_t), .len = _hi_23 - _lo_22, .expected_gen = _a_21.expected_gen });
             Array_byte rest_1 = _sl_24;
-            int comma_2 = strings_real__index_of(rest_1, ((uint8_t)(44)));
+            int comma_2 = str__index_of(rest_1, ((uint8_t)(44)));
             Array_byte tmp_29;
             if ((comma_2 == (0 - 1))) {
                 Array_byte _a_25 = s;
@@ -325,92 +437,13 @@ Array_byte strings_real__field_after(Array_byte s, Array_byte key, int from) {
                 Array_byte _sl_28 = ((Array_byte){ .slot = _a_25.slot, .offset = _a_25.offset + _lo_26 * (int)sizeof(uint8_t), .len = _hi_27 - _lo_26, .expected_gen = _a_25.expected_gen });
                 tmp_29 = _sl_28;
             } else {
-                tmp_29 = strings_real__field_after(s, key, ((from + comma_2) + 1));
+                tmp_29 = str__field_after(s, key, ((from + comma_2) + 1));
             }
             tmp_30 = tmp_29;
         }
         tmp_31 = tmp_30;
     }
     return tmp_31;
-}
-
-int strings_real__bytes_eq_loop(Array_byte a, Array_byte b, int i) {
-    int tmp_8;
-    if ((i >= a.len)) {
-        tmp_8 = 1;
-    } else {
-        Array_byte _a_1 = a;
-        int _i_2 = i;
-        if (ORTO_REGIONS[_a_1.slot].gen != _a_1.expected_gen) abort();
-        if (_i_2 < 0 || _i_2 >= _a_1.len) abort();
-        uint8_t _idx_3 = ((uint8_t*)(ORTO_REGIONS[_a_1.slot].buffer + _a_1.offset))[_i_2];
-        Array_byte _a_4 = b;
-        int _i_5 = i;
-        if (ORTO_REGIONS[_a_4.slot].gen != _a_4.expected_gen) abort();
-        if (_i_5 < 0 || _i_5 >= _a_4.len) abort();
-        uint8_t _idx_6 = ((uint8_t*)(ORTO_REGIONS[_a_4.slot].buffer + _a_4.offset))[_i_5];
-        int tmp_7;
-        if ((_idx_3 == _idx_6)) {
-            tmp_7 = strings_real__bytes_eq_loop(a, b, (i + 1));
-        } else {
-            tmp_7 = 0;
-        }
-        tmp_8 = tmp_7;
-    }
-    return tmp_8;
-}
-
-Array_byte strings_real__format_log(Region r, Array_byte input) {
-    Array_byte name_1 = strings_real__lookup(input, ((Array_byte){ .slot = 0, .offset = 0, .len = 4, .expected_gen = 1 }));
-    int age_2 = strings_real__parse_int(strings_real__lookup(input, ((Array_byte){ .slot = 0, .offset = 4, .len = 3, .expected_gen = 1 })));
-    Array_byte city_3 = strings_real__lookup(input, ((Array_byte){ .slot = 0, .offset = 7, .len = 4, .expected_gen = 1 }));
-    Array_byte upper_name_4 = strings_real__to_upper(r, name_1);
-    Array_byte age_bytes_5 = strings_real__int_to_bytes(r, age_2);
-    Array_byte p1_6 = strings_real__concat(r, ((Array_byte){ .slot = 0, .offset = 11, .len = 3, .expected_gen = 1 }), upper_name_4);
-    Array_byte p2_7 = strings_real__concat(r, p1_6, ((Array_byte){ .slot = 0, .offset = 14, .len = 2, .expected_gen = 1 }));
-    Array_byte p3_8 = strings_real__concat(r, p2_7, age_bytes_5);
-    Array_byte p4_9 = strings_real__concat(r, p3_8, ((Array_byte){ .slot = 0, .offset = 16, .len = 11, .expected_gen = 1 }));
-    Array_byte p5_10 = strings_real__concat(r, p4_9, city_3);
-    return strings_real__concat(r, p5_10, ((Array_byte){ .slot = 0, .offset = 27, .len = 3, .expected_gen = 1 }));
-}
-
-int strings_real__parse_int(Array_byte s) {
-    return strings_real__parse_int_loop(s, 0, 0);
-}
-
-int strings_real__copy_into(Array_byte dst, Array_byte src, int at, int i) {
-    int tmp_6;
-    if ((i >= src.len)) {
-        tmp_6 = 0;
-    } else {
-        Array_byte _a_3 = src;
-        int _i_4 = i;
-        if (ORTO_REGIONS[_a_3.slot].gen != _a_3.expected_gen) abort();
-        if (_i_4 < 0 || _i_4 >= _a_3.len) abort();
-        uint8_t _idx_5 = ((uint8_t*)(ORTO_REGIONS[_a_3.slot].buffer + _a_3.offset))[_i_4];
-        Array_byte _a_1 = dst;
-        int _i_2 = (at + i);
-        if (ORTO_REGIONS[_a_1.slot].gen != _a_1.expected_gen) abort();
-        if (_i_2 < 0 || _i_2 >= _a_1.len) abort();
-        ((uint8_t*)(ORTO_REGIONS[_a_1.slot].buffer + _a_1.offset))[_i_2] = _idx_5;
-        (void)(0);
-        tmp_6 = strings_real__copy_into(dst, src, at, (i + 1));
-    }
-    return tmp_6;
-}
-
-int strings_real__index_of(Array_byte s, uint8_t c) {
-    return strings_real__index_of_loop(s, c, 0);
-}
-
-int strings_real__digits_count(int n) {
-    int tmp_1;
-    if ((n < 10)) {
-        tmp_1 = 1;
-    } else {
-        tmp_1 = (1 + strings_real__digits_count((n / 10)));
-    }
-    return tmp_1;
 }
 
 int main(void) {
@@ -427,47 +460,14 @@ int main(void) {
     ORTO_REGIONS[_slot_2].is_stack = 0;
     Region _reg_3 = ((Region){ .slot = _slot_2, .expected_gen = ORTO_REGIONS[_slot_2].gen });
     Region r_1 = _reg_3;
-    Array_byte line_2 = strings_real__format_log(r_1, ((Array_byte){ .slot = 0, .offset = 30, .len = 26, .expected_gen = 1 }));
-    (void)(strings_real__println(line_2));
+    Array_byte line_2 = log_format__format_log(r_1, ((Array_byte){ .slot = 0, .offset = 30, .len = 26, .expected_gen = 1 }));
+    (void)(io__println(line_2));
     int _let_result_4 = line_2.len;
     if (ORTO_REGIONS[r_1.slot].gen == r_1.expected_gen) { if (!ORTO_REGIONS[r_1.slot].is_stack) free(ORTO_REGIONS[r_1.slot].buffer); ORTO_REGIONS[r_1.slot].buffer = NULL; ORTO_REGIONS[r_1.slot].buffer_size = 0; ORTO_REGIONS[r_1.slot].used = 0; ORTO_REGIONS[r_1.slot].gen++; ORTO_REGIONS[r_1.slot].next_free = ORTO_REGION_FREE_HEAD; ORTO_REGION_FREE_HEAD = r_1.slot; }
     return _let_result_4;
 }
 
-int strings_real__println(Array_byte s) {
-    (void)(strings_real__print(s, 0));
+int io__println(Array_byte s) {
+    (void)(io__print_loop(s, 0));
     return putchar(10);
-}
-
-int strings_real__print(Array_byte s, int i) {
-    int tmp_4;
-    if ((i >= s.len)) {
-        tmp_4 = 0;
-    } else {
-        Array_byte _a_1 = s;
-        int _i_2 = i;
-        if (ORTO_REGIONS[_a_1.slot].gen != _a_1.expected_gen) abort();
-        if (_i_2 < 0 || _i_2 >= _a_1.len) abort();
-        uint8_t _idx_3 = ((uint8_t*)(ORTO_REGIONS[_a_1.slot].buffer + _a_1.offset))[_i_2];
-        (void)(putchar(((int)(_idx_3))));
-        tmp_4 = strings_real__print(s, (i + 1));
-    }
-    return tmp_4;
-}
-
-Array_byte strings_real__concat(Region r, Array_byte a, Array_byte b) {
-    Region _r_1 = r;
-    if (ORTO_REGIONS[_r_1.slot].gen != _r_1.expected_gen) abort();
-    int _n_2 = (a.len + b.len);
-    if (_n_2 < 0) abort();
-    if (ORTO_REGIONS[_r_1.slot].used + (size_t)_n_2 * sizeof(uint8_t) > ORTO_REGIONS[_r_1.slot].buffer_size) abort();
-    int _off_3 = (int)ORTO_REGIONS[_r_1.slot].used;
-    ORTO_REGIONS[_r_1.slot].used += (size_t)_n_2 * sizeof(uint8_t);
-    uint8_t* _slots_4 = (uint8_t*)(ORTO_REGIONS[_r_1.slot].buffer + _off_3);
-    for (int _i_5 = 0; _i_5 < _n_2; _i_5++) _slots_4[_i_5] = ((uint8_t)(0));
-    Array_byte _arr_6 = ((Array_byte){ .slot = _r_1.slot, .offset = _off_3, .len = _n_2, .expected_gen = _r_1.expected_gen });
-    Array_byte dst_1 = _arr_6;
-    (void)(strings_real__copy_into(dst_1, a, 0, 0));
-    (void)(strings_real__copy_into(dst_1, b, a.len, 0));
-    return dst_1;
 }

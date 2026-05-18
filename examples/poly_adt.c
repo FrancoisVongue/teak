@@ -40,22 +40,15 @@ static void orto_init_regions(void) {
 }
 typedef struct { int slot; int expected_gen; } Region;
 
-typedef struct Pair_int_bool Pair_int_bool;
-
 typedef struct Option_int Option_int;
+
+typedef struct poly_adt__Pair_int_bool poly_adt__Pair_int_bool;
 
 typedef int (*fn_Option_int_int_to_int)(Option_int, int);
 
-typedef int (*fn_Pair_int_bool_to_int)(Pair_int_bool);
+typedef int (*fn_poly_adt__Pair_int_bool_to_int)(poly_adt__Pair_int_bool);
 
-typedef int (*fn_Pair_int_bool_to_bool)(Pair_int_bool);
-
-struct Pair_int_bool {
-    int tag;
-    union {
-        struct { int f0; int f1; } MkPair;
-    } as;
-};
+typedef int (*fn_poly_adt__Pair_int_bool_to_bool)(poly_adt__Pair_int_bool);
 
 struct Option_int {
     int tag;
@@ -64,34 +57,27 @@ struct Option_int {
     } as;
 };
 
-int fst_int_bool(Pair_int_bool p);
+struct poly_adt__Pair_int_bool {
+    int tag;
+    union {
+        struct { int f0; int f1; } poly_adt__MkPair;
+    } as;
+};
 
-int snd_int_bool(Pair_int_bool p);
+int poly_adt__snd_int_bool(poly_adt__Pair_int_bool p);
 
-int or_default_int(Option_int o, int def);
+int poly_adt__or_default_int(Option_int o, int def);
+
+int poly_adt__fst_int_bool(poly_adt__Pair_int_bool p);
 
 int main(void);
 
-int fst_int_bool(Pair_int_bool p) {
-    Pair_int_bool scrut_1 = p;
+int poly_adt__snd_int_bool(poly_adt__Pair_int_bool p) {
+    poly_adt__Pair_int_bool scrut_1 = p;
     int match_result_2;
     switch (scrut_1.tag) {
-        case 0: { /* MkPair */
-            int a_1 = scrut_1.as.MkPair.f0;
-            match_result_2 = a_1;
-            break;
-        }
-        default: abort();
-    }
-    return match_result_2;
-}
-
-int snd_int_bool(Pair_int_bool p) {
-    Pair_int_bool scrut_1 = p;
-    int match_result_2;
-    switch (scrut_1.tag) {
-        case 0: { /* MkPair */
-            int b_1 = scrut_1.as.MkPair.f1;
+        case 0: { /* poly_adt__MkPair */
+            int b_1 = scrut_1.as.poly_adt__MkPair.f1;
             match_result_2 = b_1;
             break;
         }
@@ -100,7 +86,7 @@ int snd_int_bool(Pair_int_bool p) {
     return match_result_2;
 }
 
-int or_default_int(Option_int o, int def) {
+int poly_adt__or_default_int(Option_int o, int def) {
     Option_int scrut_1 = o;
     int match_result_2;
     switch (scrut_1.tag) {
@@ -118,15 +104,29 @@ int or_default_int(Option_int o, int def) {
     return match_result_2;
 }
 
+int poly_adt__fst_int_bool(poly_adt__Pair_int_bool p) {
+    poly_adt__Pair_int_bool scrut_1 = p;
+    int match_result_2;
+    switch (scrut_1.tag) {
+        case 0: { /* poly_adt__MkPair */
+            int a_1 = scrut_1.as.poly_adt__MkPair.f0;
+            match_result_2 = a_1;
+            break;
+        }
+        default: abort();
+    }
+    return match_result_2;
+}
+
 int main(void) {
     Option_int a_1 = ((Option_int){ .tag = 0, .as = { .Some = { .f0 = 7 } } });
     Option_int b_2 = ((Option_int){ .tag = 1 });
-    Pair_int_bool p_3 = ((Pair_int_bool){ .tag = 0, .as = { .MkPair = { .f0 = 110, .f1 = 1 } } });
-    int v1_4 = or_default_int(a_1, 0);
-    int v2_5 = or_default_int(b_2, 0);
-    int v3_6 = fst_int_bool(p_3);
+    poly_adt__Pair_int_bool p_3 = ((poly_adt__Pair_int_bool){ .tag = 0, .as = { .poly_adt__MkPair = { .f0 = 110, .f1 = 1 } } });
+    int v1_4 = poly_adt__or_default_int(a_1, 0);
+    int v2_5 = poly_adt__or_default_int(b_2, 0);
+    int v3_6 = poly_adt__fst_int_bool(p_3);
     int tmp_1;
-    if (snd_int_bool(p_3)) {
+    if (poly_adt__snd_int_bool(p_3)) {
         tmp_1 = 0;
     } else {
         tmp_1 = 99;

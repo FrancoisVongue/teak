@@ -42,26 +42,13 @@ typedef struct { int slot; int expected_gen; } Region;
 
 typedef int (*fn_int_to_int)(int);
 
-int square(int x);
+int first__classify(int n);
+
+int first__square(int x);
 
 int main(void);
 
-int classify(int n);
-
-int square(int x) {
-    return (x * x);
-}
-
-int main(void) {
-    int a_1 = square(5);
-    int b_2 = square(square(2));
-    int c_3 = classify(a_1);
-    int d_4 = classify((-7));
-    int total_5 = (((a_1 + b_2) + c_3) + d_4);
-    return total_5;
-}
-
-int classify(int n) {
+int first__classify(int n) {
     int tmp_2;
     if ((n < 0)) {
         tmp_2 = (-1);
@@ -75,4 +62,17 @@ int classify(int n) {
         tmp_2 = tmp_1;
     }
     return tmp_2;
+}
+
+int first__square(int x) {
+    return (x * x);
+}
+
+int main(void) {
+    int a_1 = first__square(5);
+    int b_2 = first__square(first__square(2));
+    int c_3 = first__classify(a_1);
+    int d_4 = first__classify((-7));
+    int total_5 = (((a_1 + b_2) + c_3) + d_4);
+    return total_5;
 }

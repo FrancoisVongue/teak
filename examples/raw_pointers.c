@@ -50,26 +50,13 @@ extern int putchar(int c);
 
 extern int write(int fd, uint8_t* buf, int n);
 
-int sum(int* p, int i, int n);
+int raw_pointers__fill(int* p, int i, int n);
 
-int fill(int* p, int i, int n);
+int raw_pointers__sum(int* p, int i, int n);
 
 int main(void);
 
-int sum(int* p, int i, int n) {
-    int tmp_4;
-    if ((i >= n)) {
-        tmp_4 = 0;
-    } else {
-        int* _a_1 = p;
-        int _i_2 = i;
-        int _idx_3 = _a_1[_i_2];
-        tmp_4 = (_idx_3 + sum(p, (i + 1), n));
-    }
-    return tmp_4;
-}
-
-int fill(int* p, int i, int n) {
+int raw_pointers__fill(int* p, int i, int n) {
     int tmp_3;
     if ((i >= n)) {
         tmp_3 = 0;
@@ -78,15 +65,28 @@ int fill(int* p, int i, int n) {
         int _i_2 = i;
         _a_1[_i_2] = (i * i);
         (void)(0);
-        tmp_3 = fill(p, (i + 1), n);
+        tmp_3 = raw_pointers__fill(p, (i + 1), n);
     }
     return tmp_3;
 }
 
+int raw_pointers__sum(int* p, int i, int n) {
+    int tmp_4;
+    if ((i >= n)) {
+        tmp_4 = 0;
+    } else {
+        int* _a_1 = p;
+        int _i_2 = i;
+        int _idx_3 = _a_1[_i_2];
+        tmp_4 = (_idx_3 + raw_pointers__sum(p, (i + 1), n));
+    }
+    return tmp_4;
+}
+
 int main(void) {
     int* buf_1 = ((int*)malloc((size_t)(5) * sizeof(int)));
-    (void)(fill(buf_1, 0, 5));
-    int total_2 = sum(buf_1, 0, 5);
+    (void)(raw_pointers__fill(buf_1, 0, 5));
+    int total_2 = raw_pointers__sum(buf_1, 0, 5);
     int first_3 = (*buf_1);
     (void)((free(buf_1), 0));
     int* p_4 = ((int*)NULL);

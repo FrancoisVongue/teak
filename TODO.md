@@ -67,6 +67,7 @@ generic функцию, и внутри функции линейность не
 - ~~Cascade destructors~~ — невозможны по построению (linear только Region).
 - ~~Strings~~ — `Array[byte]` + статический region для литералов + `slice` + `to_int`/`to_byte`.
 - ~~Raw pointers `*T`~~ — `c_alloc`/`c_free`/`*p`/`null_ptr`/`is_null`/`array_data` для FFI.
+- ~~Модули~~ — `use foo::bar;` selective import, auto-loading из той же директории, mangling `mod__name`.
 
 ---
 

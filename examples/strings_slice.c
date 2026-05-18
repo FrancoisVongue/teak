@@ -48,11 +48,11 @@ typedef int (*fn_Array_byte_int_to_int)(Array_byte, int);
 
 extern int putchar(int c);
 
-int print_loop(Array_byte s, int i);
+int strings_slice__print_loop(Array_byte s, int i);
 
 int main(void);
 
-int print_loop(Array_byte s, int i) {
+int strings_slice__print_loop(Array_byte s, int i) {
     int tmp_4;
     if ((i >= s.len)) {
         tmp_4 = 0;
@@ -63,7 +63,7 @@ int print_loop(Array_byte s, int i) {
         if (_i_2 < 0 || _i_2 >= _a_1.len) abort();
         uint8_t _idx_3 = ((uint8_t*)(ORTO_REGIONS[_a_1.slot].buffer + _a_1.offset))[_i_2];
         (void)(putchar(((int)(_idx_3))));
-        tmp_4 = print_loop(s, (i + 1));
+        tmp_4 = strings_slice__print_loop(s, (i + 1));
     }
     return tmp_4;
 }
@@ -77,7 +77,7 @@ int main(void) {
     if (_lo_2 < 0 || _hi_3 < _lo_2 || _hi_3 > _a_1.len) abort();
     Array_byte _sl_4 = ((Array_byte){ .slot = _a_1.slot, .offset = _a_1.offset + _lo_2 * (int)sizeof(uint8_t), .len = _hi_3 - _lo_2, .expected_gen = _a_1.expected_gen });
     Array_byte sub_2 = _sl_4;
-    (void)(print_loop(sub_2, 0));
+    (void)(strings_slice__print_loop(sub_2, 0));
     (void)(putchar(10));
     Array_byte _a_5 = sub_2;
     int _i_6 = 0;

@@ -48,51 +48,51 @@ typedef int (*fn_fn_int_to_int_int_to_int)(fn_int_to_int, int);
 
 typedef int (*fn_fn_int_to_bool_int_to_bool)(fn_int_to_bool, int);
 
-int twice(fn_int_to_int f, int x);
+int higher_order__is_even(int x);
 
-int inc(int x);
+int higher_order__inc(int x);
 
-int dbl(int x);
+int higher_order__twice(fn_int_to_int f, int x);
 
-int is_even(int x);
+int higher_order__apply_int_bool(fn_int_to_bool f, int x);
 
-int apply_int_int(fn_int_to_int f, int x);
+int higher_order__dbl(int x);
 
-int apply_int_bool(fn_int_to_bool f, int x);
+int higher_order__add5(int x);
 
 int main(void);
 
-int add5(int x);
+int higher_order__apply_int_int(fn_int_to_int f, int x);
 
-int twice(fn_int_to_int f, int x) {
-    return f(f(x));
-}
-
-int inc(int x) {
-    return (x + 1);
-}
-
-int dbl(int x) {
-    return (x * 2);
-}
-
-int is_even(int x) {
+int higher_order__is_even(int x) {
     return ((x % 2) == 0);
 }
 
-int apply_int_int(fn_int_to_int f, int x) {
+int higher_order__inc(int x) {
+    return (x + 1);
+}
+
+int higher_order__twice(fn_int_to_int f, int x) {
+    return f(f(x));
+}
+
+int higher_order__apply_int_bool(fn_int_to_bool f, int x) {
     return f(x);
 }
 
-int apply_int_bool(fn_int_to_bool f, int x) {
-    return f(x);
+int higher_order__dbl(int x) {
+    return (x * 2);
+}
+
+int higher_order__add5(int x) {
+    return (x + 5);
 }
 
 int main(void) {
-    int a_1 = twice(inc, 10);
-    int b_2 = twice(dbl, 3);
-    int c_3 = apply_int_int(add5, 20);
-    int d_bool_4 = apply_int_bool(is_even, 6);
+    int a_1 = higher_order__twice(higher_order__inc, 10);
+    int b_2 = higher_order__twice(higher_order__dbl, 3);
+    int c_3 = higher_order__apply_int_int(higher_order__add5, 20);
+    int d_bool_4 = higher_order__apply_int_bool(higher_order__is_even, 6);
     int tmp_1;
     if (d_bool_4) {
         tmp_1 = 100;
@@ -100,11 +100,11 @@ int main(void) {
         tmp_1 = 0;
     }
     int d_5 = tmp_1;
-    fn_int_to_int f_6 = inc;
+    fn_int_to_int f_6 = higher_order__inc;
     int e_7 = f_6(f_6(f_6(5)));
     return ((((a_1 + b_2) + c_3) + d_5) + e_7);
 }
 
-int add5(int x) {
-    return (x + 5);
+int higher_order__apply_int_int(fn_int_to_int f, int x) {
+    return f(x);
 }

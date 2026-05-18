@@ -42,20 +42,20 @@ typedef struct { int slot; int expected_gen; } Region;
 
 typedef int (*fn_int_to_int)(int);
 
-int fact(int n);
+int fact__fact(int n);
 
 int main(void);
 
-int fact(int n) {
+int fact__fact(int n) {
     int tmp_1;
     if ((n <= 1)) {
         tmp_1 = 1;
     } else {
-        tmp_1 = (n * fact((n - 1)));
+        tmp_1 = (n * fact__fact((n - 1)));
     }
     return tmp_1;
 }
 
 int main(void) {
-    return fact(7);
+    return fact__fact(7);
 }

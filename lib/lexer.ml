@@ -31,6 +31,7 @@ let lower_ident_or_keyword s =
   | "enum"  -> TEnum
   | "match" -> TMatch
   | "extern" -> TExtern
+  | "use"   -> TUse
   | "array" -> TArray
   | "len"   -> TLen
   | "slice" -> TSlice
@@ -73,6 +74,8 @@ let lex (src : string) : token list =
     | ':' ->
         if !i + 1 < n && src.[!i + 1] = '=' then begin
           push TColonEq; i := !i + 2
+        end else if !i + 1 < n && src.[!i + 1] = ':' then begin
+          push TColonCol; i := !i + 2
         end else begin
           push TColon; incr i
         end

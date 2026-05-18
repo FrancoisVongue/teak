@@ -40,63 +40,55 @@ static void orto_init_regions(void) {
 }
 typedef struct { int slot; int expected_gen; } Region;
 
-typedef struct Handler_int Handler_int;
+typedef struct handler__Handler_bool handler__Handler_bool;
 
-typedef struct Handler_bool Handler_bool;
-
-typedef int (*fn_int_to_int)(int);
+typedef struct handler__Handler_int handler__Handler_int;
 
 typedef int (*fn_int_to_bool)(int);
 
-typedef int (*fn_Handler_int_int_to_int)(Handler_int, int);
+typedef int (*fn_int_to_int)(int);
 
-typedef int (*fn_Handler_bool_int_to_bool)(Handler_bool, int);
+typedef int (*fn_handler__Handler_int_int_to_int)(handler__Handler_int, int);
 
-struct Handler_int {
+typedef int (*fn_handler__Handler_bool_int_to_bool)(handler__Handler_bool, int);
+
+struct handler__Handler_bool {
     int tag;
     union {
-        struct { int f0; } Constant;
-        struct { fn_int_to_int f0; } Compute;
+        struct { int f0; } handler__Constant;
+        struct { fn_int_to_bool f0; } handler__Compute;
     } as;
 };
 
-struct Handler_bool {
+struct handler__Handler_int {
     int tag;
     union {
-        struct { int f0; } Constant;
-        struct { fn_int_to_bool f0; } Compute;
+        struct { int f0; } handler__Constant;
+        struct { fn_int_to_int f0; } handler__Compute;
     } as;
 };
 
-int always_true(int x);
+int handler__run_bool(handler__Handler_bool h, int input);
 
-int square(int x);
+int handler__always_true(int x);
 
-int run_int(Handler_int h, int input);
+int handler__run_int(handler__Handler_int h, int input);
+
+int handler__square(int x);
 
 int main(void);
 
-int run_bool(Handler_bool h, int input);
-
-int always_true(int x) {
-    return (x == x);
-}
-
-int square(int x) {
-    return (x * x);
-}
-
-int run_int(Handler_int h, int input) {
-    Handler_int scrut_1 = h;
+int handler__run_bool(handler__Handler_bool h, int input) {
+    handler__Handler_bool scrut_1 = h;
     int match_result_2;
     switch (scrut_1.tag) {
-        case 0: { /* Constant */
-            int v_1 = scrut_1.as.Constant.f0;
+        case 0: { /* handler__Constant */
+            int v_1 = scrut_1.as.handler__Constant.f0;
             match_result_2 = v_1;
             break;
         }
-        case 1: { /* Compute */
-            fn_int_to_bool f_2 = scrut_1.as.Compute.f0;
+        case 1: { /* handler__Compute */
+            fn_int_to_int f_2 = scrut_1.as.handler__Compute.f0;
             match_result_2 = f_2(input);
             break;
         }
@@ -105,37 +97,45 @@ int run_int(Handler_int h, int input) {
     return match_result_2;
 }
 
+int handler__always_true(int x) {
+    return (x == x);
+}
+
+int handler__run_int(handler__Handler_int h, int input) {
+    handler__Handler_int scrut_1 = h;
+    int match_result_2;
+    switch (scrut_1.tag) {
+        case 0: { /* handler__Constant */
+            int v_1 = scrut_1.as.handler__Constant.f0;
+            match_result_2 = v_1;
+            break;
+        }
+        case 1: { /* handler__Compute */
+            fn_int_to_int f_2 = scrut_1.as.handler__Compute.f0;
+            match_result_2 = f_2(input);
+            break;
+        }
+        default: abort();
+    }
+    return match_result_2;
+}
+
+int handler__square(int x) {
+    return (x * x);
+}
+
 int main(void) {
-    Handler_int h1_1 = ((Handler_int){ .tag = 0, .as = { .Constant = { .f0 = 42 } } });
-    Handler_int h2_2 = ((Handler_int){ .tag = 1, .as = { .Compute = { .f0 = square } } });
-    Handler_bool h3_3 = ((Handler_bool){ .tag = 1, .as = { .Compute = { .f0 = always_true } } });
-    int a_4 = run_int(h1_1, 0);
-    int b_5 = run_int(h2_2, 7);
+    handler__Handler_int h1_1 = ((handler__Handler_int){ .tag = 0, .as = { .handler__Constant = { .f0 = 42 } } });
+    handler__Handler_int h2_2 = ((handler__Handler_int){ .tag = 1, .as = { .handler__Compute = { .f0 = handler__square } } });
+    handler__Handler_bool h3_3 = ((handler__Handler_bool){ .tag = 1, .as = { .handler__Compute = { .f0 = handler__always_true } } });
+    int a_4 = handler__run_int(h1_1, 0);
+    int b_5 = handler__run_int(h2_2, 7);
     int tmp_1;
-    if (run_bool(h3_3, 99)) {
+    if (handler__run_bool(h3_3, 99)) {
         tmp_1 = 10;
     } else {
         tmp_1 = 0;
     }
     int c_6 = tmp_1;
     return ((a_4 + b_5) + c_6);
-}
-
-int run_bool(Handler_bool h, int input) {
-    Handler_bool scrut_1 = h;
-    int match_result_2;
-    switch (scrut_1.tag) {
-        case 0: { /* Constant */
-            int v_1 = scrut_1.as.Constant.f0;
-            match_result_2 = v_1;
-            break;
-        }
-        case 1: { /* Compute */
-            fn_int_to_bool f_2 = scrut_1.as.Compute.f0;
-            match_result_2 = f_2(input);
-            break;
-        }
-        default: abort();
-    }
-    return match_result_2;
 }

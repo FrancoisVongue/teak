@@ -1,5 +1,11 @@
-(* Driver: reads an .orto source file, runs the pipeline,
-   writes a .c file with the result.
+(* Driver.
+
+   Reads an .orto entry file, follows its `use` statements to load
+   any referenced modules from the same directory, runs the full
+   pipeline (parse → resolve → check → mono → emit), writes a .c file.
+
+   A module's name is the basename of its .orto file. `use foo::bar;`
+   loads `<entry_dir>/foo.orto`. Cycles are rejected.
 
    Usage: orto INPUT.orto [-o OUTPUT.c] *)
 
@@ -20,6 +26,38 @@ let default_output input =
   then Filename.chop_suffix input ".orto" ^ ".c"
   else input ^ ".c"
 
+let module_name_of_path path =
+  Filename.basename path |> Filename.chop_extension
+
+(* Memoized loader. modules_loaded keeps insertion order; visiting
+   tracks the current DFS path for cycle detection. *)
+let modules_loaded : (string, Orto.Ast.program) Hashtbl.t = Hashtbl.create 8
+let load_order : string list ref = ref []
+
+let rec load_module entry_dir mod_name visiting =
+  if List.mem mod_name visiting then
+    failwith (Printf.sprintf "cyclic module dependency: %s -> %s"
+      (String.concat " -> " (List.rev visiting)) mod_name)
+  else if Hashtbl.mem modules_loaded mod_name then ()
+  else begin
+    let path = Filename.concat entry_dir (mod_name ^ ".orto") in
+    let src =
+      try read_file path
+      with Sys_error _ ->
+        failwith (Printf.sprintf
+          "module %S referenced via `use`, but %s not found"
+          mod_name path)
+    in
+    let toks = Orto.Lexer.lex src in
+    let ast = Orto.Parser.parse toks in
+    Hashtbl.add modules_loaded mod_name ast;
+    load_order := mod_name :: !load_order;
+    List.iter (function
+      | Orto.Ast.TopUse u ->
+          load_module entry_dir u.use_module (mod_name :: visiting)
+      | _ -> ()) ast
+  end
+
 let () =
   let args = Array.to_list Sys.argv in
   let (input, output) =
@@ -30,11 +68,26 @@ let () =
         prerr_endline "usage: orto INPUT.orto [-o OUTPUT.c]";
         exit 2
   in
-  let src = read_file input in
+  let entry_dir = Filename.dirname input in
+  let entry_module = module_name_of_path input in
   try
+    let src = read_file input in
     let toks = Orto.Lexer.lex src in
-    let ast  = Orto.Parser.parse toks in
-    let typed_ast = Orto.Check.check ast in
+    let ast = Orto.Parser.parse toks in
+    Hashtbl.add modules_loaded entry_module ast;
+    load_order := entry_module :: !load_order;
+    List.iter (function
+      | Orto.Ast.TopUse u ->
+          load_module entry_dir u.use_module [entry_module]
+      | _ -> ()) ast;
+    (* Preserve insertion order (entry first, dependencies after);
+       resolve.ml doesn't care about order, only about completeness. *)
+    let modules =
+      List.rev_map (fun mn -> (mn, Hashtbl.find modules_loaded mn))
+        !load_order
+    in
+    let merged = Orto.Resolve.resolve modules in
+    let typed_ast = Orto.Check.check merged in
     let mono = Orto.Mono.monomorphize typed_ast in
     let c = Orto.Emit.emit mono in
     write_file output c;
@@ -46,6 +99,12 @@ let () =
   | Orto.Parser.Parse_error msg ->
       Printf.eprintf "parse error: %s\n" msg;
       exit 1
+  | Orto.Resolve.Resolve_error msg ->
+      Printf.eprintf "module error: %s\n" msg;
+      exit 1
   | Orto.Check.Type_error msg ->
       Printf.eprintf "type error: %s\n" msg;
+      exit 1
+  | Failure msg ->
+      Printf.eprintf "%s\n" msg;
       exit 1

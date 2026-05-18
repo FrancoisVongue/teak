@@ -46,36 +46,36 @@ typedef int (*fn_fn_int_int_to_int_int_int_to_int)(fn_int_int_to_int, int, int);
 
 typedef int (*fn_fn_int_int_to_int_int_int_int_to_int)(fn_int_int_to_int, int, int, int);
 
-int times(int a, int b);
+int builtin_values__plus(int a, int b);
 
-int apply2(fn_int_int_to_int f, int a, int b);
+int builtin_values__apply2(fn_int_int_to_int f, int a, int b);
 
-int plus(int a, int b);
+int builtin_values__fold3(fn_int_int_to_int f, int x, int y, int z);
 
-int fold3(fn_int_int_to_int f, int x, int y, int z);
+int builtin_values__times(int a, int b);
 
 int main(void);
 
-int times(int a, int b) {
-    return (a * b);
-}
-
-int apply2(fn_int_int_to_int f, int a, int b) {
-    return f(a, b);
-}
-
-int plus(int a, int b) {
+int builtin_values__plus(int a, int b) {
     return (a + b);
 }
 
-int fold3(fn_int_int_to_int f, int x, int y, int z) {
+int builtin_values__apply2(fn_int_int_to_int f, int a, int b) {
+    return f(a, b);
+}
+
+int builtin_values__fold3(fn_int_int_to_int f, int x, int y, int z) {
     return f(f(x, y), z);
 }
 
+int builtin_values__times(int a, int b) {
+    return (a * b);
+}
+
 int main(void) {
-    int a_1 = apply2(plus, 10, 32);
-    int b_2 = apply2(times, 6, 7);
-    int c_3 = fold3(plus, 1, 2, 3);
+    int a_1 = builtin_values__apply2(builtin_values__plus, 10, 32);
+    int b_2 = builtin_values__apply2(builtin_values__times, 6, 7);
+    int c_3 = builtin_values__fold3(builtin_values__plus, 1, 2, 3);
     int d_4 = (5 + 5);
     return (((a_1 + b_2) + c_3) + d_4);
 }

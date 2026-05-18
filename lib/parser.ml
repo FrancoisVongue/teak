@@ -645,6 +645,52 @@ let parse_enum st : top_decl =
   expect st TRBrace;
   TopType { type_name = name; type_params; variants }
 
+(* ---------- use declarations ---------- *)
+
+(* `use foo::bar;` or `use foo::{a, b, c};` — selective import. *)
+let parse_use st : use_decl =
+  expect st TUse;
+  let module_name = match eat st with
+    | TIdent s -> s
+    | t -> raise (Parse_error
+      (Printf.sprintf "expected module name after `use`, got %s"
+         (Token.show t)))
+  in
+  expect st TColonCol;
+  let items =
+    if peek st = TLBrace then begin
+      advance st;
+      let rec collect () =
+        let item = match eat st with
+          | TIdent s     -> s
+          | TCtorIdent s -> s
+          | t -> raise (Parse_error
+            (Printf.sprintf "expected import item, got %s" (Token.show t)))
+        in
+        if peek st = TComma then begin
+          advance st;
+          if peek st = TRBrace then [item]
+          else item :: collect ()
+        end else [item]
+      in
+      let items = collect () in
+      expect st TRBrace;
+      items
+    end else
+      let item = match eat st with
+        | TIdent s     -> s
+        | TCtorIdent s -> s
+        | t -> raise (Parse_error
+          (Printf.sprintf "expected import item, got %s" (Token.show t)))
+      in
+      [item]
+  in
+  expect st TSemi;
+  if items = [] then
+    raise (Parse_error
+      (Printf.sprintf "use %s::{} — must import at least one item" module_name));
+  { use_module = module_name; use_items = items }
+
 (* ---------- entry point ---------- *)
 
 let parse (toks : token list) : program =
@@ -652,6 +698,9 @@ let parse (toks : token list) : program =
   let rec loop acc =
     match peek st with
     | TEOF  -> List.rev acc
+    | TUse ->
+        let u = parse_use st in
+        loop (TopUse u :: acc)
     | TFn   ->
         let f = parse_func st in
         loop (TopFunc f :: acc)
@@ -668,7 +717,7 @@ let parse (toks : token list) : program =
         let e = parse_extern st in
         loop (TopExtern e :: acc)
     | t -> raise (Parse_error
-      (Printf.sprintf "expected `fn`, `struct`, `enum`, or `extern` at top level, got %s"
+      (Printf.sprintf "expected `use`, `fn`, `struct`, `enum`, or `extern` at top level, got %s"
          (Token.show t)))
   in
   loop []

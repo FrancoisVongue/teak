@@ -46,47 +46,47 @@ typedef int (*fn_to_int)(void);
 
 extern int putchar(int c);
 
-int print_newline(void);
+int hello_putchar__print_int(int n);
 
-int fact(int n);
+int hello_putchar__print_digit(int d);
 
-int print_digit(int d);
-
-int print_int(int n);
+int hello_putchar__fact(int n);
 
 int main(void);
 
-int print_newline(void) {
-    return putchar(10);
-}
+int hello_putchar__print_newline(void);
 
-int fact(int n) {
+int hello_putchar__print_int(int n) {
     int tmp_1;
-    if ((n <= 1)) {
-        tmp_1 = 1;
+    if ((n < 10)) {
+        tmp_1 = hello_putchar__print_digit(n);
     } else {
-        tmp_1 = (n * fact((n - 1)));
+        (void)(hello_putchar__print_int((n / 10)));
+        tmp_1 = hello_putchar__print_digit((n % 10));
     }
     return tmp_1;
 }
 
-int print_digit(int d) {
+int hello_putchar__print_digit(int d) {
     return putchar((d + 48));
 }
 
-int print_int(int n) {
+int hello_putchar__fact(int n) {
     int tmp_1;
-    if ((n < 10)) {
-        tmp_1 = print_digit(n);
+    if ((n <= 1)) {
+        tmp_1 = 1;
     } else {
-        (void)(print_int((n / 10)));
-        tmp_1 = print_digit((n % 10));
+        tmp_1 = (n * hello_putchar__fact((n - 1)));
     }
     return tmp_1;
 }
 
 int main(void) {
-    (void)(print_int(fact(7)));
-    (void)(print_newline());
+    (void)(hello_putchar__print_int(hello_putchar__fact(7)));
+    (void)(hello_putchar__print_newline());
     return 0;
+}
+
+int hello_putchar__print_newline(void) {
+    return putchar(10);
 }

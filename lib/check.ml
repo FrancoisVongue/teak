@@ -246,6 +246,9 @@ let split_program (prog : program)
     | TopRecord r :: rest -> loop ts (r :: rs) fs es rest
     | TopFunc f   :: rest -> loop ts rs (f :: fs) es rest
     | TopExtern e :: rest -> loop ts rs fs (e :: es) rest
+    | TopUse _    :: _    ->
+        failwith "check: TopUse left in program — \
+                  the resolver should have eliminated all `use` decls"
   in
   loop [] [] [] [] prog
 

@@ -50,13 +50,13 @@ typedef int (*fn_Array_byte_to_int)(Array_byte);
 
 extern int putchar(int c);
 
-int print_loop(Array_byte s, int i);
+int strings_print__print_loop(Array_byte s, int i);
 
-int print(Array_byte s);
+int strings_print__print(Array_byte s);
 
 int main(void);
 
-int print_loop(Array_byte s, int i) {
+int strings_print__print_loop(Array_byte s, int i) {
     int tmp_4;
     if ((i >= s.len)) {
         tmp_4 = 0;
@@ -67,16 +67,16 @@ int print_loop(Array_byte s, int i) {
         if (_i_2 < 0 || _i_2 >= _a_1.len) abort();
         uint8_t _idx_3 = ((uint8_t*)(ORTO_REGIONS[_a_1.slot].buffer + _a_1.offset))[_i_2];
         (void)(putchar(((int)(_idx_3))));
-        tmp_4 = print_loop(s, (i + 1));
+        tmp_4 = strings_print__print_loop(s, (i + 1));
     }
     return tmp_4;
 }
 
-int print(Array_byte s) {
-    return print_loop(s, 0);
+int strings_print__print(Array_byte s) {
+    return strings_print__print_loop(s, 0);
 }
 
 int main(void) {
-    (void)(print(((Array_byte){ .slot = 0, .offset = 0, .len = 14, .expected_gen = 1 })));
+    (void)(strings_print__print(((Array_byte){ .slot = 0, .offset = 0, .len = 14, .expected_gen = 1 })));
     return 0;
 }

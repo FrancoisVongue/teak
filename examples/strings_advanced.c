@@ -50,13 +50,13 @@ typedef int (*fn_Array_byte_int_int_to_int)(Array_byte, int, int);
 
 extern int putchar(int c);
 
-int print_loop(Array_byte s, int i);
+int strings_advanced__print_loop(Array_byte s, int i);
 
-int write_alphabet(Array_byte a, int i, int n);
+int strings_advanced__write_alphabet(Array_byte a, int i, int n);
 
 int main(void);
 
-int print_loop(Array_byte s, int i) {
+int strings_advanced__print_loop(Array_byte s, int i) {
     int tmp_4;
     if ((i >= s.len)) {
         tmp_4 = 0;
@@ -67,12 +67,12 @@ int print_loop(Array_byte s, int i) {
         if (_i_2 < 0 || _i_2 >= _a_1.len) abort();
         uint8_t _idx_3 = ((uint8_t*)(ORTO_REGIONS[_a_1.slot].buffer + _a_1.offset))[_i_2];
         (void)(putchar(((int)(_idx_3))));
-        tmp_4 = print_loop(s, (i + 1));
+        tmp_4 = strings_advanced__print_loop(s, (i + 1));
     }
     return tmp_4;
 }
 
-int write_alphabet(Array_byte a, int i, int n) {
+int strings_advanced__write_alphabet(Array_byte a, int i, int n) {
     int tmp_3;
     if ((i >= n)) {
         tmp_3 = 0;
@@ -83,7 +83,7 @@ int write_alphabet(Array_byte a, int i, int n) {
         if (_i_2 < 0 || _i_2 >= _a_1.len) abort();
         ((uint8_t*)(ORTO_REGIONS[_a_1.slot].buffer + _a_1.offset))[_i_2] = ((uint8_t)((65 + i)));
         (void)(0);
-        tmp_3 = write_alphabet(a, (i + 1), n);
+        tmp_3 = strings_advanced__write_alphabet(a, (i + 1), n);
     }
     return tmp_3;
 }
@@ -91,8 +91,8 @@ int write_alphabet(Array_byte a, int i, int n) {
 int main(void) {
     Array_byte g1_1 = ((Array_byte){ .slot = 0, .offset = 0, .len = 3, .expected_gen = 1 });
     Array_byte g2_2 = ((Array_byte){ .slot = 0, .offset = 0, .len = 3, .expected_gen = 1 });
-    (void)(print_loop(g1_1, 0));
-    (void)(print_loop(g2_2, 0));
+    (void)(strings_advanced__print_loop(g1_1, 0));
+    (void)(strings_advanced__print_loop(g2_2, 0));
     int _n_1 = 64;
     if (_n_1 < 0) abort();
     if (ORTO_REGION_FREE_HEAD < 0) abort();
@@ -117,8 +117,8 @@ int main(void) {
     for (int _i_8 = 0; _i_8 < _n_5; _i_8++) _slots_7[_i_8] = ((uint8_t)(0));
     Array_byte _arr_9 = ((Array_byte){ .slot = _r_4.slot, .offset = _off_6, .len = _n_5, .expected_gen = _r_4.expected_gen });
     Array_byte buf_4 = _arr_9;
-    (void)(write_alphabet(buf_4, 0, 5));
-    (void)(print_loop(buf_4, 0));
+    (void)(strings_advanced__write_alphabet(buf_4, 0, 5));
+    (void)(strings_advanced__print_loop(buf_4, 0));
     (void)(putchar(10));
     Array_byte _a_10 = buf_4;
     int _lo_11 = 1;
@@ -127,7 +127,7 @@ int main(void) {
     if (_lo_11 < 0 || _hi_12 < _lo_11 || _hi_12 > _a_10.len) abort();
     Array_byte _sl_13 = ((Array_byte){ .slot = _a_10.slot, .offset = _a_10.offset + _lo_11 * (int)sizeof(uint8_t), .len = _hi_12 - _lo_11, .expected_gen = _a_10.expected_gen });
     Array_byte mid_5 = _sl_13;
-    (void)(print_loop(mid_5, 0));
+    (void)(strings_advanced__print_loop(mid_5, 0));
     (void)(putchar(10));
     Array_byte _a_14 = mid_5;
     int _i_15 = 0;

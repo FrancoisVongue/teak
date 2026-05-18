@@ -45,22 +45,21 @@
 - Dead-name tracking — use-after-move = compile error.
 - Ветки `if`/`match` обязаны сходиться в одном live-set.
 - Tail-position consume — bare имя в хвосте функции = move.
+- `else if` цепочки без вложенных скобок.
+
+**Модули:**
+- Один файл = один модуль, имя из имени файла (`str.orto` → `str`).
+- `use foo::bar;` или `use foo::{a, b, c};` — selective import.
+- Driver автоматически подгружает referenced модули из той же директории. Циклы — compile error.
+- Mangling: `concat` в `str.orto` становится `str__concat`. References в `use'й`-щем модуле резолвятся прозрачно.
+- Builtin names (`Array`, `Region`, `Option`, `Some`, `None`, `byte`) и `main` не мангляются.
+- Externs не мангляются (имя в C = имя в orto), дедуплицируются по имени.
 
 ---
 
 ## → Дорога вперёд
 
-### 1. Модули *(следующее)*
-
-`module foo; use foo::bar;` — разделение программ на файлы. Открывает дорогу к stdlib.
-
-Минимально:
-- Один файл = один модуль.
-- `use path::item;` импортирует.
-- Не плодим cyclic-зависимости.
-- Маньглинг имён включает имя модуля.
-
-### 2. Stdlib
+### 1. Stdlib *(следующее)*
 
 Когда модули появятся:
 - `std::gen_arena` — generational arena поверх `Array[Slot[T]]`. Game-style handle tables, resource pools, evicting caches (где базовый Region — bump-only и не освобождает per-entry).
@@ -70,7 +69,7 @@
 
 Все — orto code, не compiler features.
 
-### 3. `try_at(a, i)` для defensive чтения
+### 2. `try_at(a, i)` для defensive чтения
 
 Дефолтный `a[i]` остаётся abort-on-dangling (быстрый, для обычных случаев где регион гарантированно жив). Добавим safe-вариант:
 - `try_at(a, i)` → `Option[T]`.

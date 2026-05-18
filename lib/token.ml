@@ -21,6 +21,7 @@ type token =
   | TExtern
   | TStruct
   | TEnum
+  | TUse           (* use mod::item; — selective import *)
   | TArray        (* array — sized buffer allocated in a region *)
   | TLen          (* len — array length *)
   | TSlice        (* slice(a, lo, hi) — sub-handle into the same region *)
@@ -44,6 +45,7 @@ type token =
   | TRBracket     (* ] *)
   | TComma
   | TColon
+  | TColonCol     (* :: — module path separator *)
   | TSemi
   | TEq
   | TArrow        (* -> *)
@@ -87,6 +89,7 @@ let show = function
   | TExtern       -> "EXTERN"
   | TStruct       -> "STRUCT"
   | TEnum         -> "ENUM"
+  | TUse          -> "USE"
   | TArray        -> "ARRAY"
   | TLen          -> "LEN"
   | TSlice        -> "SLICE"
@@ -109,6 +112,7 @@ let show = function
   | TRBracket     -> "]"
   | TComma        -> ","
   | TColon        -> ":"
+  | TColonCol     -> "::"
   | TSemi         -> ";"
   | TEq           -> "="
   | TArrow        -> "->"

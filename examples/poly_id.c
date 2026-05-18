@@ -44,23 +44,23 @@ typedef int (*fn_int_to_int)(int);
 
 typedef int (*fn_bool_to_bool)(int);
 
-int id_bool(int x);
+int poly_id__id_bool(int x);
 
-int id_int(int x);
+int poly_id__id_int(int x);
 
 int main(void);
 
-int id_bool(int x) {
+int poly_id__id_bool(int x) {
     return x;
 }
 
-int id_int(int x) {
+int poly_id__id_int(int x) {
     return x;
 }
 
 int main(void) {
-    int a_1 = id_int(7);
-    int b_2 = id_bool(1);
+    int a_1 = poly_id__id_int(7);
+    int b_2 = poly_id__id_bool(1);
     int tmp_1;
     if (b_2) {
         tmp_1 = (a_1 + 35);

@@ -104,11 +104,19 @@ type extern_decl = {
   ext_return_ty : ty;
 }
 
+(* `use mod::{a, b, c};` — selective import from another module.
+   Items must be a non-empty list; bare `use mod;` is not supported. *)
+type use_decl = {
+  use_module : string;
+  use_items  : string list;
+}
+
 type top_decl =
   | TopType   of type_decl
   | TopRecord of record_decl
   | TopFunc   of func
   | TopExtern of extern_decl
+  | TopUse    of use_decl
 
 type program = top_decl list
 

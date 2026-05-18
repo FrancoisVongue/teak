@@ -42,17 +42,40 @@ typedef struct { int slot; int expected_gen; } Region;
 
 typedef struct { int slot; int offset; int len; int expected_gen; } Array_int;
 
-typedef int (*fn_Array_int_Array_int_int_to_int)(Array_int, Array_int, int);
-
 typedef int (*fn_Array_int_int_int_to_int)(Array_int, int, int);
 
-int build_histogram(Array_int values, Array_int counters, int i);
+typedef int (*fn_Array_int_Array_int_int_to_int)(Array_int, Array_int, int);
 
-int find_max(Array_int counters, int i, int best);
+int histogram__find_max(Array_int counters, int i, int best);
+
+int histogram__build_histogram(Array_int values, Array_int counters, int i);
 
 int main(void);
 
-int build_histogram(Array_int values, Array_int counters, int i) {
+int histogram__find_max(Array_int counters, int i, int best) {
+    int tmp_5;
+    if ((i < counters.len)) {
+        Array_int _a_1 = counters;
+        int _i_2 = i;
+        if (ORTO_REGIONS[_a_1.slot].gen != _a_1.expected_gen) abort();
+        if (_i_2 < 0 || _i_2 >= _a_1.len) abort();
+        int _idx_3 = ((int*)(ORTO_REGIONS[_a_1.slot].buffer + _a_1.offset))[_i_2];
+        int v_1 = _idx_3;
+        int tmp_4;
+        if ((v_1 > best)) {
+            tmp_4 = v_1;
+        } else {
+            tmp_4 = best;
+        }
+        int new_best_2 = tmp_4;
+        tmp_5 = histogram__find_max(counters, (i + 1), new_best_2);
+    } else {
+        tmp_5 = best;
+    }
+    return tmp_5;
+}
+
+int histogram__build_histogram(Array_int values, Array_int counters, int i) {
     int tmp_9;
     if ((i < values.len)) {
         Array_int _a_1 = values;
@@ -72,34 +95,11 @@ int build_histogram(Array_int values, Array_int counters, int i) {
         if (_i_5 < 0 || _i_5 >= _a_4.len) abort();
         ((int*)(ORTO_REGIONS[_a_4.slot].buffer + _a_4.offset))[_i_5] = (_idx_8 + 1);
         (void)(0);
-        tmp_9 = build_histogram(values, counters, (i + 1));
+        tmp_9 = histogram__build_histogram(values, counters, (i + 1));
     } else {
         tmp_9 = 0;
     }
     return tmp_9;
-}
-
-int find_max(Array_int counters, int i, int best) {
-    int tmp_5;
-    if ((i < counters.len)) {
-        Array_int _a_1 = counters;
-        int _i_2 = i;
-        if (ORTO_REGIONS[_a_1.slot].gen != _a_1.expected_gen) abort();
-        if (_i_2 < 0 || _i_2 >= _a_1.len) abort();
-        int _idx_3 = ((int*)(ORTO_REGIONS[_a_1.slot].buffer + _a_1.offset))[_i_2];
-        int v_1 = _idx_3;
-        int tmp_4;
-        if ((v_1 > best)) {
-            tmp_4 = v_1;
-        } else {
-            tmp_4 = best;
-        }
-        int new_best_2 = tmp_4;
-        tmp_5 = find_max(counters, (i + 1), new_best_2);
-    } else {
-        tmp_5 = best;
-    }
-    return tmp_5;
 }
 
 int main(void) {
@@ -143,8 +143,8 @@ int main(void) {
     for (int _i_12 = 0; _i_12 < _n_9; _i_12++) _slots_11[_i_12] = 0;
     Array_int _arr_13 = ((Array_int){ .slot = _r_8.slot, .offset = _off_10, .len = _n_9, .expected_gen = _r_8.expected_gen });
     Array_int counters_3 = _arr_13;
-    (void)(build_histogram(values_2, counters_3, 0));
-    int _let_result_14 = find_max(counters_3, 0, 0);
+    (void)(histogram__build_histogram(values_2, counters_3, 0));
+    int _let_result_14 = histogram__find_max(counters_3, 0, 0);
     if (ORTO_REGIONS[r_1.slot].gen == r_1.expected_gen) { if (!ORTO_REGIONS[r_1.slot].is_stack) free(ORTO_REGIONS[r_1.slot].buffer); ORTO_REGIONS[r_1.slot].buffer = NULL; ORTO_REGIONS[r_1.slot].buffer_size = 0; ORTO_REGIONS[r_1.slot].used = 0; ORTO_REGIONS[r_1.slot].gen++; ORTO_REGIONS[r_1.slot].next_free = ORTO_REGION_FREE_HEAD; ORTO_REGION_FREE_HEAD = r_1.slot; }
     return _let_result_14;
 }

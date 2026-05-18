@@ -40,23 +40,15 @@ static void orto_init_regions(void) {
 }
 typedef struct { int slot; int expected_gen; } Region;
 
-typedef struct ResultInt ResultInt;
-
 typedef struct Option_int Option_int;
 
-typedef ResultInt (*fn_int_int_to_ResultInt)(int, int);
+typedef struct option_result__ResultInt option_result__ResultInt;
+
+typedef option_result__ResultInt (*fn_int_int_to_option_result__ResultInt)(int, int);
 
 typedef Option_int (*fn_int_int_to_Option_int)(int, int);
 
 typedef int (*fn_Option_int_to_int)(Option_int);
-
-struct ResultInt {
-    int tag;
-    union {
-        struct { int f0; } Ok;
-        struct { int f0; } Err;
-    } as;
-};
 
 struct Option_int {
     int tag;
@@ -65,15 +57,23 @@ struct Option_int {
     } as;
 };
 
-Option_int first_positive(int a, int b);
+struct option_result__ResultInt {
+    int tag;
+    union {
+        struct { int f0; } option_result__Ok;
+        struct { int f0; } option_result__Err;
+    } as;
+};
 
-ResultInt safe_div(int a, int b);
+Option_int option_result__first_positive(int a, int b);
+
+option_result__ResultInt option_result__safe_div(int a, int b);
+
+int option_result__or_zero(Option_int o);
 
 int main(void);
 
-int or_zero(Option_int o);
-
-Option_int first_positive(int a, int b) {
+Option_int option_result__first_positive(int a, int b) {
     Option_int tmp_2;
     if ((a > 0)) {
         tmp_2 = ((Option_int){ .tag = 0, .as = { .Some = { .f0 = a } } });
@@ -89,39 +89,17 @@ Option_int first_positive(int a, int b) {
     return tmp_2;
 }
 
-ResultInt safe_div(int a, int b) {
-    ResultInt tmp_1;
+option_result__ResultInt option_result__safe_div(int a, int b) {
+    option_result__ResultInt tmp_1;
     if ((b == 0)) {
-        tmp_1 = ((ResultInt){ .tag = 1, .as = { .Err = { .f0 = 1 } } });
+        tmp_1 = ((option_result__ResultInt){ .tag = 1, .as = { .option_result__Err = { .f0 = 1 } } });
     } else {
-        tmp_1 = ((ResultInt){ .tag = 0, .as = { .Ok = { .f0 = (a / b) } } });
+        tmp_1 = ((option_result__ResultInt){ .tag = 0, .as = { .option_result__Ok = { .f0 = (a / b) } } });
     }
     return tmp_1;
 }
 
-int main(void) {
-    ResultInt r_1 = safe_div(10, 2);
-    ResultInt scrut_1 = r_1;
-    int match_result_2;
-    switch (scrut_1.tag) {
-        case 0: { /* Ok */
-            int q_2 = scrut_1.as.Ok.f0;
-            match_result_2 = q_2;
-            break;
-        }
-        case 1: { /* Err */
-            match_result_2 = 0;
-            break;
-        }
-        default: abort();
-    }
-    int v_3 = match_result_2;
-    Option_int o_4 = first_positive((0 - 1), 7);
-    int w_5 = or_zero(o_4);
-    return ((v_3 - w_5) + 13);
-}
-
-int or_zero(Option_int o) {
+int option_result__or_zero(Option_int o) {
     Option_int scrut_1 = o;
     int match_result_2;
     switch (scrut_1.tag) {
@@ -137,4 +115,26 @@ int or_zero(Option_int o) {
         default: abort();
     }
     return match_result_2;
+}
+
+int main(void) {
+    option_result__ResultInt r_1 = option_result__safe_div(10, 2);
+    option_result__ResultInt scrut_1 = r_1;
+    int match_result_2;
+    switch (scrut_1.tag) {
+        case 0: { /* option_result__Ok */
+            int q_2 = scrut_1.as.option_result__Ok.f0;
+            match_result_2 = q_2;
+            break;
+        }
+        case 1: { /* option_result__Err */
+            match_result_2 = 0;
+            break;
+        }
+        default: abort();
+    }
+    int v_3 = match_result_2;
+    Option_int o_4 = option_result__first_positive((0 - 1), 7);
+    int w_5 = option_result__or_zero(o_4);
+    return ((v_3 - w_5) + 13);
 }

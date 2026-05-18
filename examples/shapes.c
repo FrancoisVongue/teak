@@ -40,66 +40,50 @@ static void orto_init_regions(void) {
 }
 typedef struct { int slot; int expected_gen; } Region;
 
-typedef struct Shape Shape;
+typedef struct shapes__Shape shapes__Shape;
 
-typedef struct Sign Sign;
+typedef struct shapes__Sign shapes__Sign;
 
-typedef int (*fn_Shape_to_int)(Shape);
+typedef int (*fn_shapes__Shape_to_int)(shapes__Shape);
 
-typedef Sign (*fn_int_to_Sign)(int);
+typedef shapes__Sign (*fn_int_to_shapes__Sign)(int);
 
-struct Shape {
+struct shapes__Shape {
     int tag;
     union {
-        struct { int f0; } Circle;
-        struct { int f0; int f1; } Rect;
-        struct { int f0; } Square;
+        struct { int f0; } shapes__Circle;
+        struct { int f0; int f1; } shapes__Rect;
+        struct { int f0; } shapes__Square;
     } as;
 };
 
-struct Sign {
+struct shapes__Sign {
     int tag;
 };
 
-Sign sign_of(int n);
+int shapes__area(shapes__Shape s);
 
-int area(Shape s);
+shapes__Sign shapes__sign_of(int n);
 
 int main(void);
 
-Sign sign_of(int n) {
-    Sign tmp_2;
-    if ((n > 0)) {
-        tmp_2 = ((Sign){ .tag = 0 });
-    } else {
-        Sign tmp_1;
-        if ((n == 0)) {
-            tmp_1 = ((Sign){ .tag = 1 });
-        } else {
-            tmp_1 = ((Sign){ .tag = 2 });
-        }
-        tmp_2 = tmp_1;
-    }
-    return tmp_2;
-}
-
-int area(Shape s) {
-    Shape scrut_1 = s;
+int shapes__area(shapes__Shape s) {
+    shapes__Shape scrut_1 = s;
     int match_result_2;
     switch (scrut_1.tag) {
-        case 0: { /* Circle */
-            int r_1 = scrut_1.as.Circle.f0;
+        case 0: { /* shapes__Circle */
+            int r_1 = scrut_1.as.shapes__Circle.f0;
             match_result_2 = ((3 * r_1) * r_1);
             break;
         }
-        case 1: { /* Rect */
-            int w_2 = scrut_1.as.Rect.f0;
-            int h_3 = scrut_1.as.Rect.f1;
+        case 1: { /* shapes__Rect */
+            int w_2 = scrut_1.as.shapes__Rect.f0;
+            int h_3 = scrut_1.as.shapes__Rect.f1;
             match_result_2 = (w_2 * h_3);
             break;
         }
-        case 2: { /* Square */
-            int s_4 = scrut_1.as.Square.f0;
+        case 2: { /* shapes__Square */
+            int s_4 = scrut_1.as.shapes__Square.f0;
             match_result_2 = (s_4 * s_4);
             break;
         }
@@ -108,26 +92,42 @@ int area(Shape s) {
     return match_result_2;
 }
 
+shapes__Sign shapes__sign_of(int n) {
+    shapes__Sign tmp_2;
+    if ((n > 0)) {
+        tmp_2 = ((shapes__Sign){ .tag = 0 });
+    } else {
+        shapes__Sign tmp_1;
+        if ((n == 0)) {
+            tmp_1 = ((shapes__Sign){ .tag = 1 });
+        } else {
+            tmp_1 = ((shapes__Sign){ .tag = 2 });
+        }
+        tmp_2 = tmp_1;
+    }
+    return tmp_2;
+}
+
 int main(void) {
-    Shape s1_1 = ((Shape){ .tag = 0, .as = { .Circle = { .f0 = 3 } } });
-    Shape s2_2 = ((Shape){ .tag = 1, .as = { .Rect = { .f0 = 4, .f1 = 5 } } });
-    Shape s3_3 = ((Shape){ .tag = 2, .as = { .Square = { .f0 = 6 } } });
-    int a_4 = area(s1_1);
-    int b_5 = area(s2_2);
-    int c_6 = area(s3_3);
-    Sign sign_7 = sign_of((0 - 7));
-    Sign scrut_1 = sign_7;
+    shapes__Shape s1_1 = ((shapes__Shape){ .tag = 0, .as = { .shapes__Circle = { .f0 = 3 } } });
+    shapes__Shape s2_2 = ((shapes__Shape){ .tag = 1, .as = { .shapes__Rect = { .f0 = 4, .f1 = 5 } } });
+    shapes__Shape s3_3 = ((shapes__Shape){ .tag = 2, .as = { .shapes__Square = { .f0 = 6 } } });
+    int a_4 = shapes__area(s1_1);
+    int b_5 = shapes__area(s2_2);
+    int c_6 = shapes__area(s3_3);
+    shapes__Sign sign_7 = shapes__sign_of((0 - 7));
+    shapes__Sign scrut_1 = sign_7;
     int match_result_2;
     switch (scrut_1.tag) {
-        case 0: { /* Positive */
+        case 0: { /* shapes__Positive */
             match_result_2 = 100;
             break;
         }
-        case 1: { /* Zero */
+        case 1: { /* shapes__Zero */
             match_result_2 = 200;
             break;
         }
-        case 2: { /* Negative */
+        case 2: { /* shapes__Negative */
             match_result_2 = 40;
             break;
         }
