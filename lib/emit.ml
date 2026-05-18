@@ -352,6 +352,30 @@ let emit_task_forwards () : string list =
   in
   task_fwd @ stream_fwd
 
+(* drop_Task_<T> for every Task[T] instantiation. Dropping a held
+   Task without an `await` turns the joinable task into a detached
+   one — the worker keeps running and self-frees its slot. If the
+   task already finished (DONE_NO_WAITER), free the slot right now.
+   If its generation no longer matches, it's already gone. *)
+let emit_task_drop_defs () : string list =
+  List.rev_map (fun m ->
+    Printf.sprintf
+      "static void drop_Task_%s(Task_%s t) {\n\
+       \    if (ORTO_SLOTS[t.slot].gen != t.gen) return;\n\
+       \    if (ORTO_SLOTS[t.slot].status == ORTO_SLOT_DONE_NO_WAITER) {\n\
+       \        orto_slot_free(t.slot);\n\
+       \    } else {\n\
+       \        ORTO_SLOTS[t.slot].status = ORTO_SLOT_DETACHED;\n\
+       \    }\n\
+       }"
+      m m)
+    !task_wrappers_order
+
+let emit_task_drop_forwards () : string list =
+  List.rev_map (fun m ->
+    Printf.sprintf "static void drop_Task_%s(Task_%s t);" m m)
+    !task_wrappers_order
+
 (* Emit a call to the right drop function for a linear type. After mono,
    the type name carries its module mangling (`net__Socket`); the helper
    in check.ml derives the matching drop fn name. For Region the runtime
@@ -2259,6 +2283,8 @@ let emit (prog : Check.T.program) : string =
   let array_forwards = emit_array_forwards () in
   let task_forwards = emit_task_forwards () in
   let array_drop_forwards = emit_array_drop_forwards () in
+  let task_drop_forwards = emit_task_drop_forwards () in
+  let task_drop_defs = emit_task_drop_defs () in
   let fn_typedefs  = emit_fn_typedefs () in
   let ordered_structs = topo_sort_structs prog.types prog.records in
   let struct_defs = List.map (function
@@ -2536,5 +2562,7 @@ let emit (prog : Check.T.program) : string =
      @ async_decls_sync
      @ array_drop_forwards
      @ array_drop_defs
+     @ task_drop_forwards
+     @ task_drop_defs
      @ defs
      @ async_defs)
