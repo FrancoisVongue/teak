@@ -1488,17 +1488,58 @@ let emit_func_def ctor_map (f : Check.T.func) : string =
    and yield is implemented as a NOP SQE. Frames live in caller stack
    memory for now — a proper slot pool comes with `spawn`. *)
 
-(* Collect every TELet binding name + type along the top-level let
-   spine. We rewrite those references to `fr->name` so they survive
-   across suspension points. Nested lets inside non-let expressions
-   never cross a yield in the MVP (the static checker only allows
-   yield at top-level positions), so they don't need the fr-> rewrite. *)
-let rec async_collect_locals (body : Check.T.expr) : (string * ty) list =
+(* Collect every let binding anywhere in the async body. After
+   alpha_rename names are globally unique, so we can flatten the whole
+   tree into a frame schema without name collisions. We over-collect
+   on purpose: locals that never cross a yield still go into the frame
+   (a few wasted bytes), but the semantics stay simple — fr->x is the
+   canonical home of every named value. *)
+let async_collect_locals (body : Check.T.expr) : (string * ty) list =
   let open Check.T in
-  match body with
-  | TELet ("_", _, _, b, _, _) -> async_collect_locals b
-  | TELet (x, t, _, b, _, _) -> (x, t) :: async_collect_locals b
-  | _ -> []
+  let acc = ref [] in
+  let add x t = if x <> "_" then acc := (x, t) :: !acc in
+  let rec go e =
+    match e with
+    | TELet (x, t, v, b, _, _) -> add x t; go v; go b
+    | TEInt _ | TEFloat _ | TEBool _ | TEStringLit _
+    | TEVar _ | TEFnRef _ | TEBreak | TEContinue
+    | TEYield | TENullPtr _ -> ()
+    | TECall (f, args, _) -> go f; List.iter go args
+    | TEBinop (_, a, b, _) -> go a; go b
+    | TEUnop (_, a, _) -> go a
+    | TECtor (_, _, args, _) -> List.iter go args
+    | TERecord (_, _, fields, _) -> List.iter (fun (_, e) -> go e) fields
+    | TEField (e, _, _) -> go e
+    | TEIf (c, t, e, _) -> go c; go t; go e
+    | TEMatch (s, _, arms, _) ->
+        go s;
+        List.iter (fun (_, g, b) ->
+          (match g with None -> () | Some g -> go g); go b) arms
+    | TEArray (r, n, v, _) -> go r; go n; go v
+    | TEArrayLit (r, es, _) -> go r; List.iter go es
+    | TERegion (n, _) -> go n
+    | TEStackRegion (n, _) -> go n
+    | TEAlignedRegion (n, a, _) -> go n; go a
+    | TEIndex (a, i, _) -> go a; go i
+    | TEAssignIdx (a, i, v, _) -> go a; go i; go v
+    | TELen (e, _) -> go e
+    | TESlice (a, lo, hi, _) -> go a; go lo; go hi
+    | TEToInt e | TEToByte e | TEToFloat e | TEToIntFromFloat e -> go e
+    | TECAlloc (_, n, _) -> go n
+    | TECFree e -> go e
+    | TEIsNull e -> go e
+    | TEArrayData (a, _) -> go a
+    | TEDeref (p, _) -> go p
+    | TEAssign (_, v, _) -> go v
+    | TEWhile (c, b) -> go c; go b
+    | TEReturn (v, _) -> go v
+    | TETryAt (a, i, _) -> go a; go i
+    | TEDrop (e, _) -> go e
+    | TEAwait (e, _) -> go e
+    | TESpawn (e, _) -> go e
+  in
+  go body;
+  List.rev !acc
 
 (* Rewrite TEVar(x) → TEVar("fr->" ^ x) and TEAssign(x, ...) likewise,
    for every x present in `frame_set`. Names produced by alpha_rename
@@ -1559,28 +1600,111 @@ let async_rewrite_to_frame
     | TESpawn (e, t) -> TESpawn (go e, t)
   in go e
 
-(* Walk the top-level let-spine and split into state segments at every
-   `yield`. Returns a list of (state_id, body_lines). State 0 is the
-   entry; subsequent states are CQE-resume points. *)
+(* Does the expression contain a reachable suspension point? Same
+   shape as Check.body_has_suspension but exposed for emit's branching
+   decisions — when an `if` / `while` / `let` value contains a yield
+   or await, we have to split the surrounding code into state segments
+   instead of inlining it as plain C. *)
+let rec emit_has_suspension (e : Check.T.expr) : bool =
+  let open Check.T in
+  match e with
+  | TEAwait _ | TEYield -> true
+  | TESpawn _ -> false        (* spawn launches a child frame *)
+  (* break/continue inside async functions must reach the
+     surrounding for(;;)switch loop, not the C switch's own break.
+     Treat them as "needs splitting" so the walker generates an
+     explicit state transition instead of inline-emitting them. *)
+  | TEBreak | TEContinue -> true
+  | TEInt _ | TEFloat _ | TEBool _ | TEStringLit _
+  | TEVar _ | TEFnRef _
+  | TENullPtr _ -> false
+  | TECall (f, args, _) ->
+      emit_has_suspension f || List.exists emit_has_suspension args
+  | TEBinop (_, a, b, _) -> emit_has_suspension a || emit_has_suspension b
+  | TEUnop (_, a, _) -> emit_has_suspension a
+  | TECtor (_, _, args, _) -> List.exists emit_has_suspension args
+  | TERecord (_, _, fields, _) ->
+      List.exists (fun (_, e) -> emit_has_suspension e) fields
+  | TEField (e, _, _) -> emit_has_suspension e
+  | TEIf (c, t, e, _) ->
+      emit_has_suspension c || emit_has_suspension t || emit_has_suspension e
+  | TELet (_, _, v, b, _, _) ->
+      emit_has_suspension v || emit_has_suspension b
+  | TEMatch (s, _, arms, _) ->
+      emit_has_suspension s
+      || List.exists (fun (_, g, b) ->
+           (match g with None -> false | Some g -> emit_has_suspension g)
+           || emit_has_suspension b) arms
+  | TEArray (r, n, v, _) ->
+      emit_has_suspension r || emit_has_suspension n || emit_has_suspension v
+  | TEArrayLit (r, es, _) ->
+      emit_has_suspension r || List.exists emit_has_suspension es
+  | TERegion (n, _) -> emit_has_suspension n
+  | TEStackRegion (n, _) -> emit_has_suspension n
+  | TEAlignedRegion (n, a, _) ->
+      emit_has_suspension n || emit_has_suspension a
+  | TEIndex (a, i, _) -> emit_has_suspension a || emit_has_suspension i
+  | TEAssignIdx (a, i, v, _) ->
+      emit_has_suspension a || emit_has_suspension i || emit_has_suspension v
+  | TELen (e, _) -> emit_has_suspension e
+  | TESlice (a, lo, hi, _) ->
+      emit_has_suspension a || emit_has_suspension lo || emit_has_suspension hi
+  | TEToInt e | TEToByte e | TEToFloat e | TEToIntFromFloat e ->
+      emit_has_suspension e
+  | TECAlloc (_, n, _) -> emit_has_suspension n
+  | TECFree e -> emit_has_suspension e
+  | TEIsNull e -> emit_has_suspension e
+  | TEArrayData (a, _) -> emit_has_suspension a
+  | TEDeref (p, _) -> emit_has_suspension p
+  | TEAssign (_, v, _) -> emit_has_suspension v
+  | TEWhile (c, b) -> emit_has_suspension c || emit_has_suspension b
+  | TEReturn (v, _) -> emit_has_suspension v
+  | TETryAt (a, i, _) -> emit_has_suspension a || emit_has_suspension i
+  | TEDrop (e, _) -> emit_has_suspension e
+
+(* Walk the function body and split into state segments. Each
+   suspension point closes the current segment with a real
+   io_uring suspend (`return 1`); each control-flow transition
+   without suspension closes the current segment with `continue`,
+   driving the surrounding `for(;;) switch` loop to the next state
+   without leaving the step function. *)
 let async_split_segments ctor_map (body : Check.T.expr) : (int * string list) list =
   let open Check.T in
   let segments = ref [] in
   let curr_state = ref 0 in
   let curr_lines = ref [] in
-  let emit_into ss = curr_lines := !curr_lines @ ss in
-  let close_segment_with stmts =
-    segments := (!curr_state, !curr_lines @ stmts) :: !segments
+  let segment_open = ref true in
+  let next_id = ref 1 in   (* 0 is the entry state *)
+  let alloc_state () = let n = !next_id in incr next_id; n in
+  let emit_into ss =
+    if !segment_open then curr_lines := !curr_lines @ ss
+  in
+  (* A segment can only be closed once — a `break` inside an `if`
+     branch already closes the segment with a jump to the loop's
+     exit; a subsequent goto-join from the surrounding if walker
+     would create a duplicate `case` for the same state. The open
+     flag suppresses that. *)
+  let finish_segment stmts =
+    if !segment_open then begin
+      segments := (!curr_state, !curr_lines @ stmts) :: !segments;
+      segment_open := false
+    end
+  in
+  let start_segment id =
+    curr_state := id;
+    curr_lines := [];
+    segment_open := true
   in
   let suspend_to next_state =
     [ Printf.sprintf "fr->state = %d;" next_state;
       "orto_yield_suspend(fr);";
       "return 1;" ]
   in
-  (* Emit the SQE-prep + submit pattern for `await async_extern(args)`.
-     The async extern fills the SQE with `fr` as user_data; we then
-     trigger submit and suspend so the dispatcher resumes us when the
-     CQE arrives carrying the result in fr->last_res. *)
-  let emit_async_call name args next_state =
+  let goto_state next_state =
+    [ Printf.sprintf "fr->state = %d;" next_state;
+      "continue;" ]
+  in
+  let async_call_then_state name args next_state =
     let arg_codes = List.map (emit_expr ctor_map) args in
     List.iter (fun cv -> emit_into cv.stmts) arg_codes;
     let arg_values = List.map (fun cv -> cv.value) arg_codes in
@@ -1589,83 +1713,134 @@ let async_split_segments ctor_map (body : Check.T.expr) : (int * string list) li
       Printf.sprintf "%s(%s);" name (String.concat ", " all_args);
       "io_uring_submit(&ORTO_RING);";
     ];
-    close_segment_with
+    finish_segment
       [ Printf.sprintf "fr->state = %d;" next_state;
         "return 1;" ]
   in
-  (* Try to recognise `await async_extern(args)` — if the inner of an
-     await is a call to an async extern, that's the shape we lower.
-     Returns Some(name, args) when matched. *)
   let match_async_extern_call (inner : expr) : (string * expr list) option =
     match inner with
     | TECall (TEFnRef (name, _, _), args, _) when is_async_extern name ->
         Some (name, args)
     | _ -> None
   in
-  let rec walk body =
-    match body with
-    | TELet (x, _, TEYield, b, _, _) ->
-        (* yield as a let-rhs: suspend now; on resume the bound int is
-           the value of `yield` (always 0 — nop SQE result). *)
-        let next_state = !curr_state + 1 in
-        close_segment_with (suspend_to next_state);
-        curr_state := next_state;
-        curr_lines := [];
-        if x <> "_" then
-          emit_into [Printf.sprintf "fr->%s = 0;" x];
-        walk b
-    | TELet (x, _, TEAwait (inner, _), b, _, _)
-      when (match match_async_extern_call inner with Some _ -> true | None -> false) ->
-        (* `let x = await async_extern(args);` — submit + suspend now;
-           when the CQE comes back, fr->last_res holds the result. *)
-        let (name, args) =
-          match match_async_extern_call inner with
-          | Some r -> r | None -> assert false
-        in
-        let next_state = !curr_state + 1 in
-        emit_async_call name args next_state;
-        curr_state := next_state;
-        curr_lines := [];
-        if x <> "_" then
-          emit_into [Printf.sprintf "fr->%s = fr->last_res;" x];
-        walk b
-    | TELet (x, _, v, b, _, _) ->
-        let cv = emit_expr ctor_map v in
-        emit_into cv.stmts;
-        if x <> "_" then
-          emit_into [Printf.sprintf "fr->%s = %s;" x cv.value]
-        else
-          (* `let _ = expr;` — bind to wildcard. Emit the value as a
-             statement so any side-effects (function calls in
-             particular) actually happen. *)
-          emit_into [Printf.sprintf "(void)(%s);" cv.value];
-        walk b
+  (* Stack of (continue-state, break-state) for nested async while
+     loops, so break/continue inside an async-aware loop body do the
+     right state transitions instead of leaking out of the switch. *)
+  let loop_stack : (int * int) list ref = ref [] in
+  let with_loop head_state exit_state f =
+    loop_stack := (head_state, exit_state) :: !loop_stack;
+    let r = f () in
+    loop_stack := List.tl !loop_stack;
+    r
+  in
+  (* The destination for an expression's value. *)
+  let module D = struct
+    type t =
+      | Local of string   (* fr->name = value; *)
+      | Return            (* fr->return_value = value; return 0; *)
+      | Discard           (* statement context; value ignored *)
+  end in
+  let store_at (d : D.t) value =
+    match d with
+    | D.Local x ->
+        emit_into [Printf.sprintf "fr->%s = %s;" x value]
+    | D.Return ->
+        finish_segment
+          [ Printf.sprintf "fr->return_value = %s;" value;
+            "return 0;" ]
+    | D.Discard ->
+        emit_into [Printf.sprintf "(void)(%s);" value]
+  in
+  (* Walk an expression, storing its value into `dst`. If the value
+     is produced by a suspension point or branches with suspension,
+     this opens new state segments as needed. *)
+  let rec walk (dst : D.t) (e : expr) =
+    match e with
     | TEYield ->
-        (* Tail yield: suspend then in the resumed state return 0. *)
-        let next_state = !curr_state + 1 in
-        close_segment_with (suspend_to next_state);
-        segments := (next_state,
-          ["fr->return_value = 0;"; "return 0;"]) :: !segments
+        let n = alloc_state () in
+        finish_segment (suspend_to n);
+        start_segment n;
+        (* yield's value is 0 — write it to dst, then we're done. *)
+        store_at dst "0"
     | TEAwait (inner, _)
       when (match match_async_extern_call inner with Some _ -> true | None -> false) ->
-        (* Tail `await async_extern(args)` — submit, suspend; on resume
-           use last_res as the function's return value. *)
-        let (name, args) =
-          match match_async_extern_call inner with
-          | Some r -> r | None -> assert false
+        let (name, args) = match match_async_extern_call inner with
+          | Some r -> r | None -> assert false in
+        let n = alloc_state () in
+        async_call_then_state name args n;
+        start_segment n;
+        store_at dst "fr->last_res"
+    | TELet (x, _, v, b, _, _) ->
+        (* Bind v, then walk b. v may suspend — walk recursively
+           with destination = the binder. *)
+        let v_dst =
+          if x = "_" then D.Discard else D.Local x
         in
-        let next_state = !curr_state + 1 in
-        emit_async_call name args next_state;
-        segments := (next_state,
-          ["fr->return_value = fr->last_res;"; "return 0;"]) :: !segments
-    | other ->
-        let cv = emit_expr ctor_map other in
-        close_segment_with
-          (cv.stmts @
-           [ Printf.sprintf "fr->return_value = %s;" cv.value;
-             "return 0;" ])
+        walk v_dst v;
+        walk dst b
+    | TEIf (cond, t, e_br, _) when emit_has_suspension t || emit_has_suspension e_br ->
+        let cv = emit_expr ctor_map cond in
+        emit_into cv.stmts;
+        let t_state = alloc_state () in
+        let e_state = alloc_state () in
+        let join = match dst with
+          | D.Return -> -1   (* both branches terminate by return *)
+          | _ -> alloc_state ()
+        in
+        finish_segment [
+          Printf.sprintf "if (%s) { fr->state = %d; continue; }" cv.value t_state;
+          Printf.sprintf "fr->state = %d;" e_state;
+          "continue;";
+        ];
+        start_segment t_state;
+        walk dst t;
+        if join >= 0 then finish_segment (goto_state join);
+        start_segment e_state;
+        walk dst e_br;
+        if join >= 0 then finish_segment (goto_state join);
+        if join >= 0 then start_segment join
+    | TEWhile (cond, body_e) when emit_has_suspension cond || emit_has_suspension body_e ->
+        let head = alloc_state () in
+        let body_s = alloc_state () in
+        let exit_s = alloc_state () in
+        finish_segment (goto_state head);
+        start_segment head;
+        let cv = emit_expr ctor_map cond in
+        emit_into cv.stmts;
+        finish_segment [
+          Printf.sprintf "if (%s) { fr->state = %d; continue; }" cv.value body_s;
+          Printf.sprintf "fr->state = %d;" exit_s;
+          "continue;";
+        ];
+        start_segment body_s;
+        with_loop head exit_s (fun () ->
+          walk D.Discard body_e);
+        finish_segment (goto_state head);
+        start_segment exit_s;
+        store_at dst "0"   (* while as expression evaluates to int 0 *)
+    | TEBreak when !loop_stack <> [] ->
+        let (_, exit_s) = List.hd !loop_stack in
+        finish_segment (goto_state exit_s)
+    | TEContinue when !loop_stack <> [] ->
+        let (head_s, _) = List.hd !loop_stack in
+        finish_segment (goto_state head_s)
+    | TEReturn (v, _) ->
+        walk D.Return v
+    | _ when not (emit_has_suspension e) ->
+        let cv = emit_expr ctor_map e in
+        emit_into cv.stmts;
+        store_at dst cv.value
+    | _ ->
+        (* Suspension inside an expression form we don't yet split
+           (e.g. inside a function call argument, a struct literal,
+           etc.). The user can lift such expressions into a let to
+           sequence the suspension cleanly. *)
+        failwith
+          ("emit async: suspension inside an expression form that's \
+             not yet supported for splitting. Lift the awaiting call \
+             into a `let` first.")
   in
-  walk body;
+  walk D.Return body;
   List.rev !segments
 
 (* Emit a Frame struct for an async function — first field is the
@@ -1711,10 +1886,10 @@ let emit_async_step ctor_map (f : Check.T.func) : string =
   Printf.sprintf
     "static int %s_step(void *frp) {\n\
      \    Frame_%s *fr = (Frame_%s *)frp;\n\
-     \    switch (fr->state) {\n\
+     \    for (;;) switch (fr->state) {\n\
      %s\n\
+     \    default: return 0;\n\
      \    }\n\
-     \    return 0;\n\
      }"
     f.name f.name f.name
     (String.concat "\n" case_lines)
