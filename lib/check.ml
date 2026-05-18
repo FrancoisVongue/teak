@@ -232,8 +232,14 @@ let rec prune (t : ty) : ty =
       r
   | _ -> t
 
-let is_linear_ty (t : ty) : bool =
+let rec is_linear_ty (t : ty) : bool =
   match prune t with
+  | TyApp ("Array", [inner]) ->
+      (* Induced linearity: an Array of a linear element type is itself
+         linear — its drop frees the elements first. Builtin containers
+         propagate; nominal user types do not (they declare linearity
+         explicitly via `linear struct`). *)
+      is_linear_ty inner
   | TyApp (n, _) -> is_linear_name n
   | _ -> false
 
@@ -388,7 +394,8 @@ let rec validate_ty
          transfers it via await/for-in. This is the first sliver of
          "induced linearity" — the full version (Array[T] when T is
          linear) lands in phase 3. *)
-      let propagates_linearity = (n = "Task" || n = "Stream") in
+      let propagates_linearity =
+        (n = "Task" || n = "Stream" || n = "Array") in
       if not propagates_linearity then
         List.iter (fun arg ->
           if ty_contains_linear arg then
@@ -1386,11 +1393,11 @@ let rec infer (env : env) (tparams : string list)
                 "array literal elements must all have the same type: \
                  expected %s, got %s"
                 (show_ty (zonk elem_ty)) (show_ty (zonk t)))))) typed_elems;
-      if ty_contains_linear (zonk elem_ty) then
-        raise (Type_error
-          (Printf.sprintf
-             "array literal element type cannot contain a linear type (%s)"
-             (show_ty (zonk elem_ty))));
+      (* Linear element types are allowed in array literals — each
+         element value is moved into its slot exactly once, and the
+         array itself is then linear (induced linearity, phase 3).
+         By contrast `array(r, N, init)` would copy `init` N times,
+         which is forbidden for linear types. *)
       let result_ty = TyApp ("Array", [elem_ty]) in
       (T.TEArrayLit (tr, List.map fst typed_elems, result_ty), result_ty)
 
@@ -1464,6 +1471,16 @@ let rec infer (env : env) (tparams : string list)
            (Printf.sprintf
               "index must be int, got %s"
               (show_ty (zonk ti_ty)))));
+      (* Reading from an Array[Linear] would copy a linear value out
+         of its slot, leaving two owners. Forbid it — the elements
+         can only be consumed when the whole Array is dropped. *)
+      if is_linear_ty (zonk elem) then
+        raise (Type_error
+          (Printf.sprintf
+             "cannot read element of Array[%s] — that would copy a \
+              linear value out of its slot. Elements are only consumed \
+              when the whole array is dropped."
+             (show_ty (zonk elem))));
       (T.TEIndex (ta, ti, elem), elem)
 
   | EAssignIdx (arr_e, idx_e, val_e) ->
@@ -1495,6 +1512,15 @@ let rec infer (env : env) (tparams : string list)
            (Printf.sprintf
               "type mismatch in a[i] := v: element is %s, value is %s"
               (show_ty (zonk elem)) (show_ty (zonk tv_ty)))));
+      (* Writing to a slot of Array[Linear] would either drop the old
+         element or leak it. Both need machinery we don't have yet —
+         forbid until phase 5/6 if ever. *)
+      if is_linear_ty (zonk elem) then
+        raise (Type_error
+          (Printf.sprintf
+             "cannot assign element of Array[%s] — overwriting would \
+              either drop or leak the old linear value."
+             (show_ty (zonk elem))));
       (T.TEAssignIdx (ta, ti, tv, TyInt), TyInt)
 
   | ELen arr_e ->
@@ -1535,6 +1561,14 @@ let rec infer (env : env) (tparams : string list)
            (Printf.sprintf
               "slice(_, _, hi) : hi must be int, got %s"
               (show_ty (zonk thi_ty)))));
+      (* Slicing an Array[Linear] would produce a second linear handle
+         viewing the same elements — two owners. Forbid. *)
+      if is_linear_ty (zonk elem) then
+        raise (Type_error
+          (Printf.sprintf
+             "cannot slice Array[%s] — would create a second linear \
+              handle over the same elements."
+             (show_ty (zonk elem))));
       let result_ty = TyApp ("Array", [elem]) in
       (T.TESlice (ta, tlo, thi, result_ty), result_ty)
 
@@ -1721,11 +1755,20 @@ let rec infer (env : env) (tparams : string list)
         "`await all { ... }` (static form) is not yet implemented — \
          needs tuple support. See STAGE3_ASYNC.md §13.")
 
-  | EAwaitAllDyn _ ->
-      raise (Type_error
-        "`await all <iterable>` (dynamic form) is not yet implemented — \
-         needs induced linearity on Array[Task[T]] (phase 3). See \
-         STAGE3_ASYNC.md §13.")
+  | EAwaitAllDyn coll_e ->
+      (* `await all coll` requires coll : Array[Task[T]], returns
+         Array[T]. Each Task in the array is consumed by the join;
+         the resulting Array[T] holds the per-task results. *)
+      let (tc, tc_ty) = infer env tparams vars coll_e in
+      let elem = TyMeta (fresh_meta ()) in
+      (try unify tc_ty (TyApp ("Array", [TyApp ("Task", [elem])]))
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "`await all <coll>` expects coll : Array[Task[T]], got %s"
+              (show_ty (zonk tc_ty)))));
+      let result_ty = TyApp ("Array", [elem]) in
+      (T.TEAwait (tc, result_ty), result_ty)
 
 and check_args env tparams vars callee_name param_tys args : T.expr list =
   let n_expected = List.length param_tys in

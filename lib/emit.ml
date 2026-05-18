@@ -221,6 +221,13 @@ let rec c_type (t : ty) : string =
   | TyApp ("float", []) -> "double"
   | TyApp ("Array", [inner]) -> mangle_array_name inner
   | TyApp ("Region", []) -> "Region"
+  | TyApp ("Task", [inner]) ->
+      (* Stage 3 phase 2 placeholder: the concrete C struct for a
+         Task[T] is generated in phase 4 alongside the state machine.
+         For now we mangle a name so type machinery can mention it. *)
+      "Task_" ^ Mono.mangle_ty inner
+  | TyApp ("Stream", [inner]) ->
+      "Stream_" ^ Mono.mangle_ty inner
   | TyApp (n, []) -> n
   | TyFun _ -> Mono.mangle_ty t
   | TyPtr inner -> c_type inner ^ "*"
@@ -253,6 +260,56 @@ let emit_array_forwards () : string list =
       "typedef struct { int slot; int offset; int len; int expected_gen; } %s;"
       mangled)
     !array_types_order
+
+(* Emit a call to the right drop function for a linear type. After mono,
+   the type name carries its module mangling (`net__Socket`); the helper
+   in check.ml derives the matching drop fn name. For Region the runtime
+   supplies `drop_Region` directly. Array[Linear T] gets a generated
+   drop_Array_<T> per instantiation (phase 3 induced linearity). *)
+let drop_call_stmt (var_name : string) (t : ty) : string =
+  match t with
+  | TyApp ("Array", [inner]) ->
+      let fn = "drop_" ^ mangle_array_name inner in
+      Printf.sprintf "%s(%s);" fn var_name
+  | TyApp (n, _) ->
+      let fn = Check.drop_fn_name_for n in
+      Printf.sprintf "%s(%s);" fn var_name
+  | _ ->
+      failwith
+        (Printf.sprintf "emit: drop on non-TyApp type %s" (Ast.show_ty t))
+
+(* Forward declarations for every drop_Array_<T> we'll emit, so they
+   can be referenced before their definition (e.g. nested
+   Array[Array[Linear]] drops the inner array). *)
+let emit_array_drop_forwards () : string list =
+  List.rev_map (fun (mangled, inner) ->
+    if Check.is_linear_ty inner then
+      Some (Printf.sprintf "static void drop_%s(%s a);" mangled mangled)
+    else None)
+    !array_types_order
+  |> List.filter_map (fun x -> x)
+
+(* Cascade drop for Array[T] when T is linear: walks the live slots
+   of the element backing buffer (gen-checked) and drops each. The
+   array handle itself doesn't free memory — the surrounding Region
+   does that. *)
+let emit_array_drop_defs () : string list =
+  List.rev_map (fun (mangled, inner) ->
+    if not (Check.is_linear_ty inner) then None
+    else
+      let elem_c = c_type inner in
+      let drop_elem = drop_call_stmt "data[i]" inner in
+      Some (Printf.sprintf
+        "static void drop_%s(%s a) {\n\
+         \    if (ORTO_REGIONS[a.slot].gen != a.expected_gen) return;\n\
+         \    %s* data = (%s*)(ORTO_REGIONS[a.slot].buffer + a.offset);\n\
+         \    for (int i = 0; i < a.len; i++) {\n\
+         \        %s\n\
+         \    }\n\
+         }"
+        mangled mangled elem_c elem_c drop_elem))
+    !array_types_order
+  |> List.filter_map (fun x -> x)
 
 (* ---------- operator C-strings ---------- *)
 
@@ -534,19 +591,6 @@ let ty_of_expr : Check.T.expr -> ty = function
 let is_catchall_pat_emit = function
   | PBind _ -> true
   | _ -> false
-
-(* Emit a call to the right drop function for a linear type. After mono,
-   the type name carries its module mangling (`net__Socket`); the helper
-   in check.ml derives the matching drop fn name. For Region the
-   runtime supplies `drop_Region` directly. *)
-let drop_call_stmt (var_name : string) (t : ty) : string =
-  match t with
-  | TyApp (n, _) ->
-      let fn = Check.drop_fn_name_for n in
-      Printf.sprintf "%s(%s);" fn var_name
-  | _ ->
-      failwith
-        (Printf.sprintf "emit: drop on non-TyApp type %s" (Ast.show_ty t))
 
 let rec emit_expr
   (ctor_map : (string, type_decl * variant * int) Hashtbl.t)
@@ -1380,6 +1424,7 @@ let emit (prog : Check.T.program) : string =
   let adt_forwards = List.map emit_adt_forward prog.types in
   let rec_forwards = List.map emit_record_forward prog.records in
   let array_forwards = emit_array_forwards () in
+  let array_drop_forwards = emit_array_drop_forwards () in
   let fn_typedefs  = emit_fn_typedefs () in
   let ordered_structs = topo_sort_structs prog.types prog.records in
   let struct_defs = List.map (function
@@ -1387,6 +1432,7 @@ let emit (prog : Check.T.program) : string =
     | DRec rd -> emit_record_definition rd) ordered_structs in
   let extern_decls = List.map emit_extern_decl prog.externs in
   let decls        = List.map emit_func_decl prog.funcs in
+  let array_drop_defs = emit_array_drop_defs () in
   let defs         = List.map (emit_func_def ctor_map) prog.funcs in
   let static_bytes = emit_static_bytes_array () in
   let header = Printf.sprintf
@@ -1454,4 +1500,6 @@ let emit (prog : Check.T.program) : string =
      @ struct_defs
      @ extern_decls
      @ decls
+     @ array_drop_forwards
+     @ array_drop_defs
      @ defs)
