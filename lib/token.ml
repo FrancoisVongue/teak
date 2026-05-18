@@ -48,9 +48,6 @@ type token =
   | TRegion       (* region(N) — heap arena, malloc'd block *)
   | TStackRegion  (* stack_region(N) — N literal, block on stack *)
   | TAlignedRegion (* aligned_region(N, A) — heap, A-byte aligned *)
-  | TAwait        (* await — Stage 3 async suspension point *)
-  | TSpawn        (* spawn f(...) — Stage 3 fire-and-forget task *)
-  | TYield        (* yield — Stage 3 cooperative scheduling point *)
   | TUnderscore   (* `_` as a standalone token (wildcard pattern) *)
   (* punctuation *)
   | TLParen
@@ -138,9 +135,6 @@ let show = function
   | TRegion       -> "REGION"
   | TStackRegion  -> "STACK_REGION"
   | TAlignedRegion -> "ALIGNED_REGION"
-  | TAwait        -> "AWAIT"
-  | TSpawn        -> "SPAWN"
-  | TYield        -> "YIELD"
   | TUnderscore   -> "_"
   | TLParen       -> "("
   | TRParen       -> ")"

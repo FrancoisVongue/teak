@@ -57,9 +57,6 @@ let lower_ident_or_keyword s =
   | "region" -> TRegion
   | "stack_region" -> TStackRegion
   | "aligned_region" -> TAlignedRegion
-  | "await" -> TAwait
-  | "spawn" -> TSpawn
-  | "yield" -> TYield
   | "_"     -> TUnderscore
   | _       -> TIdent s
 
