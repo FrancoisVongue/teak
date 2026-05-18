@@ -499,6 +499,15 @@ let build_env
       in
       let ret_ty =
         validate_ty type_env record_env in_scope f.return_ty in
+      (match prune ret_ty with
+       | TyApp ("Region", _) ->
+           raise (Type_error
+             (Printf.sprintf
+                "function %S cannot return Region — \
+                 each Region must be created in the scope that frees it; \
+                 caller should call region(...) and pass it in"
+                f.name))
+       | _ -> ());
       (f.name, (f.type_params, (param_tys, ret_ty)))) funcs
   in
   let extern_sigs =
@@ -609,21 +618,19 @@ let check_match_arms_structure
 
 (* ---------- copyability ----------
 
-   A type is copyable iff `let y = x` makes semantic sense for it —
-   i.e. the value can be duplicated without violating ownership.
-   Currently the only non-copyable primitive is Region; structural
-   types inherit non-copyability transitively from their fields/variants.
-   Ref[_] is copyable (it's just pointer + generation tag).
-   Type variables are assumed copyable for now — generics carry no
-   bounds yet, and Own-typed arguments can't reach a generic position
-   without an explicit move. *)
+   A type is copyable iff a value can be passed/returned/duplicated
+   without losing track of who frees it. Region is copyable — it's
+   just a slot id + generation, fits in 8 bytes. The drop discipline
+   for Region is separate: the let-binding that holds a freshly
+   created Region drops it at end of scope. Aliasing one Region into
+   another let is rejected at type check (see ELet). *)
 let rec is_copyable (env : env) (t : ty) : bool =
   match prune t with
   | TyInt | TyBool -> true
   | TyVar _        -> true
   | TyFun _        -> true
   | TyMeta _       -> true
-  | TyApp ("Region", _) -> false
+  | TyApp ("Region", _) -> true  (* handle: slot + gen, copies freely *)
   | TyApp ("Array", _) -> true   (* region-backed handle, plain values *)
   | TyApp ("byte", _)  -> true   (* primitive *)
   | TyPtr _ -> true              (* raw C pointer, copied like an int *)
@@ -778,11 +785,12 @@ let rec infer (env : env) (tparams : string list)
             unify ta_ty tb_ty;
             (match prune ta_ty with
              | TyInt | TyBool -> ()
+             | TyApp ("byte", []) -> ()
              | TyMeta _ -> unify ta_ty TyInt   (* default to int *)
              | t ->
                  raise (Type_error
                    (Printf.sprintf
-                      "%s requires int or bool operands, got %s"
+                      "%s requires int, bool, or byte operands, got %s"
                       (show_binop op) (show_ty (zonk t)))));
             TyBool
       in
@@ -983,10 +991,21 @@ let rec infer (env : env) (tparams : string list)
        | Some t ->
            let t = validate_ty_for_ascription env tparams t in
            unify tv_ty t);
-      (* `let _ = expr` for a linear-typed value means "consume and
-         immediately drop". Rename `_` to a fresh `_drop_N` so the
-         binding carries auto_drop=true and produces a visible free in
-         emit. Copyable values keep `_` as a side-effect discard. *)
+      (* Region is a copyable handle, but each underlying slot must have
+         exactly one drop. The rule: a let-binding of Region type owns
+         its slot and drops at end of scope. Reject aliasing — `let r2 = r`
+         would silently create two owners pointing at the same slot. *)
+      (match prune tv_ty, tv with
+       | TyApp ("Region", _), T.TEVar (src, _) ->
+           raise (Type_error
+             (Printf.sprintf
+                "cannot bind one Region variable to another \
+                 (let %s = %s): each Region must come from a fresh \
+                 region(...) / stack_region(...) / aligned_region(...) call"
+                x src))
+       | _ -> ());
+      (* `let _ = region(N)` is the explicit-drop form: rename to a
+         fresh slot so emit produces a visible free. *)
       let x_actual =
         if x = "_" then
           (match prune tv_ty with
@@ -1004,8 +1023,7 @@ let rec infer (env : env) (tparams : string list)
         if x_actual = "_" then false
         else
           (match prune tv_ty with
-           | TyApp ("Region", _) ->
-               not (is_consumed env x_actual tb)
+           | TyApp ("Region", _) -> true
            | _ -> false)
       in
       (T.TELet (x_actual, tv_ty, tv, tb, tb_ty, auto_drop), tb_ty)
@@ -1718,18 +1736,11 @@ let check_func (env : env) (f : func) : T.func =
           f.name (show_ty (zonk tbody_ty)) (show_ty (zonk ret_ty)))));
   let tbody = zonk_expr tbody in
   let param_tys = List.map zonk param_tys in
-  (* A linear parameter (currently only Region) lives for the whole
-     body. If the body doesn't consume it, emit must free it before
-     return. We record those names in param_drops; emit handles the
-     actual free. *)
-  let param_drops =
-    List.filter_map (fun ((pname, _), pty) ->
-      match prune pty with
-      | TyApp ("Region", _) when not (is_consumed env pname tbody) ->
-          Some pname
-      | _ -> None)
-      (List.combine f.params param_tys)
-  in
+  (* Region params are borrowed from the caller — the caller's
+     creating scope frees them. Functions don't drop received Regions.
+     param_drops is reserved for future linear param types. *)
+  let _ = is_consumed in
+  let param_drops = [] in
   let initial_live =
     List.fold_left2 (fun m (p, _) t -> SM.add p t m)
       SM.empty f.params param_tys

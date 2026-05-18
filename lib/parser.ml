@@ -401,7 +401,16 @@ and parse_if_after_kw st =
   let cond = parse_expr st in
   let then_b = parse_block st in
   expect st TElse;
-  let else_b = parse_block st in
+  (* Support `else if ... { ... }` as sugar for `else { if ... { ... } }`.
+     This is the only place the parser peeks past a keyword to special-case
+     a chain — without it, multi-arm conditionals nest visually. *)
+  let else_b =
+    if peek st = TIf then begin
+      advance st;
+      parse_if_after_kw st
+    end else
+      parse_block st
+  in
   EIf (cond, then_b, else_b)
 
 and parse_match_after_kw st =
