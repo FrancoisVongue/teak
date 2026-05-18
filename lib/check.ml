@@ -93,6 +93,14 @@ module T = struct
     | TEContinue
     | TEReturn of expr * ty
                   (* return v — second field is the enclosing fn's return ty *)
+    | TEAwait  of expr * ty
+                  (* await op — second field is the result type T (one
+                     level peeled off Task[T] or Stream[T]) *)
+    | TESpawn  of expr * ty
+                  (* spawn f(args) — second field is the wrapped result
+                     type Task[T] *)
+    | TEYield
+                  (* yield — voluntary scheduling point; type int *)
 
   type func = {
     name        : string;
@@ -183,7 +191,13 @@ let linear_type_names : (string, unit) Hashtbl.t = Hashtbl.create 8
 
 let reset_linear_table () =
   Hashtbl.clear linear_type_names;
-  Hashtbl.add linear_type_names "Region" ()
+  Hashtbl.add linear_type_names "Region" ();
+  (* Stage 3: Task[T] is an in-flight computation; Stream[T] is a
+     multishot source of events. Both are owned, move-only handles
+     into the dispatcher's slot pool, so they live alongside Region
+     as builtin linear types. *)
+  Hashtbl.add linear_type_names "Task" ();
+  Hashtbl.add linear_type_names "Stream" ()
 
 let mark_linear n = Hashtbl.replace linear_type_names n ()
 
@@ -367,14 +381,22 @@ let rec validate_ty
          in any type argument of any TyApp. The check on field types
          and variant arg types happens separately after build_env.
          Function types are not "data position" — they hide their
-         contents, so fn(...) -> Region stays legal. *)
-      List.iter (fun arg ->
-        if ty_contains_linear arg then
-          raise (Type_error
-            (Printf.sprintf
-               "A linear type is not allowed as a type argument of %S — \
-                linear types must be a top-level type of a name, not nested in data"
-               n))) args;
+         contents, so fn(...) -> Region stays legal.
+
+         Exception: Task[T] and Stream[T] are themselves linear, so a
+         linear T is fine — the task/stream owns the inner value and
+         transfers it via await/for-in. This is the first sliver of
+         "induced linearity" — the full version (Array[T] when T is
+         linear) lands in phase 3. *)
+      let propagates_linearity = (n = "Task" || n = "Stream") in
+      if not propagates_linearity then
+        List.iter (fun arg ->
+          if ty_contains_linear arg then
+            raise (Type_error
+              (Printf.sprintf
+                 "A linear type is not allowed as a type argument of %S — \
+                  linear types must be a top-level type of a name, not nested in data"
+                 n))) args;
       if List.mem n in_scope then begin
         if args <> [] then
           raise (Type_error
@@ -398,6 +420,24 @@ let rec validate_ty
                "Region takes no type arguments, got %d"
                (List.length args)));
         TyApp ("Region", [])
+      end else if n = "Task" then begin
+        (* Task[T] — Stage 3 builtin, linear handle to an in-flight
+           task. The slot is owned; T is the future result type. *)
+        if List.length args <> 1 then
+          raise (Type_error
+            (Printf.sprintf
+               "Task expects exactly 1 type argument, got %d"
+               (List.length args)));
+        TyApp ("Task", args)
+      end else if n = "Stream" then begin
+        (* Stream[T] — Stage 3 builtin, linear multishot source.
+           Drained with `for x in stream { ... }`. *)
+        if List.length args <> 1 then
+          raise (Type_error
+            (Printf.sprintf
+               "Stream expects exactly 1 type argument, got %d"
+               (List.length args)));
+        TyApp ("Stream", args)
       end else if n = "byte" then begin
         (* byte is a built-in nullary primitive — 1 byte, unsigned. *)
         if List.length args <> 0 then
@@ -1635,13 +1675,57 @@ let rec infer (env : env) (tparams : string list)
              (show_ty (zonk tx_ty))));
       (T.TEDrop (tx, tx_ty), TyInt)
 
-  (* Stage 3 concurrency surface — parsed but typing + lowering not
-     yet implemented. See STAGE3_ASYNC.md §13. *)
-  | EAwait _ | EAwaitAll _ | EAwaitAllDyn _ | ESpawn _ | EYield ->
+  (* Stage 3 — concurrency. Phase 2 wires up types for the three
+     fundamentals (await / spawn / yield); phases 4+ generate the
+     state machine and runtime. await all { … } needs tuples; the
+     dynamic form Array[Task[T]] needs phase-3 induced linearity on
+     Array — both stay rejected for now. *)
+  | EAwait inner ->
+      let (ti, ti_ty) = infer env tparams vars inner in
+      let elem = TyMeta (fresh_meta ()) in
+      let try_task =
+        try unify ti_ty (TyApp ("Task", [elem])); true
+        with Type_error _ -> false
+      in
+      if not try_task then begin
+        let stream_elem = TyMeta (fresh_meta ()) in
+        (try unify ti_ty (TyApp ("Stream", [stream_elem]))
+         with Type_error _ ->
+           raise (Type_error
+             (Printf.sprintf
+                "`await e` expects e : Task[T] or Stream[T], got %s"
+                (show_ty (zonk ti_ty)))));
+        let result_ty = stream_elem in
+        (T.TEAwait (ti, result_ty), result_ty)
+      end else
+        (T.TEAwait (ti, elem), elem)
+
+  | ESpawn inner ->
+      (* The body of `spawn` should be a function call — it's what
+         names the work to do. We type-check it as an ordinary call
+         and wrap the result type in Task[..]. *)
+      (match inner with
+       | ECall _ -> ()
+       | _ ->
+           raise (Type_error
+             "`spawn` expects a function call: `spawn f(args)`"));
+      let (ti, ti_ty) = infer env tparams vars inner in
+      let result_ty = TyApp ("Task", [ti_ty]) in
+      (T.TESpawn (ti, result_ty), result_ty)
+
+  | EYield ->
+      (T.TEYield, TyInt)
+
+  | EAwaitAll _ ->
       raise (Type_error
-        "Stage 3 concurrency (`await`, `await all`, `spawn`, `yield`) is \
-         not yet implemented — only the surface syntax is in place. See \
-         STAGE3_ASYNC.md.")
+        "`await all { ... }` (static form) is not yet implemented — \
+         needs tuple support. See STAGE3_ASYNC.md §13.")
+
+  | EAwaitAllDyn _ ->
+      raise (Type_error
+        "`await all <iterable>` (dynamic form) is not yet implemented — \
+         needs induced linearity on Array[Task[T]] (phase 3). See \
+         STAGE3_ASYNC.md §13.")
 
 and check_args env tparams vars callee_name param_tys args : T.expr list =
   let n_expected = List.length param_tys in
@@ -1736,6 +1820,11 @@ let rec zonk_expr (e : T.expr) : T.expr =
       T.TETryAt (zonk_expr a, zonk_expr i, zonk_expect t)
   | T.TEDrop (e, t) ->
       T.TEDrop (zonk_expr e, zonk_expect t)
+  | T.TEAwait (e, t) ->
+      T.TEAwait (zonk_expr e, zonk_expect t)
+  | T.TESpawn (e, t) ->
+      T.TESpawn (zonk_expr e, zonk_expect t)
+  | T.TEYield -> T.TEYield
 
 and zonk_expect (t : ty) : ty =
   let t = zonk t in
@@ -2045,6 +2134,29 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
         | _ -> live
       in
       (T.TEDrop (sub', t), live)
+
+  | T.TEAwait (sub, t) ->
+      (* await consumes the Task/Stream-shaped operand: if the inner
+         expression is a bare linear name, retire it (await-after-await
+         on the same handle is a compile error). For Stream the inner
+         handle stays live across multiple awaits — but the phase-2
+         surface only types it; multishot semantics arrive with
+         `for x in stream` in phase 6. Treat both uniformly: consume. *)
+      let (sub', live) = check_moves_expr env live false sub in
+      let live = match sub' with
+        | T.TEVar (x, vt) when is_linear_ty vt -> SM.remove x live
+        | _ -> live
+      in
+      (T.TEAwait (sub', t), live)
+
+  | T.TESpawn (sub, t) ->
+      (* spawn evaluates its inner call — any owned values flowing in
+         are consumed by the call as usual. The resulting Task[T] is
+         freshly created here. *)
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TESpawn (sub', t), live)
+
+  | T.TEYield -> (e, live)
 
 (* ---------- check a function ---------- *)
 

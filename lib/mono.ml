@@ -122,6 +122,16 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         TyApp ("Region", [])
     | TyApp ("Region", _) ->
         failwith "mono rewrite_ty: Region takes no type arguments"
+    | TyApp ("Task", [inner]) ->
+        (* Stage 3 builtin — slot-pool handle. emit phases (4–5) generate
+           one wrapper struct per distinct result type, just like Array. *)
+        TyApp ("Task", [rewrite_ty subst inner])
+    | TyApp ("Task", _) ->
+        failwith "mono rewrite_ty: Task with wrong arity (should be unary)"
+    | TyApp ("Stream", [inner]) ->
+        TyApp ("Stream", [rewrite_ty subst inner])
+    | TyApp ("Stream", _) ->
+        failwith "mono rewrite_ty: Stream with wrong arity (should be unary)"
     | TyApp ("byte", []) ->
         TyApp ("byte", [])
     | TyApp ("byte", _) ->
@@ -268,6 +278,11 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         Check.T.TETryAt (rewrite_expr subst a, rewrite_expr subst i, rt t)
     | Check.T.TEDrop (e, t) ->
         Check.T.TEDrop (rewrite_expr subst e, rt t)
+    | Check.T.TEAwait (e, t) ->
+        Check.T.TEAwait (rewrite_expr subst e, rt t)
+    | Check.T.TESpawn (e, t) ->
+        Check.T.TESpawn (rewrite_expr subst e, rt t)
+    | Check.T.TEYield -> Check.T.TEYield
   in
 
   request_fn "main" [];

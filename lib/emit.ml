@@ -95,6 +95,17 @@ let rec collect_ty (t : ty) : unit =
       (* float is a primitive; maps directly to double in C. *)
   | TyApp ("float", _) ->
       failwith "emit collect_ty: float takes no type arguments"
+  | TyApp ("Task", [inner]) ->
+      (* Stage 3 phase 2: typing only — the concrete Task wrapper
+         struct + slot machinery are emitted in phase 4. For now we
+         walk the inner type so its dependencies are still collected. *)
+      collect_ty inner
+  | TyApp ("Task", _) ->
+      failwith "emit collect_ty: Task with wrong arity"
+  | TyApp ("Stream", [inner]) ->
+      collect_ty inner
+  | TyApp ("Stream", _) ->
+      failwith "emit collect_ty: Stream with wrong arity"
   | TyApp (_, []) -> ()
   | TyApp (n, _) ->
       failwith (Printf.sprintf "emit collect_ty: %S still has args" n)
@@ -175,6 +186,9 @@ let rec collect_expr (e : Check.T.expr) : unit =
   | Check.T.TEReturn (v, t) -> collect_expr v; collect_ty t
   | Check.T.TETryAt (a, i, t) -> collect_expr a; collect_expr i; collect_ty t
   | Check.T.TEDrop (e, t) -> collect_expr e; collect_ty t
+  | Check.T.TEAwait (e, t) -> collect_expr e; collect_ty t
+  | Check.T.TESpawn (e, t) -> collect_expr e; collect_ty t
+  | Check.T.TEYield -> ()
 
 let collect_program (prog : Check.T.program) : unit =
   Hashtbl.clear fn_types_seen;
@@ -358,6 +372,9 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
     | TEReturn (v, t) -> TEReturn (rn env v, t)
     | TETryAt (a, i, t) -> TETryAt (rn env a, rn env i, t)
     | TEDrop (e, t) -> TEDrop (rn env e, t)
+    | TEAwait (e, t) -> TEAwait (rn env e, t)
+    | TESpawn (e, t) -> TESpawn (rn env e, t)
+    | TEYield -> e
   in
   let initial_env = List.map (fun (p, _) -> (p, p)) f.params in
   { f with body = rn initial_env f.body }
@@ -505,6 +522,9 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TEReturn (_, _) -> TyInt
   | Check.T.TETryAt (_, _, t) -> t
   | Check.T.TEDrop (_, _) -> TyInt
+  | Check.T.TEAwait (_, t) -> t
+  | Check.T.TESpawn (_, t) -> t
+  | Check.T.TEYield -> TyInt
 
 (* Release a Region's buffer (if it's heap-allocated), bump the
    generation, and push the slot back onto the free list. Stack
@@ -1240,6 +1260,21 @@ let rec emit_expr
         "}";
       ] in
       { stmts; value = res_var }
+
+  (* Stage 3 phase 2 lands typing only — the state-machine lowering
+     and dispatcher runtime arrive in phases 4–5. Any program that
+     reaches emit with await/spawn/yield is a compiler-state error
+     unless we explicitly fail before typecheck succeeds. *)
+  | Check.T.TEAwait _ ->
+      failwith "emit TEAwait: Stage 3 phase 4 (state machine) not yet \
+                implemented — function bodies using `await` cannot be \
+                lowered yet"
+  | Check.T.TESpawn _ ->
+      failwith "emit TESpawn: Stage 3 phase 4 (state machine) not yet \
+                implemented — `spawn` cannot be lowered yet"
+  | Check.T.TEYield ->
+      failwith "emit TEYield: Stage 3 phase 4 (state machine) not yet \
+                implemented — `yield` cannot be lowered yet"
 
 (* Shared setup for a[i] and a[i] := v. Returns the array/index codes,
    fresh names, the array's C type, the abort-checks, and the C
