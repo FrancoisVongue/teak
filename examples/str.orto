@@ -112,11 +112,27 @@ fn int_to_bytes(r: Region, n: int) -> Array[byte] {
     dst
 }
 
+fn starts_with(s: Array[byte], prefix: Array[byte]) -> bool {
+    if len(s) < len(prefix) { false }
+    else { bytes_eq(slice(s, 0, len(prefix)), prefix) }
+}
+
+fn contains_substr(hay: Array[byte], needle: Array[byte]) -> bool {
+    if len(needle) == 0 { return true }
+    let mut i = 0;
+    while i + len(needle) <= len(hay) {
+        if bytes_eq(slice(hay, i, i + len(needle)), needle) {
+            return true
+        }
+        i := i + 1;
+    }
+    false
+}
+
 // Find "key=VALUE" in a comma-separated string. Returns a slice over
 // VALUE (or empty slice if not found). All slicing — no allocation.
 fn lookup(s: Array[byte], key: Array[byte]) -> Array[byte] {
     let mut from = 0;
-    let mut result = slice(s, 0, 0);
     while from < len(s) {
         if from + len(key) + 1 <= len(s)
            && bytes_eq(slice(s, from, from + len(key)), key)
@@ -124,13 +140,12 @@ fn lookup(s: Array[byte], key: Array[byte]) -> Array[byte] {
             let val_start = from + len(key) + 1;
             let rest = slice(s, val_start, len(s));
             let comma = index_of(rest, to_byte(44));
-            result := if comma < 0 { rest } else { slice(rest, 0, comma) };
-            break
+            return if comma < 0 { rest } else { slice(rest, 0, comma) }
         }
         let rest = slice(s, from, len(s));
         let comma = index_of(rest, to_byte(44));
-        if comma < 0 { break }
+        if comma < 0 { return slice(s, 0, 0) }
         from := from + comma + 1;
     }
-    result
+    slice(s, 0, 0)
 }

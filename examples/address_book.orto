@@ -1,0 +1,126 @@
+// Address-book "server" demo.
+//
+// One long-lived region (app_r) holds the user table loaded from the
+// fake DB at startup. Each incoming request runs in its own scratch
+// region (req_r) — everything allocated for the response dies when
+// req_r exits scope, so even a misbehaving handler can't leak.
+//
+// Commands (parsed from a "cmd=...,key=value" string):
+//   cmd=count                — how many users
+//   cmd=find,id=N            — fetch one by id
+//   cmd=search,q=substring   — fuzzy name search
+//   cmd=list                 — dump everyone
+//   anything else            — error message
+//
+// The whole thing prints to stdout.
+
+use io::{print, println};
+use str::{bytes_eq, concat_all, parse_int, int_to_bytes, lookup};
+use db::{Person, all_users, find_by_id, search_by_name};
+
+// ---------- formatting helpers ----------
+
+fn format_person(r: Region, p: Person) -> Array[byte] {
+    concat_all(r, array(r, [
+        "  #", int_to_bytes(r, p.id),
+        ": ", p.name,
+        " <", p.email, ">",
+        " age=", int_to_bytes(r, p.age),
+        "\n",
+    ]))
+}
+
+fn format_person_list(r: Region, header: Array[byte], people: Array[Person]) -> Array[byte] {
+    let parts = array(r, len(people) + 2, header);
+    parts[0] := header;
+    parts[1] := "\n";
+    for i in 0..len(people) {
+        parts[i + 2] := format_person(r, people[i]);
+    }
+    concat_all(r, parts)
+}
+
+// ---------- per-command handlers ----------
+
+fn handle_count(req_r: Region, users: Array[Person]) -> Array[byte] {
+    concat_all(req_r, array(req_r, [
+        "COUNT: ", int_to_bytes(req_r, len(users)), " user(s)\n",
+    ]))
+}
+
+fn handle_find(req_r: Region, users: Array[Person], req: Array[byte]) -> Array[byte] {
+    let id = parse_int(lookup(req, "id"));
+    match find_by_id(users, id) {
+        Some(user) => concat_all(req_r, array(req_r, [
+            "FOUND:\n", format_person(req_r, user),
+        ])),
+        None => concat_all(req_r, array(req_r, [
+            "NOT FOUND: id=", int_to_bytes(req_r, id), "\n",
+        ])),
+    }
+}
+
+fn handle_search(req_r: Region, users: Array[Person], req: Array[byte]) -> Array[byte] {
+    let needle  = lookup(req, "q");
+    let matches = search_by_name(req_r, users, needle);
+    let header  = concat_all(req_r, array(req_r, [
+        "SEARCH \"", needle, "\" — ",
+        int_to_bytes(req_r, len(matches)), " match(es):",
+    ]));
+    format_person_list(req_r, header, matches)
+}
+
+fn handle_list(req_r: Region, users: Array[Person]) -> Array[byte] {
+    let header = concat_all(req_r, array(req_r, [
+        "LIST: ", int_to_bytes(req_r, len(users)), " user(s):",
+    ]));
+    format_person_list(req_r, header, users)
+}
+
+fn handle_unknown(req_r: Region, cmd: Array[byte]) -> Array[byte] {
+    concat_all(req_r, array(req_r, [
+        "ERROR: unknown command \"", cmd, "\"\n",
+    ]))
+}
+
+// ---------- dispatch ----------
+
+fn handle_request(req_r: Region, users: Array[Person], req: Array[byte]) -> Array[byte] {
+    let cmd = lookup(req, "cmd");
+    if bytes_eq(cmd, "count")       { handle_count(req_r, users) }
+    else if bytes_eq(cmd, "find")   { handle_find(req_r, users, req) }
+    else if bytes_eq(cmd, "search") { handle_search(req_r, users, req) }
+    else if bytes_eq(cmd, "list")   { handle_list(req_r, users) }
+    else                            { handle_unknown(req_r, cmd) }
+}
+
+// ---------- entry ----------
+
+fn main() -> int {
+    // Long-lived storage for the user table — lives the whole program.
+    let app_r = region(1024 * 32);
+    let users = all_users(app_r);
+
+    // Simulated request queue. In a real server these would arrive
+    // over a socket; the loop body would be the same.
+    let requests = array(app_r, [
+        "cmd=count",
+        "cmd=find,id=2",
+        "cmd=find,id=99",
+        "cmd=search,q=al",
+        "cmd=search,q=ve",
+        "cmd=list",
+        "cmd=greet,name=anon",
+    ]);
+
+    for i in 0..len(requests) {
+        // Per-request scratch region. Everything the handler
+        // allocates dies when this scope exits.
+        let req_r = region(8192);
+        print("----\n");
+        let response = handle_request(req_r, users, requests[i]);
+        print(response);
+    }
+
+    0
+}
