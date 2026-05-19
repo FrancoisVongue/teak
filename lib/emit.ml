@@ -1480,9 +1480,63 @@ let rec emit_expr
       failwith "emit TEAwait: Stage 3 phase 4 (state machine) not yet \
                 implemented — function bodies using `await` cannot be \
                 lowered yet"
-  | Check.T.TESpawn _ ->
-      failwith "emit TESpawn: Stage 3 phase 4 (state machine) not yet \
-                implemented — `spawn` cannot be lowered yet"
+  | Check.T.TESpawn (inner, spawn_ty) ->
+      (* Spawn from a non-async caller. The work is kicked off the
+         same way an async caller would do it; the difference is that
+         the surrounding function has no dispatcher loop, so a
+         spawned task that suspends will stay pending until the
+         program's main eventually drains the ring. Callers who
+         spawn from outside any async path are responsible for
+         making sure a dispatcher actually runs. *)
+      (match inner with
+       | Check.T.TECall (Check.T.TEFnRef (worker, _, _), args, _)
+         when is_async_func worker ->
+           let arg_codes = List.map (emit_expr ctor_map) args in
+           let stmts_pre =
+             List.concat_map (fun c -> c.stmts) arg_codes
+           in
+           let arg_values = List.map (fun c -> c.value) arg_codes in
+           let params =
+             try Hashtbl.find async_func_params worker
+             with Not_found ->
+               failwith (Printf.sprintf
+                 "emit: spawn target %S is not a known async function" worker)
+           in
+           if List.length params <> List.length arg_values then
+             failwith (Printf.sprintf
+               "emit: sync spawn %S: arg/param count mismatch" worker);
+           let slot_v = fresh "_sp_slot" in
+           let fr_v   = fresh "_sp_fr" in
+           let rc_v   = fresh "_sp_rc" in
+           let gen_v  = fresh "_sp_gen" in
+           let param_inits =
+             List.map2 (fun (p, _) v ->
+               Printf.sprintf "%s->%s = %s;" fr_v p v) params arg_values
+           in
+           let stmts = stmts_pre @ [
+             Printf.sprintf "int %s = orto_slot_alloc();" slot_v;
+             Printf.sprintf "Frame_%s *%s = (Frame_%s*)&ORTO_SLOTS[%s].frame;"
+               worker fr_v worker slot_v;
+             Printf.sprintf "%s->step = %s_step;" fr_v worker;
+             Printf.sprintf "%s->state = 0;" fr_v;
+             Printf.sprintf "%s->last_res = 0;" fr_v;
+             Printf.sprintf "%s->return_value = 0;" fr_v;
+             Printf.sprintf "%s->_orto_slot = %s;" fr_v slot_v;
+             Printf.sprintf "ORTO_SLOTS[%s].status = ORTO_SLOT_RUNNING;" slot_v;
+             Printf.sprintf "ORTO_SLOTS[%s].waiter = NULL;" slot_v;
+             Printf.sprintf "int %s = ORTO_SLOTS[%s].gen;" gen_v slot_v;
+           ] @ param_inits @ [
+             Printf.sprintf "int %s = %s_step((void*)%s);" rc_v worker fr_v;
+             Printf.sprintf "if (%s == 1) ORTO_PENDING++;" rc_v;
+             Printf.sprintf "else ORTO_PENDING -= orto_complete((OrtoFrameHeader*)%s);" fr_v;
+           ] in
+           let task_c = c_type spawn_ty in
+           let value = Printf.sprintf "((%s){ .slot = %s, .gen = %s })"
+             task_c slot_v gen_v in
+           { stmts; value }
+       | _ ->
+           failwith "emit TESpawn (sync caller): only `spawn worker(args)` \
+                     where worker is an async function is supported")
   | Check.T.TEYield ->
       failwith "emit TEYield: Stage 3 phase 4 (state machine) not yet \
                 implemented — `yield` cannot be lowered yet"
@@ -2607,13 +2661,21 @@ let emit (prog : Check.T.program) : string =
           frame_union
       in
       let frames = List.map emit_async_frame_struct async_funcs in
+      (* Forward decls for every <name>_step so sync callers (and the
+         sync wrappers themselves, which are emitted before
+         async_defs) can refer to them. *)
+      let step_fwds =
+        List.map (fun (f : Check.T.func) ->
+          Printf.sprintf "static int %s_step(void *frp);" f.name)
+          async_funcs
+      in
       let steps  = List.map (emit_async_step ctor_map) async_funcs in
       let wrappers =
         List.map (fun (f : Check.T.func) ->
           if f.name = "main" then emit_async_main_wrapper f
           else emit_async_sync_wrapper f) async_funcs
       in
-      (rt, frames, steps @ wrappers)
+      (rt, frames @ step_fwds, steps @ wrappers)
     end
   in
   let static_bytes = emit_static_bytes_array () in
