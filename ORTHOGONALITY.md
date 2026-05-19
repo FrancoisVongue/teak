@@ -70,3 +70,25 @@
 6. **Windows / IOCP backend**.
 
 Открытых дизайн-вопросов из ядра — нет.
+
+## Permanent decisions — не делаем никогда
+
+Это не «может быть в v2». Это **никогда**, потому что эти фичи **не вписываются в нашу модель явности и Region-based памяти**.
+
+| Что | Почему не делаем |
+|---|---|
+| **Closures с capture by reference** (`\|x\| { use(captured_var) }`) | Capture скрывает состояние, эквивалентно OOP с `this`. Captured переменные либо с stack (dangling после возврата функции), либо требуют hoisting на heap (escape analysis = магия за спиной). Альтернатива: явная struct + function pointer, на 2 строки больше, всё видно. |
+| **`&local_var` оператор** (ссылка на стек-слот) | Создаёт dangling pointer если ссылка переживёт scope. C делает молча, Rust ловит через lifetimes (расползающаяся машинерия), GC языки прячут escape analysis'ом (магия + GC). У нас нет оператора → проблема не возникает. Хочешь долгоживущую ссылку — клади в `Region`, получай gen-проверяемый handle. |
+| **Lambdas / anonymous functions** | Тот же случай — захватывают окружение неявно. Лямбда без capture эквивалентна named top-level fn, но без преимуществ читаемости. |
+| **Method syntax `x.method()`** | Сахар поверх `method(x)`. Открывает дверь для `impl` блоков, traits, virtual dispatch — каскад OOP-машинерии. Отказ один раз — закрывает каскад. |
+| **Operator overloading** | `a + b` должно делать одно. Перегрузка = invisible different behavior по типу аргумента. |
+| **Implicit conversions кроме int→float** | Та же причина. |
+| **Exceptions** | `Result[T]` достаточно. Исключения — control flow за пределами сигнатуры. |
+| **GC** | `Region` + linear types достаточно. GC = неявное освобождение, GC паузы, write barriers, write barriers overhead. |
+| **Type classes / traits / interfaces** | Каталог правил полиморфизма. Параметрический полиморфизм через generics — достаточно. |
+| **Inheritance** | Тот же случай. |
+| **Macros / template metaprogramming** | Сильно осложняет инструменты (LSP, рефакторинг). У нас sugar в parser хватает. |
+| **Variadic args / default args / named args** | Каждая — отдельное правило с edge case'ами. Builder pattern или явный массив дают то же без магии. |
+| **Reflection** | Нет use case'а который не закрыт codegen'ом или явной структурой. |
+
+**Главный принцип каждой строки**: эти фичи **скрывают что-то** что должно быть видимо в коде — captured state, lifetime, type-dispatched behavior, control flow. У нас всё видно. Это не лимит — это **defining choice**.
