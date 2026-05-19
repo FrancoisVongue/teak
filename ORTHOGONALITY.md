@@ -71,6 +71,38 @@
 
 Открытых дизайн-вопросов из ядра — нет.
 
+## Безопасность памяти: что закрыто, что осталось
+
+| Класс багов | Закрыто? | Как |
+|---|---|---|
+| Use-after-free | ✅ | Region drop при выходе scope; gen counter (64-bit) на handle'ах |
+| Double-free | ✅ | Linear `drop` в типе; повторный drop = compile error |
+| Buffer overflow на Array | ✅ | bounds check на каждое `a[i]` (abort при выходе) |
+| Buffer overflow на `*T` | ⚠️ | FFI escape, ответственность пользователя |
+| Null deref | ✅ | нет null в языке; `Option[T]` явный |
+| Uninit read | ✅ | компилятор требует init |
+| Data race | ✅ | shared-nothing per core; нет shared mut между ядрами |
+| Memory leak | ✅ | Region drop, linear drop — компилятор требует |
+| Dangling stack ref | ✅ | нет `&local` оператора синтаксически |
+| Gen counter wrap | ✅ | 64-bit, не достижимо за разумное время |
+| Integer overflow | ⚠️ | wrap (как C); опционально `--check-overflow` в будущем |
+| Stack overflow | ⚠️ | cc флаг (`cc -fstack-check`), вне нашего компилятора |
+| FFI escape (`*T`, `extern fn`) | ⛔ | by design — наша единственная дверь в C |
+
+**Итог**: ~99% memory safety. Остаток — FFI (by design) и cc-уровневые проверки (`-fstack-check`, `-fsanitize=undefined`).
+
+**Рекомендуемые `cc` флаги для production-сборки**:
+```
+cc -O2 -fstack-check -fno-strict-aliasing -D_FORTIFY_SOURCE=2 out.c -luring
+```
+- `-fstack-check`: catch stack overflow до SIGSEGV.
+- `-fno-strict-aliasing`: наш emit использует memcpy для cross-type blob; strict aliasing мог бы их optimise out.
+- `-D_FORTIFY_SOURCE=2`: glibc-level bounds check на string/mem functions.
+
+В чём это отличие от Rust:
+- Rust 99% memory safety **внутри safe** + 1% `unsafe` в каждой core lib.
+- orto 99% memory safety **везде** + `*T`/`extern fn` явный FFI escape.
+
 ## Permanent decisions — не делаем никогда
 
 Это не «может быть в v2». Это **никогда**, потому что эти фичи **не вписываются в нашу модель явности и Region-based памяти**.
