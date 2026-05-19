@@ -33,6 +33,7 @@ type pat =
   | PInt  of int                         (* literal int pattern *)
   | PBool of bool                        (* literal bool pattern *)
   | PStr  of string                      (* literal Array[byte] pattern *)
+  | PTuple of pat list                   (* (p1, p2, ..., pn) — destructure tuple scrutinee *)
 
 type binop =
   | OpAdd | OpSub | OpMul | OpDiv | OpMod
@@ -198,6 +199,8 @@ let rec show_pat = function
   | PInt n  -> string_of_int n
   | PBool b -> if b then "true" else "false"
   | PStr s  -> Printf.sprintf "%S" s
+  | PTuple ps ->
+      "(" ^ String.concat ", " (List.map show_pat ps) ^ ")"
 
 let show_binop = function
   | OpAdd -> "+"  | OpSub -> "-"

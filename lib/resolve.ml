@@ -210,12 +210,14 @@ let rec resolve_expr
         match p with
         | PCtor (c, vs) -> PCtor (resolve_name map locals c, vs)
         | POr pats -> POr (List.map resolve_pat pats)
+        | PTuple ps -> PTuple (List.map resolve_pat ps)
         | PInt _ | PBool _ | PStr _ | PBind _ -> p
       in
-      let pattern_locals p =
+      let rec pattern_locals p =
         match p with
         | PCtor (_, vs) -> List.filter (fun v -> v <> "_") vs
         | POr _ -> []
+        | PTuple ps -> List.concat_map pattern_locals ps
         | PInt _ | PBool _ | PStr _ -> []
         | PBind "_" -> []
         | PBind x -> [x]

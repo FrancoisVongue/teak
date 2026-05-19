@@ -735,6 +735,29 @@ and parse_single_pat st =
   | TTrue  -> PBool true
   | TFalse -> PBool false
   | TStringLit s -> PStr s
+  | TLParen ->
+      (* Tuple pattern: `(p1, p2, ..., pn)` for n >= 2.
+         `(p)` alone would be parens-around-pat, but tuple patterns
+         only make sense over an actual tuple — and tuples need at
+         least two components — so require at least one comma. *)
+      let first = parse_single_pat st in
+      if peek st = TComma then begin
+        let rec collect acc =
+          if peek st = TComma then begin
+            advance st;
+            (* trailing comma allowed: `(a, b,)` *)
+            if peek st = TRParen then List.rev acc
+            else collect (parse_single_pat st :: acc)
+          end else
+            List.rev acc
+        in
+        let rest = collect [] in
+        expect st TRParen;
+        PTuple (first :: rest)
+      end else begin
+        expect st TRParen;
+        first   (* parens around single pattern, no-op *)
+      end
   | t -> raise (Parse_error
     (Printf.sprintf "expected pattern, got %s" (Token.show t)))
 

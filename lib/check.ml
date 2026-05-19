@@ -812,6 +812,7 @@ type scrut_kind =
   | SK_Byte                        (* byte — same rules as int *)
   | SK_Bool                        (* bool — true/false, exhaustive if both covered *)
   | SK_Bytes                       (* Array[byte] — string literal patterns *)
+  | SK_Tuple of ty list            (* tuple — PTuple of matching arity *)
 
 let scrutinee_kind (env : env) (t : ty) : scrut_kind =
   match prune t with
@@ -829,17 +830,21 @@ let scrutinee_kind (env : env) (t : ty) : scrut_kind =
        | _ ->
            raise (Type_error
              (Printf.sprintf
-                "match scrutinee must be int, bool, byte, Array[byte], or an ADT, got %s"
+                "match scrutinee must be int, bool, byte, Array[byte], tuple, or an ADT, got %s"
                 (show_ty (zonk t)))))
+  | TyTuple ts -> SK_Tuple ts
   | TyApp (n, _) when List.mem_assoc n env.types -> SK_Adt n
   | _ ->
       raise (Type_error
         (Printf.sprintf
-           "match scrutinee must be int, bool, byte, Array[byte], or an ADT, got %s"
+           "match scrutinee must be int, bool, byte, Array[byte], tuple, or an ADT, got %s"
            (show_ty (zonk t))))
 
-let is_catchall_pat = function
+(* A pattern that always matches everything that reaches it.
+   For tuples this means each component is itself a catch-all. *)
+let rec is_catchall_pat = function
   | PBind _ -> true
+  | PTuple ps -> List.for_all is_catchall_pat ps
   | _ -> false
 
 (* Reject patterns that don't belong on this scrutinee kind. Also
@@ -852,6 +857,12 @@ let rec pat_compatible_with_kind kind p =
   | SK_Int, PInt _ | SK_Byte, PInt _ -> true
   | SK_Bool, PBool _ -> true
   | SK_Bytes, PStr _ -> true
+  | SK_Tuple ts, PTuple ps when List.length ts = List.length ps ->
+      List.for_all2 (fun t p ->
+        let sub_kind = try scrutinee_kind {types=[]; records=[]; ctors=[]; fns=[]} t
+                       with _ -> SK_Int (* fallback; full check happens in real arm typing *)
+        in
+        pat_compatible_with_kind sub_kind p) ts ps
   | _, POr pats -> List.for_all (pat_compatible_with_kind kind) pats
   | _, _ -> false
 
@@ -860,6 +871,8 @@ let pat_kind_name = function
   | SK_Int -> "int"
   | SK_Byte -> "byte"
   | SK_Bool -> "bool"
+  | SK_Tuple ts ->
+      Printf.sprintf "tuple of arity %d" (List.length ts)
   | SK_Bytes -> "Array[byte]"
 
 (* Walk arms left-to-right enforcing:
@@ -1395,6 +1408,38 @@ let rec infer (env : env) (tparams : string list)
                | _ -> ());
               vars
           | PInt _ | PBool _ | PStr _ -> vars
+          | PTuple ps ->
+              let comp_tys = match prune tscrut_ty with
+                | TyTuple ts when List.length ts = List.length ps -> ts
+                | _ ->
+                    raise (Type_error
+                      (Printf.sprintf
+                         "tuple pattern has %d component(s); scrutinee is %s"
+                         (List.length ps) (show_ty (zonk tscrut_ty))))
+              in
+              (* Recursively bind sub-patterns. v1 supports nested
+                 PBind / wildcards; nested PCtor / PInt etc. would
+                 require restructuring this whole arm-typing into a
+                 recursive walker — out of scope for now. *)
+              let rec bind acc p t =
+                match p with
+                | PBind "_" -> acc
+                | PBind x ->
+                    check_not_c_reserved "pattern bind" x;
+                    (x, (t, false)) :: acc
+                | PTuple sub_ps ->
+                    let sub_ts = match prune t with
+                      | TyTuple ts when List.length ts = List.length sub_ps -> ts
+                      | _ ->
+                          raise (Type_error
+                            "nested tuple pattern: scrutinee component is not a tuple of matching arity")
+                    in
+                    List.fold_left2 bind acc sub_ps sub_ts
+                | _ ->
+                    raise (Type_error
+                      "tuple sub-pattern: only `_`, bind, and nested tuple are supported for now")
+              in
+              List.fold_left2 bind vars ps comp_tys
         in
         let typed_guard = match guard with
           | None -> None
@@ -2276,6 +2321,23 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
               in
               List.filter (fun (v, _) -> v <> "_")
                 (List.combine vs arg_tys)
+          | PTuple ps ->
+              let comp_tys = match prune scrut_ty with
+                | TyTuple ts -> ts
+                | _ -> []
+              in
+              let rec collect acc p t =
+                match p with
+                | PBind "_" -> acc
+                | PBind x -> (x, t) :: acc
+                | PTuple sub_ps ->
+                    let sub_ts = match prune t with
+                      | TyTuple ts -> ts | _ -> []
+                    in
+                    List.fold_left2 collect acc sub_ps sub_ts
+                | _ -> acc
+              in
+              List.fold_left2 collect [] ps comp_tys
         in
         let outer_had =
           List.map (fun (v, _) -> (v, SM.find_opt v live)) names_tys

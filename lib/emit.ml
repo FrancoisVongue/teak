@@ -652,7 +652,22 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
                 in
                 let new_names = List.map snd pairs in
                 let env' = pairs @ env in
-                rn_arm (p, guard, body) (PCtor (c, new_names), env')) arms
+                rn_arm (p, guard, body) (PCtor (c, new_names), env')
+            | PTuple ps ->
+                let pairs = ref [] in
+                let rec rn_p p =
+                  match p with
+                  | PBind "_" -> PBind "_"
+                  | PBind x ->
+                      let x' = fresh x in
+                      pairs := (x, x') :: !pairs;
+                      PBind x'
+                  | PTuple sub -> PTuple (List.map rn_p sub)
+                  | _ -> p
+                in
+                let p' = PTuple (List.map rn_p ps) in
+                let env' = !pairs @ env in
+                rn_arm (p, guard, body) (p', env')) arms
         in
         TEMatch (s', st, arms', rt)
     | TEArray (r, n, v, t) ->
@@ -880,8 +895,9 @@ let ty_of_expr : Check.T.expr -> ty = function
    regions skip the free — their storage is reclaimed when the
    surrounding C function returns. Used by let-scope auto_drop and
    function-end param drops. *)
-let is_catchall_pat_emit = function
+let rec is_catchall_pat_emit = function
   | PBind _ -> true
+  | PTuple ps -> List.for_all is_catchall_pat_emit ps
   | _ -> false
 
 let rec emit_expr
@@ -1073,7 +1089,9 @@ let rec emit_expr
         match scrut_ty with
         | TyInt | TyBool -> false
         | TyApp ("byte", []) -> false
+        | TyApp ("u16", []) | TyApp ("u32", []) | TyApp ("u64", []) -> false
         | TyApp ("Array", _) -> false
+        | TyTuple _ -> false
         | TyApp _ -> true
         | _ -> true
       in
@@ -1149,9 +1167,6 @@ let rec emit_expr
             | PInt n  -> Printf.sprintf "%s == %d" scrut_var n
             | PBool b -> Printf.sprintf "%s == %d" scrut_var (if b then 1 else 0)
             | PStr s ->
-                (* Compare by length first, then bytes. We register
-                   the string in the pool so we can memcmp against the
-                   static buffer at a known offset. *)
                 let off = register_string s in
                 let len = String.length s in
                 Printf.sprintf
@@ -1159,9 +1174,29 @@ let rec emit_expr
                   scrut_var len scrut_var scrut_var off len
             | POr ps -> String.concat " || " (List.map single ps)
             | PBind _ -> "1"
+            (* Tuple pattern: v1 only supports bind/wildcard sub-pats,
+               so the whole pattern is always a match. The binding
+               declarations land in bind_decl. *)
+            | PTuple _ -> "1"
             | PCtor _ -> failwith "emit: ctor pattern in non-ADT match"
           in
           single pat
+        in
+        (* Walk a PTuple and collect (binder, c_type, accessor)
+           triples for every named subbind. accessor is a C expression
+           rooted in scrut_var. *)
+        let rec tuple_bindings p access ty =
+          (* mono has already concretized; ty has no metas. *)
+          match p, ty with
+          | PBind "_", _ -> []
+          | PBind x, t -> [(x, c_type t, access)]
+          | PTuple sub, TyTuple ts ->
+              List.concat (List.mapi (fun i (sp, st) ->
+                let acc = Printf.sprintf "((%s).f%d)" access i in
+                tuple_bindings sp acc st)
+                (List.combine sub ts))
+          | _, _ ->
+              failwith "emit: unsupported sub-pattern in tuple match"
         in
         (* Each arm sits in its own `{ ... }` block inside a
            `do { ... } while (0)`. A binding (PBind) becomes a local
@@ -1173,6 +1208,10 @@ let rec emit_expr
             | PBind x when x <> "_" ->
                 [Printf.sprintf "    %s %s = %s;"
                    (c_type scrut_ty) x scrut_var]
+            | PTuple _ ->
+                List.map (fun (x, c_ty, access) ->
+                  Printf.sprintf "    %s %s = %s;" c_ty x access)
+                  (tuple_bindings pat scrut_var scrut_ty)
             | _ -> []
           in
           let test =
