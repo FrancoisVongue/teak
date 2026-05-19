@@ -56,8 +56,9 @@
 |---|---|---|
 | `--slots N` | размер slot pool на поток | 1024 |
 | `--cores N` | количество pthread-воркеров (shared-nothing) | 1 |
+| `--ring-entries N` | размер io_uring SQ ring | 64 |
 
-`orto main.orto --cores 4 --slots 8192` — 4 потока, по 8192 слота на каждый. Glue компилируется с тем же `-DORTO_CORES=N`.
+`orto main.orto --cores 4 --slots 8192 --ring-entries 256` — 4 потока, 8192 слота, 256 SQE на ring каждый. Glue компилируется с тем же `-DORTO_CORES=N`. Auto-flush в emit срабатывает когда ring почти полон, так что `--ring-entries` в основном можно не трогать.
 
 ## Что осталось как debt v2
 
