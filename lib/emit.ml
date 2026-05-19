@@ -1636,8 +1636,8 @@ let rec emit_expr
                worker fr_v worker slot_v;
              Printf.sprintf "%s->step = %s_step;" fr_v worker;
              Printf.sprintf "%s->state = 0;" fr_v;
-             Printf.sprintf "%s->last_res = 0;" fr_v;
-             Printf.sprintf "%s->return_value = 0;" fr_v;
+             Printf.sprintf "memset(%s->last_res, 0, sizeof(%s->last_res));" fr_v fr_v;
+             Printf.sprintf "memset(%s->return_value, 0, sizeof(%s->return_value));" fr_v fr_v;
              Printf.sprintf "%s->_orto_slot = %s;" fr_v slot_v;
              Printf.sprintf "ORTO_SLOTS[%s].status = ORTO_SLOT_RUNNING;" slot_v;
              Printf.sprintf "ORTO_SLOTS[%s].waiter = NULL;" slot_v;
@@ -2350,8 +2350,8 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
         worker fr_v worker slot_v;
       Printf.sprintf "%s->step = %s_step;" fr_v worker;
       Printf.sprintf "%s->state = 0;" fr_v;
-      Printf.sprintf "%s->last_res = 0;" fr_v;
-      Printf.sprintf "%s->return_value = 0;" fr_v;
+      Printf.sprintf "memset(%s->last_res, 0, sizeof(%s->last_res));" fr_v fr_v;
+      Printf.sprintf "memset(%s->return_value, 0, sizeof(%s->return_value));" fr_v fr_v;
       Printf.sprintf "%s->_orto_slot = %s;" fr_v slot_v;
       Printf.sprintf "%s->more = 0;" fr_v;
       Printf.sprintf "ORTO_SLOTS[%s].status = %s;" slot_v init_status;
@@ -2392,14 +2392,20 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
       let id = fresh_spawn () in
       let slot_v = id ^ "_slot" in
       let gen_v  = id ^ "_gen" in
-      (* Sync targets don't register a return type (they're not
-         async functions). Best-effort widening to long long works for
-         every scalar return — and sync spawn was already limited to
-         scalar returns by the older `(int)(...)` cast. *)
+      (* Sync target ran inline; the result is whatever the call
+         returned. We don't have its declared return type in this
+         path, but the 16-byte slot is big enough for every type the
+         language lets escape from a non-async call (int, byte, bool,
+         pointer, 8/16-byte struct). memcpy is the uniform answer. *)
+      let tmp = fresh "_sync_ret" in
       emit_into [
         Printf.sprintf "int %s = orto_slot_alloc();" slot_v;
         Printf.sprintf "int %s = ORTO_SLOTS[%s].gen;" gen_v slot_v;
-        Printf.sprintf "ORTO_SLOTS[%s].result = (long long)(%s);" slot_v call_expr;
+        Printf.sprintf "{ __typeof__(%s) %s = (%s);" call_expr tmp call_expr;
+        Printf.sprintf "  memset(ORTO_SLOTS[%s].result, 0, sizeof(ORTO_SLOTS[%s].result));"
+          slot_v slot_v;
+        Printf.sprintf "  memcpy(ORTO_SLOTS[%s].result, &%s, sizeof(%s)); }"
+          slot_v tmp tmp;
         Printf.sprintf "ORTO_SLOTS[%s].status = ORTO_SLOT_DONE_NO_WAITER;" slot_v;
       ];
       Some (slot_v, gen_v)
@@ -2434,30 +2440,29 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
       | Return of ty            (* fr->return_value = value; return 0; *)
       | Discard                 (* statement context; value ignored *)
   end in
-  (* Assignment into a long long header slot (return_value/last_res). *)
+  (* Assignment into a 16-byte header slot (return_value/last_res/
+     slot.result). Always memcpy from a typed temp — covers scalar T
+     (int/byte/bool/float/pointer), 8-byte structs (Region), and
+     16-byte aggregates (Array). The slot is zeroed first so reads of
+     T smaller than 16 don't pick up stale high bytes. *)
   let assign_to_blob lvalue value_str ty =
-    if scalar_like ty then
-      [Printf.sprintf "%s = (long long)(%s);" lvalue value_str]
-    else
-      let c_ty = c_type ty in
-      let temp = fresh "_blob" in
-      [
-        Printf.sprintf "{ %s %s = (%s);" c_ty temp value_str;
-        Printf.sprintf "  memcpy(&%s, &%s, sizeof(%s)); }" lvalue temp temp;
-      ]
+    let c_ty = c_type ty in
+    let temp = fresh "_blob" in
+    [
+      Printf.sprintf "memset(&%s, 0, sizeof(%s));" lvalue lvalue;
+      Printf.sprintf "{ %s %s = (%s);" c_ty temp value_str;
+      Printf.sprintf "  memcpy(&%s, &%s, sizeof(%s)); }" lvalue temp temp;
+    ]
   in
-  (* Read a T-typed value from a long long header slot. *)
+  (* Read a T-typed value out of a 16-byte header slot. *)
   let read_from_blob target_lvalue source_lvalue ty =
-    if scalar_like ty then
-      [Printf.sprintf "%s = (%s)(%s);" target_lvalue (c_type ty) source_lvalue]
-    else
-      let c_ty = c_type ty in
-      let temp = fresh "_blob" in
-      [
-        Printf.sprintf "{ %s %s;" c_ty temp;
-        Printf.sprintf "  memcpy(&%s, &%s, sizeof(%s));" temp source_lvalue temp;
-        Printf.sprintf "  %s = %s; }" target_lvalue temp;
-      ]
+    let c_ty = c_type ty in
+    let temp = fresh "_blob" in
+    [
+      Printf.sprintf "{ %s %s;" c_ty temp;
+      Printf.sprintf "  memcpy(&%s, &%s, sizeof(%s));" temp source_lvalue temp;
+      Printf.sprintf "  %s = %s; }" target_lvalue temp;
+    ]
   in
   (* async_rewrite_to_frame renames frame-resident binders to "fr->x".
      If that prefix is already there, don't double it; otherwise add
@@ -2493,27 +2498,25 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
           "Result_" ^ Mono.mangle_ty pty
     in
     let tmp = fresh "_res" in
-    let ok_inner_stmts, ok_inner_value =
-      if scalar_like pty then
-        ([], Printf.sprintf "(%s)fr->last_res" (c_type pty))
-      else
-        let blob = fresh "_okv" in
-        let c_pty = c_type pty in
-        ([ Printf.sprintf "%s %s; memcpy(&%s, &fr->last_res, sizeof(%s));"
-             c_pty blob blob c_pty ],
-         blob)
-    in
-    let stmts =
-      [ Printf.sprintf "%s %s;" result_c tmp;
-        "if (fr->last_res >= 0) {" ]
-      @ List.map (fun s -> "    " ^ s) ok_inner_stmts
-      @ [ Printf.sprintf "    %s = ((%s){ .tag = 0, .as = { .Ok = { .f0 = %s } } });"
-            tmp result_c ok_inner_value;
-          "} else {";
-          Printf.sprintf "    %s = ((%s){ .tag = 1, .as = { .Err = { .f0 = (int)(-fr->last_res) } } });"
-            tmp result_c;
-          "}" ]
-    in
+    let check = fresh "_resc" in
+    let okv = fresh "_okv" in
+    let c_pty = c_type pty in
+    let stmts = [
+      (* Probe the first 4 bytes of the 16-byte last_res as the
+         CQE's int result — that's where the dispatcher writes it. *)
+      Printf.sprintf "int %s;" check;
+      Printf.sprintf "memcpy(&%s, fr->last_res, sizeof(%s));" check check;
+      Printf.sprintf "%s %s;" result_c tmp;
+      Printf.sprintf "if (%s >= 0) {" check;
+      Printf.sprintf "    %s %s;" c_pty okv;
+      Printf.sprintf "    memcpy(&%s, fr->last_res, sizeof(%s));" okv okv;
+      Printf.sprintf "    %s = ((%s){ .tag = 0, .as = { .Ok = { .f0 = %s } } });"
+        tmp result_c okv;
+      "} else {";
+      Printf.sprintf "    %s = ((%s){ .tag = 1, .as = { .Err = { .f0 = -%s } } });"
+        tmp result_c check;
+      "}";
+    ] in
     emit_into stmts;
     store_at d tmp
   in
@@ -2574,7 +2577,7 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
             task_c task_c arr_n arr_n i_n;
           "if (ORTO_SLOTS[_t.slot].gen != _t.gen) abort();";
           "if (ORTO_SLOTS[_t.slot].status == ORTO_SLOT_DONE_NO_WAITER) {";
-          "    fr->last_res = ORTO_SLOTS[_t.slot].result;";
+          "    memcpy(fr->last_res, ORTO_SLOTS[_t.slot].result, sizeof(fr->last_res));";
           "    orto_slot_free(_t.slot);";
           Printf.sprintf "    fr->state = %d; continue;" body_state;
           "}";
@@ -2645,7 +2648,7 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
             task_v task_v;
           Printf.sprintf "if (ORTO_SLOTS[%s.slot].status == ORTO_SLOT_DONE_NO_WAITER) {"
             task_v;
-          Printf.sprintf "    fr->last_res = ORTO_SLOTS[%s.slot].result;" task_v;
+          Printf.sprintf "    memcpy(fr->last_res, ORTO_SLOTS[%s.slot].result, sizeof(fr->last_res));" task_v;
           Printf.sprintf "    orto_slot_free(%s.slot);" task_v;
           Printf.sprintf "    fr->state = %d;" n;
           Printf.sprintf "    continue;";
@@ -2723,8 +2726,8 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
                    sub_fr slot_v;
                  Printf.sprintf "%s->step = orto_passthrough_step;" sub_fr;
                  Printf.sprintf "%s->state = 0;" sub_fr;
-                 Printf.sprintf "%s->last_res = 0;" sub_fr;
-                 Printf.sprintf "%s->return_value = 0;" sub_fr;
+                 Printf.sprintf "memset(%s->last_res, 0, sizeof(%s->last_res));" sub_fr sub_fr;
+                 Printf.sprintf "memset(%s->return_value, 0, sizeof(%s->return_value));" sub_fr sub_fr;
                  Printf.sprintf "%s->_orto_slot = fr->%s;" sub_fr slot_v;
                  Printf.sprintf "%s->more = 0;" sub_fr;
                  Printf.sprintf "ORTO_SLOTS[fr->%s].status = ORTO_SLOT_RUNNING;" slot_v;
@@ -2769,7 +2772,7 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
             Printf.sprintf
               "if (ORTO_SLOTS[fr->%s].status == ORTO_SLOT_DONE_NO_WAITER) {"
               slot_v;
-            Printf.sprintf "    fr->last_res = ORTO_SLOTS[fr->%s].result;" slot_v;
+            Printf.sprintf "    memcpy(fr->last_res, ORTO_SLOTS[fr->%s].result, sizeof(fr->last_res));" slot_v;
             Printf.sprintf "    orto_slot_free(fr->%s);" slot_v;
             Printf.sprintf "    fr->state = %d;" n_state;
             Printf.sprintf "    continue;";
@@ -2988,8 +2991,8 @@ let emit_async_frame_struct (f : Check.T.func) : string =
     "    int state;";
     "    int _orto_slot;";          (* slot index, or -1 if frame is stack-owned *)
     "    int more;";                (* multishot: 1 if IORING_CQE_F_MORE set on last CQE *)
-    "    long long last_res;";      (* dispatcher writes the CQE result here before resume *)
-    "    long long return_value;";  (* step writes this before `return 0` *)
+    "    uint8_t last_res[16];";    (* dispatcher writes the CQE result here before resume *)
+    "    uint8_t return_value[16];"; (* step writes this before `return 0` *)
   ] in
   Printf.sprintf "typedef struct {\n%s\n} Frame_%s;"
     (String.concat "\n" (header @ params_lines @ local_lines))
@@ -3041,15 +3044,16 @@ let emit_async_main_wrapper (f : Check.T.func) : string =
      \    Frame_%s fr;\n\
      \    fr.step = %s_step;\n\
      \    fr.state = 0;\n\
-     \    fr.last_res = 0;\n\
-     \    fr.return_value = 0;\n\
+     \    memset(fr.last_res, 0, sizeof(fr.last_res));\n\
+     \    memset(fr.return_value, 0, sizeof(fr.return_value));\n\
      \    fr._orto_slot = -1;\n\
      \    fr.more = 0;\n\
      \    ORTO_PENDING = 1;\n\
      \    int rc = %s_step(&fr);\n\
      \    if (rc == 0) ORTO_PENDING = 0;\n\
      \    else orto_dispatch();\n\
-     \    int result = fr.return_value;\n\
+     \    int result;\n\
+     \    memcpy(&result, &fr.return_value, sizeof(result));\n\
      \    io_uring_queue_exit(&ORTO_RING);\n\
      \    return result;\n\
      }"
@@ -3074,22 +3078,19 @@ let emit_async_sync_wrapper (f : Check.T.func) : string =
       Printf.sprintf "    fr.%s = %s;" p p) f.params
   in
   let return_stmt =
-    if scalar_like f.return_ty then
-      Printf.sprintf "    return (%s)fr.return_value;" (c_type f.return_ty)
-    else
-      Printf.sprintf
-        "    %s _ret;\n\
-         \    memcpy(&_ret, &fr.return_value, sizeof(_ret));\n\
-         \    return _ret;"
-        (c_type f.return_ty)
+    Printf.sprintf
+      "    %s _ret;\n\
+       \    memcpy(&_ret, &fr.return_value, sizeof(_ret));\n\
+       \    return _ret;"
+      (c_type f.return_ty)
   in
   Printf.sprintf
     "%s %s(%s) {\n\
      \    Frame_%s fr;\n\
      \    fr.step = %s_step;\n\
      \    fr.state = 0;\n\
-     \    fr.last_res = 0;\n\
-     \    fr.return_value = 0;\n\
+     \    memset(fr.last_res, 0, sizeof(fr.last_res));\n\
+     \    memset(fr.return_value, 0, sizeof(fr.return_value));\n\
      \    fr._orto_slot = -1;\n\
      \    fr.more = 0;\n\
      %s\n\
@@ -3198,17 +3199,17 @@ let emit (prog : Check.T.program) : string =
            /* The header lives at the prefix of every Frame_<X>. We use\n\
             * long long for last_res and return_value so any T up to 8\n\
             * bytes (int, byte, bool, Region, Task, Stream, raw pointer,\n\
-            * double via bitcast) can travel through the slot pool\n\
-            * without per-T machinery. Wider returns (Array's 16-byte\n\
-            * handle, user structs > 8 bytes) need either a Region-\n\
-            * allocated boxed result or future work to widen this slot. */\n\
+            * double via bitcast, Region's 8-byte handle, Array's\n\
+            * 16-byte handle, every 2-/3-/4-component tuple of those)\n\
+            * can travel through the slot pool without per-T machinery.\n\
+            * Wider returns must currently be Region-boxed. */\n\
            typedef struct {\n\
            \    OrtoStepFn step;\n\
            \    int state;\n\
            \    int _orto_slot;   /* slot index in ORTO_SLOTS, -1 if stack-owned */\n\
            \    int more;         /* multishot: 1 if more CQEs are coming, 0 on EOF */\n\
-           \    long long last_res;\n\
-           \    long long return_value;\n\
+           \    uint8_t last_res[16];\n\
+           \    uint8_t return_value[16];\n\
            } OrtoFrameHeader;\n\
            /* ORTO_RING is intentionally non-static so user-side\n\
             * async-extern glue (extern fn read/write/recv/...) can\n\
@@ -3234,7 +3235,7 @@ let emit (prog : Check.T.program) : string =
            \    int next_free;\n\
            \    int status;\n\
            \    int waiter_state;\n\
-           \    long long result;\n\
+           \    uint8_t result[16];\n\
            \    OrtoFrameHeader *waiter;\n\
            \    OrtoSlotFrames frame;\n\
            } OrtoSlot;\n\
@@ -3249,7 +3250,7 @@ let emit (prog : Check.T.program) : string =
            \    ORTO_SLOTS[i].status = ORTO_SLOT_RUNNING;\n\
            \    ORTO_SLOTS[i].waiter = NULL;\n\
            \    ORTO_SLOTS[i].waiter_state = 0;\n\
-           \    ORTO_SLOTS[i].result = 0;\n\
+           \    memset(ORTO_SLOTS[i].result, 0, sizeof(ORTO_SLOTS[i].result));\n\
            \    return i;\n\
            }\n\
            \n\
@@ -3276,9 +3277,8 @@ let emit (prog : Check.T.program) : string =
            \    for (;;) {\n\
            \        if (fr->_orto_slot < 0) return extra_done;\n\
            \        int si = fr->_orto_slot;\n\
-           \        int rv = fr->return_value;\n\
            \        OrtoSlot *s = &ORTO_SLOTS[si];\n\
-           \        s->result = rv;\n\
+           \        memcpy(&s->result, &fr->return_value, sizeof(s->result));\n\
            \        if (s->status == ORTO_SLOT_DETACHED) {\n\
            \            orto_slot_free(si);\n\
            \            return extra_done;\n\
@@ -3288,7 +3288,7 @@ let emit (prog : Check.T.program) : string =
            \            return extra_done;\n\
            \        }\n\
            \        OrtoFrameHeader *w = s->waiter;\n\
-           \        w->last_res = rv;\n\
+           \        memcpy(&w->last_res, &fr->return_value, sizeof(w->last_res));\n\
            \        w->state = s->waiter_state;\n\
            \        orto_slot_free(si);\n\
            \        int wr = w->step(w);\n\
@@ -3311,7 +3311,11 @@ let emit (prog : Check.T.program) : string =
            \        int rc = io_uring_wait_cqe(&ORTO_RING, &cqe);\n\
            \        if (rc < 0) return rc;\n\
            \        OrtoFrameHeader *fr = io_uring_cqe_get_data(cqe);\n\
-           \        fr->last_res = cqe->res;\n\
+           \        /* cqe->res is int (32-bit); zero the rest of the\n\
+           \         * 16-byte slot so a later read of a smaller T\n\
+           \         * doesn't pick up stale high bytes. */\n\
+           \        memset(&fr->last_res, 0, sizeof(fr->last_res));\n\
+           \        memcpy(&fr->last_res, &cqe->res, sizeof(cqe->res));\n\
            \        fr->more = (cqe->flags & IORING_CQE_F_MORE) ? 1 : 0;\n\
            \        io_uring_cqe_seen(&ORTO_RING, cqe);\n\
            \        int sr = fr->step(fr);\n\
@@ -3325,12 +3329,12 @@ let emit (prog : Check.T.program) : string =
            \n\
            /* Passthrough step for sub-slots in `await all { ... }`.\n\
             * The dispatcher writes the CQE result into fr->last_res\n\
-            * (long long) and then calls step(fr).  We just copy it to\n\
+            * and then calls step(fr). We copy the 16-byte slot to\n\
             * return_value and return 0 — orto_complete then delivers\n\
             * to whoever is waiting on this slot. */\n\
            static int orto_passthrough_step(void *frp) {\n\
            \    OrtoFrameHeader *fr = (OrtoFrameHeader*)frp;\n\
-           \    fr->return_value = fr->last_res;\n\
+           \    memcpy(&fr->return_value, &fr->last_res, sizeof(fr->return_value));\n\
            \    return 0;\n\
            }\n\
            \n\
