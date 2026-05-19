@@ -39,6 +39,29 @@ ctor name), но arg_tys могут оказаться от не-той инст
 Один флаг с разными именами в двух типах данных. Если унифицировать
 record_decl/type_decl — упростится.
 
+### 6. for-in по связанной Stream-переменной не поддерживается
+**Файл:** lib/emit.ml, async_split_segments TEForStream case
+**Суть:** v1 поддерживает только инлайн-форму `for x in stream_extern(args) { ... }`.
+Bound-форма `let s = stream_extern(...); for x in s { ... }` требует
+вытянуть SQE prep в момент let'a и вернуть Stream[T] значение
+{slot, gen} как в Task. Сейчас падает на emit. См. STAGE3_ASYNC.md §13
+phase 6 (handed off as follow-up).
+
+### 7. drop_Stream через ASYNC_CANCEL
+**Файл:** lib/emit.ml, emit_stream_drop_defs
+**Суть:** Сейчас drop_Stream помечает слот как DETACHED и multishot SQE
+продолжает гореть до самозакрытия источника. По спеке §16 нужен
+io_uring_prep_cancel перед освобождением. ~20 строк.
+
+### 8. `for x in stream` — обработка multishot EOF без значения
+**Файл:** lib/emit.ml, TEForStream lowering
+**Суть:** Сейчас тело прогоняется ровно для каждого CQE; финальный CQE
+с `more==0` тоже считается событием. Для accept_multishot это правильно
+(последний CQE — закрытие источника, не accepted fd). Для recv_multishot
+аналогично. Если в будущем понадобится автоматическая фильтрация EOF,
+нужен явный SQE-shape-aware path. Пока — на программисте проверять
+`if conn < 0 { break }`.
+
 ---
 
 ## Закрыто

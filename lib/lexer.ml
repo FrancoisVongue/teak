@@ -61,6 +61,7 @@ let lower_ident_or_keyword s =
   | "spawn" -> TSpawn
   | "yield" -> TYield
   | "async" -> TAsync
+  | "stream" -> TStream
   | "_"     -> TUnderscore
   | _       -> TIdent s
 

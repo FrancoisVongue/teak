@@ -85,6 +85,18 @@ let register_async_extern (name : string) =
 let is_async_extern (name : string) : bool =
   Hashtbl.mem async_externs name
 
+(* Subset of async externs that are stream-shaped: the C-side glue
+   preps a multishot SQE and many CQEs land on the same user_data
+   pointer. Source-visible signature returns Stream[T], driven by
+   `for x in call(...) { ... }`. *)
+let stream_externs : (string, unit) Hashtbl.t = Hashtbl.create 4
+
+let register_stream_extern (name : string) =
+  Hashtbl.replace stream_externs name ()
+
+let is_stream_extern (name : string) : bool =
+  Hashtbl.mem stream_externs name
+
 (* Map of async-function names to their parameter list and return
    type. Populated in collect_program for every monomorphised function
    whose body is async (i.e. lowered into a Frame_<name> + <name>_step).
@@ -254,6 +266,8 @@ let rec collect_expr (e : Check.T.expr) : unit =
   | Check.T.TEAwait (e, t) -> collect_expr e; collect_ty t
   | Check.T.TESpawn (e, t) -> collect_expr e; collect_ty t
   | Check.T.TEYield -> ()
+  | Check.T.TEForStream (_, et, s, b) ->
+      collect_ty et; collect_expr s; collect_expr b
 
 let collect_program (prog : Check.T.program) : unit =
   Hashtbl.clear fn_types_seen;
@@ -268,6 +282,7 @@ let collect_program (prog : Check.T.program) : unit =
   string_pool_order := [];
   string_pool_size := 0;
   Hashtbl.clear async_externs;
+  Hashtbl.clear stream_externs;
   Hashtbl.clear async_func_params;
   List.iter (fun td ->
     List.iter (fun v ->
@@ -277,7 +292,8 @@ let collect_program (prog : Check.T.program) : unit =
   List.iter (fun (e : Check.T.extern) ->
     List.iter (fun (_, t) -> collect_ty t) e.params;
     collect_ty e.return_ty;
-    if e.is_async then register_async_extern e.name) prog.externs;
+    if e.is_async then register_async_extern e.name;
+    if e.is_stream then register_stream_extern e.name) prog.externs;
   List.iter (fun (f : Check.T.func) ->
     List.iter (fun (_, t) -> collect_ty t) f.params;
     collect_ty f.return_ty;
@@ -376,6 +392,27 @@ let emit_task_drop_forwards () : string list =
     Printf.sprintf "static void drop_Task_%s(Task_%s t);" m m)
     !task_wrappers_order
 
+(* drop_Stream_<T> for every Stream[T] instantiation. v1 policy:
+   marking the slot DETACHED — the multishot SQE keeps firing until
+   the source closes itself; the worker self-frees. A cleaner future
+   step is an explicit IORING_OP_ASYNC_CANCEL to tear down the SQE
+   before any further CQEs land. *)
+let emit_stream_drop_defs () : string list =
+  List.rev_map (fun m ->
+    Printf.sprintf
+      "static void drop_Stream_%s(Stream_%s s) {\n\
+       \    if (ORTO_SLOTS[s.slot].gen != s.gen) return;\n\
+       \    /* TODO: prep ASYNC_CANCEL SQE to stop further CQEs. */\n\
+       \    ORTO_SLOTS[s.slot].status = ORTO_SLOT_DETACHED;\n\
+       }"
+      m m)
+    !stream_wrappers_order
+
+let emit_stream_drop_forwards () : string list =
+  List.rev_map (fun m ->
+    Printf.sprintf "static void drop_Stream_%s(Stream_%s s);" m m)
+    !stream_wrappers_order
+
 (* Emit a call to the right drop function for a linear type. After mono,
    the type name carries its module mangling (`net__Socket`); the helper
    in check.ml derives the matching drop fn name. For Region the runtime
@@ -385,6 +422,12 @@ let drop_call_stmt (var_name : string) (t : ty) : string =
   match t with
   | TyApp ("Array", [inner]) ->
       let fn = "drop_" ^ mangle_array_name inner in
+      Printf.sprintf "%s(%s);" fn var_name
+  | TyApp ("Task", [inner]) ->
+      let fn = "drop_Task_" ^ Mono.mangle_ty inner in
+      Printf.sprintf "%s(%s);" fn var_name
+  | TyApp ("Stream", [inner]) ->
+      let fn = "drop_Stream_" ^ Mono.mangle_ty inner in
       Printf.sprintf "%s(%s);" fn var_name
   | TyApp (n, _) ->
       let fn = Check.drop_fn_name_for n in
@@ -547,6 +590,14 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
     | TEAwait (e, t) -> TEAwait (rn env e, t)
     | TESpawn (e, t) -> TESpawn (rn env e, t)
     | TEYield -> e
+    | TEForStream (x, et, s, b) ->
+        let s' = rn env s in
+        if x = "_" then
+          TEForStream ("_", et, s', rn env b)
+        else
+          let x' = fresh x in
+          let env' = (x, x') :: env in
+          TEForStream (x', et, s', rn env' b)
   in
   let initial_env = List.map (fun (p, _) -> (p, p)) f.params in
   { f with body = rn initial_env f.body }
@@ -697,6 +748,7 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TEAwait (_, t) -> t
   | Check.T.TESpawn (_, t) -> t
   | Check.T.TEYield -> TyInt
+  | Check.T.TEForStream _ -> TyInt
 
 (* Release a Region's buffer (if it's heap-allocated), bump the
    generation, and push the slot back onto the free list. Stack
@@ -1434,6 +1486,10 @@ let rec emit_expr
   | Check.T.TEYield ->
       failwith "emit TEYield: Stage 3 phase 4 (state machine) not yet \
                 implemented — `yield` cannot be lowered yet"
+  | Check.T.TEForStream _ ->
+      failwith "emit TEForStream: `for x in stream { ... }` only \
+                compiles inside an async function — it requires the \
+                state-machine lowering."
 
 (* Shared setup for a[i] and a[i] := v. Returns the array/index codes,
    fresh names, the array's C type, the abort-checks, and the C
@@ -1474,20 +1530,22 @@ and index_setup ctor_map arr_e idx_e elem_c =
 
 let emit_extern_decl (e : Check.T.extern) : string =
   if e.is_async then begin
-    (* `extern async fn f(args) -> T` — source signature is Task[T],
-       C-side glue takes (args..., void *user_data) and writes T into
-       the SQE buffer. The C function returns int (0 on success of
-       SQE preparation, < 0 if the ring was full). The actual result
-       arrives on the CQE and is written to the frame by the
-       dispatcher. *)
-    let task_inner = match e.return_ty with
+    (* `extern async fn f(args) -> T` — source signature is Task[T];
+       `extern async stream fn f(args) -> T` — source signature is
+       Stream[T]. In both cases the C-side glue takes
+       (args..., void *user_data), preps an SQE, and returns int
+       (0 on success, < 0 if the ring was full). Single-shot externs
+       deliver one CQE; stream externs use IORING_CQE_F_MORE and
+       deliver many. *)
+    let inner = match e.return_ty with
       | TyApp ("Task", [t]) -> t
+      | TyApp ("Stream", [t]) -> t
       | _ ->
           failwith (Printf.sprintf
-            "emit: async extern %S has non-Task return type after check"
+            "emit: async extern %S has non-Task/Stream return type after check"
             e.name)
     in
-    let _ = task_inner in
+    let _ = inner in
     let params_s =
       let user_data = "void *orto_user_data" in
       if e.params = [] then user_data
@@ -1593,6 +1651,7 @@ let async_collect_locals (body : Check.T.expr) : (string * ty) list =
     | TEDrop (e, _) -> go e
     | TEAwait (e, _) -> go e
     | TESpawn (e, _) -> go e
+    | TEForStream (x, t, s, b) -> add x t; go s; go b
   in
   go body;
   List.rev !acc
@@ -1654,6 +1713,7 @@ let async_rewrite_to_frame
     | TEDrop (e, t) -> TEDrop (go e, t)
     | TEAwait (e, t) -> TEAwait (go e, t)
     | TESpawn (e, t) -> TESpawn (go e, t)
+    | TEForStream (x, et, s, b) -> TEForStream (x, et, go s, go b)
   in go e
 
 (* Does the expression contain a reachable suspension point? Same
@@ -1665,6 +1725,7 @@ let rec emit_has_suspension (e : Check.T.expr) : bool =
   let open Check.T in
   match e with
   | TEAwait _ | TEYield -> true
+  | TEForStream _ -> true     (* drain loop is a suspension shape *)
   | TESpawn _ -> false        (* spawn launches a child frame *)
   (* break/continue inside async functions must reach the
      surrounding for(;;)switch loop, not the C switch's own break.
@@ -1826,6 +1887,7 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
       Printf.sprintf "%s->last_res = 0;" fr_v;
       Printf.sprintf "%s->return_value = 0;" fr_v;
       Printf.sprintf "%s->_orto_slot = %s;" fr_v slot_v;
+      Printf.sprintf "%s->more = 0;" fr_v;
       Printf.sprintf "ORTO_SLOTS[%s].status = %s;" slot_v init_status;
       Printf.sprintf "ORTO_SLOTS[%s].waiter = NULL;" slot_v;
       Printf.sprintf "int %s = ORTO_SLOTS[%s].gen;" gen_v slot_v;
@@ -2078,6 +2140,68 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
         walk dst e_br;
         if join >= 0 then finish_segment (goto_state join);
         if join >= 0 then start_segment join
+    | TEForStream (x, et, src, body_e) ->
+        (* Multishot drain. Two-shape source:
+             stream_extern(args)  — inline: prep the multishot SQE
+                                    here, then HEAD waits on CQEs.
+             <stream-var>         — bound: not yet supported. The
+                                    let-binding form has nowhere to
+                                    prep the SQE in the current
+                                    pipeline; deferred to a follow-up.
+           For each CQE: write fr->last_res into the binder, run the
+           body, then either loop back (fr->more == 1) or exit
+           (fr->more == 0, which io_uring sets on the final CQE). *)
+        let (extern_name, args) = match src with
+          | TECall (TEFnRef (n, _, _), args, _) when is_async_extern n && is_stream_extern n ->
+              (n, args)
+          | TECall (TEFnRef (n, _, _), _, _) when is_async_extern n ->
+              failwith (Printf.sprintf
+                "emit for-stream: %S is not declared as a stream extern \
+                 (use `extern async stream fn ...`)" n)
+          | TEVar (_, _) ->
+              failwith "emit for-stream: bound Stream variables are not \
+                        yet supported — inline the call: \
+                        `for x in stream_extern(...) { ... }`"
+          | _ ->
+              failwith "emit for-stream: source must be a stream-extern \
+                        call expression"
+        in
+        let arg_codes = List.map (emit_expr ctor_map) args in
+        List.iter (fun cv -> emit_into cv.stmts) arg_codes;
+        let arg_values = List.map (fun cv -> cv.value) arg_codes in
+        let all_args = arg_values @ ["fr"] in
+        let head_s = alloc_state () in
+        let exit_s = alloc_state () in
+        emit_into [
+          Printf.sprintf "%s(%s);" extern_name (String.concat ", " all_args);
+          "io_uring_submit(&ORTO_RING);";
+        ];
+        finish_segment [
+          Printf.sprintf "fr->state = %d;" head_s;
+          "return 1;";
+        ];
+        start_segment head_s;
+        (* Each CQE delivered by the dispatcher is an event the body
+           wants to see — even the final one (multishot ops set more=0
+           on the last CQE but the payload is still meaningful, e.g.
+           the last accepted fd before the source closed). Decode
+           last_res into the binder and run the body unconditionally;
+           the user can `break` on a negative payload if they want
+           per-event error handling. *)
+        if x <> "_" then
+          emit_into (read_from_blob (Printf.sprintf "fr->%s" x) "fr->last_res" et);
+        with_loop head_s exit_s (fun () ->
+          walk D.Discard body_e);
+        (* After body: if no more CQEs are coming, leave; else wait
+           for the next. We don't submit a new SQE — multishot drives
+           further CQEs by itself. *)
+        finish_segment [
+          Printf.sprintf "if (!fr->more) { fr->state = %d; continue; }" exit_s;
+          Printf.sprintf "fr->state = %d;" head_s;
+          "return 1;";
+        ];
+        start_segment exit_s;
+        store_at dst "0"
     | TEWhile (cond, body_e) when emit_has_suspension cond || emit_has_suspension body_e ->
         let head = alloc_state () in
         let body_s = alloc_state () in
@@ -2145,6 +2269,7 @@ let emit_async_frame_struct (f : Check.T.func) : string =
     "    OrtoStepFn step;";
     "    int state;";
     "    int _orto_slot;";          (* slot index, or -1 if frame is stack-owned *)
+    "    int more;";                (* multishot: 1 if IORING_CQE_F_MORE set on last CQE *)
     "    long long last_res;";      (* dispatcher writes the CQE result here before resume *)
     "    long long return_value;";  (* step writes this before `return 0` *)
   ] in
@@ -2192,6 +2317,7 @@ let emit_async_main_wrapper (f : Check.T.func) : string =
      \    fr.last_res = 0;\n\
      \    fr.return_value = 0;\n\
      \    fr._orto_slot = -1;\n\
+     \    fr.more = 0;\n\
      \    ORTO_PENDING = 1;\n\
      \    int rc = %s_step(&fr);\n\
      \    if (rc == 0) ORTO_PENDING = 0;\n\
@@ -2238,6 +2364,7 @@ let emit_async_sync_wrapper (f : Check.T.func) : string =
      \    fr.last_res = 0;\n\
      \    fr.return_value = 0;\n\
      \    fr._orto_slot = -1;\n\
+     \    fr.more = 0;\n\
      %s\n\
      \    int rc = %s_step(&fr);\n\
      \    if (rc == 1) {\n\
@@ -2285,6 +2412,8 @@ let emit (prog : Check.T.program) : string =
   let array_drop_forwards = emit_array_drop_forwards () in
   let task_drop_forwards = emit_task_drop_forwards () in
   let task_drop_defs = emit_task_drop_defs () in
+  let stream_drop_forwards = emit_stream_drop_forwards () in
+  let stream_drop_defs = emit_stream_drop_defs () in
   let fn_typedefs  = emit_fn_typedefs () in
   let ordered_structs = topo_sort_structs prog.types prog.records in
   let struct_defs = List.map (function
@@ -2347,6 +2476,7 @@ let emit (prog : Check.T.program) : string =
            \    OrtoStepFn step;\n\
            \    int state;\n\
            \    int _orto_slot;   /* slot index in ORTO_SLOTS, -1 if stack-owned */\n\
+           \    int more;         /* multishot: 1 if more CQEs are coming, 0 on EOF */\n\
            \    long long last_res;\n\
            \    long long return_value;\n\
            } OrtoFrameHeader;\n\
@@ -2452,6 +2582,7 @@ let emit (prog : Check.T.program) : string =
            \        if (rc < 0) return rc;\n\
            \        OrtoFrameHeader *fr = io_uring_cqe_get_data(cqe);\n\
            \        fr->last_res = cqe->res;\n\
+           \        fr->more = (cqe->flags & IORING_CQE_F_MORE) ? 1 : 0;\n\
            \        io_uring_cqe_seen(&ORTO_RING, cqe);\n\
            \        int sr = fr->step(fr);\n\
            \        if (sr == 0) {\n\
@@ -2564,5 +2695,7 @@ let emit (prog : Check.T.program) : string =
      @ array_drop_defs
      @ task_drop_forwards
      @ task_drop_defs
+     @ stream_drop_forwards
+     @ stream_drop_defs
      @ defs
      @ async_defs)

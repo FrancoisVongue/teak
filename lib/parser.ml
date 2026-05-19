@@ -390,15 +390,12 @@ and parse_atom_consume st =
   | TBreak -> EBreak
   | TContinue -> EContinue
   | TFor ->
-      (* for <var> in <lo>..<hi> { <body> }
-         desugars to:
-           let _hi_N = <hi>;
-           let mut <var> = <lo>;
-           while <var> < _hi_N {
-               <body>;
-               <var> := <var> + 1;
-           }
-         <hi> is evaluated once, before the loop starts. *)
+      (* Two shapes share the `for x in ...` head:
+           for <var> in <lo>..<hi> { <body> }   — int range, desugars to while.
+           for <var> in <stream-expr> { <body> } — multishot Stream[T] drain.
+         Parse a single expression after `in` and disambiguate on the
+         next token: `..` selects the range path, `{` selects the
+         stream path. *)
       let var = match eat st with
         | TIdent s -> s
         | t -> raise (Parse_error
@@ -406,19 +403,29 @@ and parse_atom_consume st =
              (Token.show t)))
       in
       expect st TIn;
-      let lo = parse_expr st in
-      expect st TDotDot;
-      let hi = parse_expr st in
-      let body = parse_block st in
-      let hi_var = Printf.sprintf "_for_hi_%d" (Hashtbl.hash (var, hi)) in
-      let bump = EAssign (var, EBinop (OpAdd, EVar var, EInt 1)) in
-      let new_body =
-        ELet ("_", false, None, body,
-          ELet ("_", false, None, bump, EInt 0))
-      in
-      ELet (hi_var, false, None, hi,
-        ELet (var, true, None, lo,
-          EWhile (EBinop (OpLt, EVar var, EVar hi_var), new_body)))
+      let lo_or_src = parse_expr st in
+      (match peek st with
+       | TDotDot ->
+           advance st;
+           let hi = parse_expr st in
+           let body = parse_block st in
+           let hi_var = Printf.sprintf "_for_hi_%d" (Hashtbl.hash (var, hi)) in
+           let bump = EAssign (var, EBinop (OpAdd, EVar var, EInt 1)) in
+           let new_body =
+             ELet ("_", false, None, body,
+               ELet ("_", false, None, bump, EInt 0))
+           in
+           ELet (hi_var, false, None, hi,
+             ELet (var, true, None, lo_or_src,
+               EWhile (EBinop (OpLt, EVar var, EVar hi_var), new_body)))
+       | TLBrace ->
+           let body = parse_block st in
+           EForStream (var, lo_or_src, body)
+       | t ->
+           raise (Parse_error
+             (Printf.sprintf
+                "after `for %s in <expr>`: expected `..` (range form) or `{` (stream form), got %s"
+                var (Token.show t))))
   | TReturn ->
       let v = parse_expr st in
       EReturn v
@@ -765,6 +772,16 @@ let parse_extern st =
   let is_async =
     if peek st = TAsync then (advance st; true) else false
   in
+  (* `extern async stream fn ...` — multishot variant. `stream` is
+     only meaningful after `async`; reject `extern stream fn ...`. *)
+  let is_stream =
+    if peek st = TStream then begin
+      if not is_async then
+        raise (Parse_error
+          "`extern stream fn ...` requires `async`: write `extern async stream fn ...`");
+      advance st; true
+    end else false
+  in
   expect st TFn;
   let name = match eat st with
     | TIdent s -> s
@@ -778,7 +795,7 @@ let parse_extern st =
   expect st TArrow;
   let return_ty = parse_ty st in
   { ext_name = name; ext_params = params; ext_return_ty = return_ty;
-    ext_is_async = is_async }
+    ext_is_async = is_async; ext_is_stream = is_stream }
 
 (* ---------- type declarations ---------- *)
 

@@ -362,7 +362,9 @@ CQE несёт `res` — результат, может быть `-errno`. `awai
 - **Фаза 4c** — `await` на `extern async fn` (реальный I/O). ✅
 - **Фаза 4d** — `yield`/`await` внутри `if`/`while`/`break`/`continue`. ✅
 - **Фаза 4e** — `spawn` + slot pool + non-main async, joinable + detached. ✅
-- **Фаза 6** — `Stream[T]` + `for x in stream { ... }` (multishot).
+- **Фаза 6** — `Stream[T]` + `for x in stream { ... }` (multishot). ✅
+  Inline form only (`for x in stream_extern(args) { ... }`); bound
+  Stream-variable form deferred to follow-up (см. TODO.md #6).
 - **Фаза 7** — ошибки CQE как `Result`-обёртка над `await`.
 - **Долги/follow-ups** (см. §16): drop `Task` → cancel, non-`int`
   возвраты задач, спавн из sync-контекста, `await all { ... }`.

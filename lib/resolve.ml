@@ -250,6 +250,11 @@ let rec resolve_expr
   | EAwaitAllDyn e -> EAwaitAllDyn (r e)
   | ESpawn e -> ESpawn (r e)
   | EYield -> EYield
+  | EForStream (x, src, body) ->
+      let src' = r src in
+      let new_locals = x :: locals in
+      let body' = resolve_expr map new_locals body in
+      EForStream (x, src', body')
 
 let resolve_decl
     (map : (string * string) list) (mod_name : string) (decl : top_decl)
@@ -311,6 +316,7 @@ let resolve_decl
         ext_params = params;
         ext_return_ty = return_ty;
         ext_is_async = e.ext_is_async;
+        ext_is_stream = e.ext_is_stream;
       })
 
 (* Expand type aliases transitively, with cycle detection. *)
@@ -387,6 +393,7 @@ let expand_in_expr (aliases : (string * ty) list) (e : expr) : expr =
     | EAwaitAllDyn e -> EAwaitAllDyn (ex e)
     | ESpawn e -> ESpawn (ex e)
     | EYield -> EYield
+    | EForStream (x, s, b) -> EForStream (x, ex s, ex b)
   in
   ex e
 

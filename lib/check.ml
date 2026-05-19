@@ -101,6 +101,10 @@ module T = struct
                      type Task[T] *)
     | TEYield
                   (* yield — voluntary scheduling point; type int *)
+    | TEForStream of string * ty * expr * expr
+                  (* for x in <stream> { body } — multishot drain.
+                     Fields: binder, element type T (peeled off
+                     Stream[T]), the stream source expression, body. *)
 
   type func = {
     name        : string;
@@ -121,8 +125,12 @@ module T = struct
     return_ty : ty;
     (* For `extern async fn f(...) -> T`: source signature is
        Task[T], C-side glue takes the bare params + a hidden
-       user_data pointer. *)
+       user_data pointer.
+       For `extern async stream fn f(...) -> T`: source signature is
+       Stream[T] and the glue preps a multishot SQE that emits many
+       CQEs, each carrying one T. *)
     is_async  : bool;
+    is_stream : bool;
   }
 
   type program = {
@@ -674,10 +682,13 @@ let build_env
       let declared_ret = validate_ty type_env record_env [] e.ext_return_ty in
       (* `extern async fn f(...) -> T` is exposed to the source as a
          function returning Task[T] — its result can only be consumed
-         through `await`. The C-side declaration keeps the bare T;
-         emit handles the indirection. *)
+         through `await`. `extern async stream fn ...` wraps in
+         Stream[T] instead and is drained with `for x in call(...)`.
+         The C-side declaration keeps the bare T in both cases; emit
+         handles the indirection. *)
       let ret_ty =
-        if e.ext_is_async then TyApp ("Task", [declared_ret])
+        if e.ext_is_stream then TyApp ("Stream", [declared_ret])
+        else if e.ext_is_async then TyApp ("Task", [declared_ret])
         else declared_ret
       in
       (e.ext_name, ([], (param_tys, ret_ty)))) externs
@@ -1781,6 +1792,29 @@ let rec infer (env : env) (tparams : string list)
         "`await all { ... }` (static form) is not yet implemented — \
          needs tuple support. See STAGE3_ASYNC.md §13.")
 
+  | EForStream (x, src_e, body_e) ->
+      if x <> "_" then check_not_c_reserved "for-binder" x;
+      let (tsrc, tsrc_ty) = infer env tparams vars src_e in
+      let elem = TyMeta (fresh_meta ()) in
+      (try unify tsrc_ty (TyApp ("Stream", [elem]))
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "`for %s in <expr>`: stream source must be Stream[T], got %s"
+              x (show_ty (zonk tsrc_ty)))));
+      let body_vars =
+        if x = "_" then vars else (x, (elem, false)) :: vars
+      in
+      (* The for-stream body is a loop body — break/continue are
+         allowed inside it. Track depth so the checker accepts them. *)
+      incr loop_depth;
+      let (tbody, _tbody_ty) = infer env tparams body_vars body_e in
+      decr loop_depth;
+      (* Body is statement-shaped — its value is discarded each
+         iteration. We don't unify with int because users may write
+         `break;` or other ints. The whole `for` returns int 0. *)
+      (T.TEForStream (x, elem, tsrc, tbody), TyInt)
+
   | EAwaitAllDyn coll_e ->
       (* `await all coll` requires coll : Array[Task[T]], returns
          Array[T]. Each Task in the array is consumed by the join;
@@ -1894,6 +1928,8 @@ let rec zonk_expr (e : T.expr) : T.expr =
   | T.TESpawn (e, t) ->
       T.TESpawn (zonk_expr e, zonk_expect t)
   | T.TEYield -> T.TEYield
+  | T.TEForStream (x, et, s, b) ->
+      T.TEForStream (x, zonk_expect et, zonk_expr s, zonk_expr b)
 
 and zonk_expect (t : ty) : ty =
   let t = zonk t in
@@ -2227,6 +2263,31 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
 
   | T.TEYield -> (e, live)
 
+  | T.TEForStream (x, et, src, body) ->
+      (* The stream source is consumed by the loop: a bare linear
+         name passed in is retired (like await on a Task). The binder
+         is in scope only for the body. *)
+      let (src', live) = check_moves_expr env live false src in
+      let live = match src' with
+        | T.TEVar (sx, vt) when is_linear_ty vt -> SM.remove sx live
+        | _ -> live
+      in
+      let outer_had = if x = "_" then None else SM.find_opt x live in
+      let live_body =
+        if x = "_" then live else SM.add x et live
+      in
+      let (body', live_after) =
+        check_moves_expr env live_body false body
+      in
+      let live_after =
+        if x = "_" then live_after
+        else
+          match outer_had with
+          | Some t -> SM.add x t live_after
+          | None -> SM.remove x live_after
+      in
+      (T.TEForStream (x, et, src', body'), live_after)
+
 (* ---------- check a function ---------- *)
 
 (* True if the typed body contains an `await` or `yield` reachable
@@ -2240,6 +2301,7 @@ let rec body_has_suspension (e : T.expr) : bool =
   let open T in
   match e with
   | TEAwait _ | TEYield -> true
+  | TEForStream _ -> true
   | TESpawn _ -> false
   | TEInt _ | TEFloat _ | TEBool _ | TEStringLit _
   | TEVar _ | TEFnRef _ | TEBreak | TEContinue -> false
@@ -2384,7 +2446,8 @@ let check (prog : program) : T.program =
       { T.name = e.ext_name;
         T.params = List.combine (List.map fst e.ext_params) param_tys;
         T.return_ty = ret_ty;
-        T.is_async = e.ext_is_async }) externs
+        T.is_async = e.ext_is_async;
+        T.is_stream = e.ext_is_stream }) externs
   in
   let resolved_types   = List.map snd env.types in
   let resolved_records = List.map snd env.records in

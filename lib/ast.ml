@@ -91,6 +91,7 @@ type expr =
   | EAwaitAllDyn of expr                  (* await all <iterable> — dynamic concurrent join *)
   | ESpawn  of expr                       (* spawn f(args) — detached or joinable task *)
   | EYield                                (* yield — voluntary scheduling point *)
+  | EForStream of string * expr * expr    (* for x in <stream> { body } — multishot loop *)
 
 and record_init_elem =
   | RAssign of string * expr   (* field: value *)
@@ -133,6 +134,11 @@ type extern_decl = {
      system, (b) lowers `await call(...)` to a submit-and-suspend
      pattern in async functions. *)
   ext_is_async  : bool;
+  (* `extern async stream fn ...` — the C-side glue prepares a
+     multishot SQE (e.g. recv_multishot / accept_multishot / timeout
+     multishot). The source-visible return is Stream[T] rather than
+     Task[T], and the operation is drained via `for x in call(...)`. *)
+  ext_is_stream : bool;
 }
 
 (* `use mod::{a, b, c};` — selective import from another module.
@@ -291,3 +297,5 @@ let rec show_expr = function
   | EAwaitAllDyn e -> Printf.sprintf "await all %s" (show_expr e)
   | ESpawn e -> Printf.sprintf "spawn %s" (show_expr e)
   | EYield -> "yield"
+  | EForStream (x, s, b) ->
+      Printf.sprintf "for %s in %s { %s }" x (show_expr s) (show_expr b)

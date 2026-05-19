@@ -283,6 +283,10 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
     | Check.T.TESpawn (e, t) ->
         Check.T.TESpawn (rewrite_expr subst e, rt t)
     | Check.T.TEYield -> Check.T.TEYield
+    | Check.T.TEForStream (x, et, s, b) ->
+        Check.T.TEForStream (x, rt et,
+                             rewrite_expr subst s,
+                             rewrite_expr subst b)
   in
 
   request_fn "main" [];
