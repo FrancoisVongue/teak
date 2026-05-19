@@ -364,12 +364,16 @@ CQE несёт `res` — результат, может быть `-errno`. `awai
 - **Фаза 4e** — `spawn` + slot pool + non-main async, joinable + detached. ✅
 - **Фаза 4f** — `Task[T]` для не-int T (long long pipeline). ✅
 - **Фаза 4g** — auto-drop `Task[T]` → detached. ✅
+- **Фаза 4h** — `spawn` из sync-контекста. ✅
 - **Фаза 6** — `Stream[T]` + `for x in stream { ... }` (multishot). ✅
   Inline-форма (`for x in stream_extern(args) { ... }`); bound-форма
   и `drop_Stream` через `ASYNC_CANCEL` отложены (см. TODO.md #6, #7).
-- **Фаза 7** — ошибки CQE как `Result`-обёртка над `await`.
-- **Долги/follow-ups** (см. §16 и TODO.md): спавн из sync-контекста,
-  `await all { ... }` через tuples.
+- **Фаза 7** — `Result[T]` обёртка над `await`. ✅
+- **Фаза 8** — tuples + `await all { ... }` (статика и dynamic). ✅
+- **Фаза 8a** — fix frame-binder footgun для inline `let` в async. ✅
+- **Долги (v2)**: bound `Stream` form (требует CQE buffering или
+  deferred-prep дизайна), `ASYNC_CANCEL` для `drop_Stream`, match по
+  tuple-паттернам, многоядерность.
 
 ### Фаза 1 — синтаксис (parser + AST)
 

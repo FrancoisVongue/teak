@@ -83,10 +83,12 @@
   - Фаза 4e (есть): `spawn` + slot pool (TigerBeetle стиль) + non-main async. Joinable + detached задачи. Chained awaits через dispatcher loop.
   - Фаза 4f (есть): не-int результаты `Task[T]` через long long pipeline в slot.
   - Фаза 4g (есть): auto-drop `Task[T]` → detached (worker self-frees slot, main блокируется на dispatcher).
-  - Фаза 6 (есть): `Stream[T]` + `for x in stream` (multishot SQE). Inline-форма; bound-Stream и cancel — TODO.
-  - Фаза 7: ошибки CQE как `Result[T]` обёртка над `await`.
-  - Долги (см. STAGE3_ASYNC §16 + TODO.md): спавн из sync-контекста, await all { } через tuples, bound Stream form, ASYNC_CANCEL для drop Stream.
-  - v2 (после v1): многоядерность shared-nothing, IOCP-бэкенд (Windows).
+  - Фаза 4h (есть): `spawn` из sync-контекста — sync функция может выдать `Task[T]` и async caller awaits.
+  - Фаза 6 (есть): `Stream[T]` + `for x in stream` (multishot SQE). Inline-форма; bound-Stream и cancel — v2.
+  - Фаза 7 (есть): `Result[T]` обёртка над `await` — Ok/Err per CQE.
+  - Фаза 8 (есть): tuples (`(T1, T2, ...)`, `t.N`, `let (a, b, c) = ...`) + `await all { ... }` static + dynamic.
+  - Фаза 8a (есть): fix frame-binder footgun для inline `let` в async.
+  - v2 (после v1): многоядерность shared-nothing, bound Stream form через буфер/deferred-prep, `ASYNC_CANCEL` для drop Stream, match по tuple-паттернам, IOCP-бэкенд (Windows).
 
 **Управление:**
 - Всё — выражения. `if`/`match`/`let` возвращают значения.
