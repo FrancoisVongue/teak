@@ -81,10 +81,12 @@
   - Фаза 4c (есть): `await` на `extern async fn` — реальный I/O через ring.
   - Фаза 4d (есть): `yield`/`await` внутри `if`/`while`/`break`/`continue`. State splits через `for(;;) switch`.
   - Фаза 4e (есть): `spawn` + slot pool (TigerBeetle стиль) + non-main async. Joinable + detached задачи. Chained awaits через dispatcher loop.
-  - Фаза 6: `Stream[T]` + `for x in stream` (multishot SQE: ACCEPT_MULTISHOT, RECV_MULTISHOT).
+  - Фаза 4f (есть): не-int результаты `Task[T]` через long long pipeline в slot.
+  - Фаза 4g (есть): auto-drop `Task[T]` → detached (worker self-frees slot, main блокируется на dispatcher).
+  - Фаза 6 (есть): `Stream[T]` + `for x in stream` (multishot SQE). Inline-форма; bound-Stream и cancel — TODO.
   - Фаза 7: ошибки CQE как `Result[T]` обёртка над `await`.
-  - Долги фазы 4e (см. STAGE3_ASYNC §16): drop Task → cancel, не-int результаты задач, спавн из sync-контекста, await all { } через tuples.
-  - v2 (после v1): многоядерность shared-nothing, IORING_OP_ASYNC_CANCEL для drop Task, IOCP-бэкенд (Windows).
+  - Долги (см. STAGE3_ASYNC §16 + TODO.md): спавн из sync-контекста, await all { } через tuples, bound Stream form, ASYNC_CANCEL для drop Stream.
+  - v2 (после v1): многоядерность shared-nothing, IOCP-бэкенд (Windows).
 
 **Управление:**
 - Всё — выражения. `if`/`match`/`let` возвращают значения.
