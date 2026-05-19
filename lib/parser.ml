@@ -26,6 +26,10 @@ exception Parse_error of string
 
 type state = { mutable toks : token list }
 
+(* Counter for fresh names introduced by parser sugar (`e?` etc.).
+   Bumped per occurrence, reset per program in `parse`. *)
+let try_counter = ref 0
+
 let peek st = match st.toks with [] -> TEOF | t :: _ -> t
 let advance st = match st.toks with [] -> () | _ :: ts -> st.toks <- ts
 let eat st = let t = peek st in advance st; t
@@ -334,6 +338,26 @@ and parse_postfix_chain st head =
       let idx = parse_expr st in
       expect st TRBracket;
       parse_postfix_chain st (EIndex (head, idx))
+  | TQuestion ->
+      (* `e?` desugar:
+           match e {
+             Ok(v)  => v,
+             Err(e) => return Err(e),
+           }
+         The enclosing function's return type must be Result[…] —
+         the check pass will reject the early return otherwise. *)
+      advance st;
+      incr try_counter;
+      let ok_v  = Printf.sprintf "_try_ok_%d"  !try_counter in
+      let err_v = Printf.sprintf "_try_err_%d" !try_counter in
+      let desugared =
+        EMatch (head, [
+          (PCtor ("Ok",  [ok_v]),  None, EVar ok_v);
+          (PCtor ("Err", [err_v]), None,
+            EReturn (ECtor ("Err", [EVar err_v])));
+        ])
+      in
+      parse_postfix_chain st desugared
   | _ -> head
 
 and parse_record_init_elems st =
@@ -1061,6 +1085,7 @@ let parse_use st : use_decl =
 (* ---------- entry point ---------- *)
 
 let parse (toks : token list) : program =
+  try_counter := 0;
   let st = { toks } in
   let rec loop acc =
     match peek st with

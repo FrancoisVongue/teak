@@ -118,6 +118,7 @@ let lex (src : string) : token list =
         end
 
     | '+' -> push TPlus;    incr i
+    | '?' -> push TQuestion; incr i
     | '*' -> push TStar;    incr i
     | '%' -> push TPercent; incr i
 

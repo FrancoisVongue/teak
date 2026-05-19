@@ -58,6 +58,7 @@ type token =
   | TSpawn        (* spawn f(...) — Stage 3 fire-and-forget task *)
   | TYield        (* yield — Stage 3 cooperative scheduling point *)
   | TUnderscore   (* `_` as a standalone token (wildcard pattern) *)
+  | TQuestion     (* postfix `?` — Result early-return *)
   (* punctuation *)
   | TLParen
   | TRParen
@@ -154,6 +155,7 @@ let show = function
   | TSpawn        -> "SPAWN"
   | TYield        -> "YIELD"
   | TUnderscore   -> "_"
+  | TQuestion     -> "?"
   | TLParen       -> "("
   | TRParen       -> ")"
   | TLBrace       -> "{"
