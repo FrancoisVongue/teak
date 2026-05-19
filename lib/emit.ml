@@ -3019,27 +3019,61 @@ let emit_async_step ctor_map (f : Check.T.func) : string =
 
 (* Emit `main` as a C-level wrapper that owns the ring, allocates the
    frame on the stack, kicks state 0, and drains the dispatcher. *)
+(* Per-thread body — runs once on each worker (or once total when
+   cores=1). Returns `result` via the local variable; the cores=1
+   `main` returns it as int, cores>1 thread fn casts to void*. *)
 let emit_async_main_wrapper (f : Check.T.func) : string =
+  let body init_fail_return =
+    Printf.sprintf
+      "    int result = 0;\n\
+       \    if (io_uring_queue_init(64, &ORTO_RING, 0) < 0) {\n\
+       \        result = 1;\n\
+       \        %s;\n\
+       \    }\n\
+       \    orto_init_regions();\n\
+       \    orto_init_slots();\n\
+       \    Frame_%s fr;\n\
+       \    fr.step = %s_step;\n\
+       \    fr.state = 0;\n\
+       \    memset(fr.last_res, 0, sizeof(fr.last_res));\n\
+       \    memset(fr.return_value, 0, sizeof(fr.return_value));\n\
+       \    fr._orto_slot = -1;\n\
+       \    fr.more = 0;\n\
+       \    ORTO_PENDING = 1;\n\
+       \    int rc = %s_step(&fr);\n\
+       \    if (rc == 0) ORTO_PENDING = 0;\n\
+       \    else orto_dispatch();\n\
+       \    memcpy(&result, &fr.return_value, sizeof(result));\n\
+       \    io_uring_queue_exit(&ORTO_RING);\n"
+      init_fail_return f.name f.name f.name
+  in
   Printf.sprintf
-    "int %s(void) {\n\
-     \    if (io_uring_queue_init(64, &ORTO_RING, 0) < 0) return 1;\n\
-     \    Frame_%s fr;\n\
-     \    fr.step = %s_step;\n\
-     \    fr.state = 0;\n\
-     \    memset(fr.last_res, 0, sizeof(fr.last_res));\n\
-     \    memset(fr.return_value, 0, sizeof(fr.return_value));\n\
-     \    fr._orto_slot = -1;\n\
-     \    fr.more = 0;\n\
-     \    ORTO_PENDING = 1;\n\
-     \    int rc = %s_step(&fr);\n\
-     \    if (rc == 0) ORTO_PENDING = 0;\n\
-     \    else orto_dispatch();\n\
-     \    int result;\n\
-     \    memcpy(&result, &fr.return_value, sizeof(result));\n\
-     \    io_uring_queue_exit(&ORTO_RING);\n\
+    "#if ORTO_CORES > 1\n\
+     static void *%s_thread(void *_arg) {\n\
+     \    (void)_arg;\n\
+     %s\
+     \    return (void *)(long)result;\n\
+     }\n\
+     int %s(void) {\n\
+     \    pthread_t _ts[ORTO_CORES];\n\
+     \    for (int i = 0; i < ORTO_CORES; i++)\n\
+     \        pthread_create(&_ts[i], NULL, %s_thread, NULL);\n\
+     \    void *_r0 = NULL;\n\
+     \    for (int i = 0; i < ORTO_CORES; i++) {\n\
+     \        void *_r;\n\
+     \        pthread_join(_ts[i], &_r);\n\
+     \        if (i == 0) _r0 = _r;\n\
+     \    }\n\
+     \    return (int)(long)_r0;\n\
+     }\n\
+     #else\n\
+     int %s(void) {\n\
+     %s\
      \    return result;\n\
-     }"
-    f.name f.name f.name f.name
+     }\n\
+     #endif"
+    f.name (body "return (void *)(long)result") f.name f.name
+    f.name (body "return result")
 
 (* Emit a sync C wrapper for a non-main async function. It builds the
    frame on the C stack with _orto_slot = -1, runs the step, and if the
@@ -3109,7 +3143,7 @@ let emit_static_bytes_array () : string =
 
 (* ---------- whole program ---------- *)
 
-let emit (prog : Check.T.program) : string =
+let emit ?(slots=1024) ?(cores=1) (prog : Check.T.program) : string =
   let prog =
     { prog with funcs = List.map alpha_rename_func prog.funcs }
   in
@@ -3195,9 +3229,11 @@ let emit (prog : Check.T.program) : string =
            } OrtoFrameHeader;\n\
            /* ORTO_RING is intentionally non-static so user-side\n\
             * async-extern glue (extern fn read/write/recv/...) can\n\
-            * submit SQEs directly into the same ring. */\n\
-           struct io_uring ORTO_RING;\n\
-           static int ORTO_PENDING = 0;\n\
+            * submit SQEs directly into the same ring. With cores>1\n\
+            * it's also __thread — glue must use\n\
+            * `extern __thread struct io_uring ORTO_RING;` then. */\n\
+           ORTO_TLS struct io_uring ORTO_RING;\n\
+           ORTO_TLS int ORTO_PENDING = 0;\n\
            \n\
            %s\n\
            \n\
@@ -3207,7 +3243,12 @@ let emit (prog : Check.T.program) : string =
             * ORTO_SLOT_DETACHED a fire-and-forget frame (drop slot on\n\
             * completion), ORTO_SLOT_DONE_NO_WAITER a finished joinable\n\
             * frame whose result hasn't been picked up yet. */\n\
-           #define ORTO_SLOT_COUNT 256\n\
+           /* Slot pool size, set at compile time by orto's --slots N\n\
+            * flag (default 1024). All concurrent tasks live in this\n\
+            * pool; raise it if you spawn more than ORTO_SLOT_COUNT\n\
+            * tasks in flight. No dynamic growth in v1 (slab list +\n\
+            * stable pointers is a v2 follow-up). */\n\
+           #define ORTO_SLOT_COUNT %d\n\
            #define ORTO_SLOT_FREE 0\n\
            #define ORTO_SLOT_RUNNING 1\n\
            #define ORTO_SLOT_DETACHED 2\n\
@@ -3221,8 +3262,8 @@ let emit (prog : Check.T.program) : string =
            \    OrtoFrameHeader *waiter;\n\
            \    OrtoSlotFrames frame;\n\
            } OrtoSlot;\n\
-           static OrtoSlot ORTO_SLOTS[ORTO_SLOT_COUNT];\n\
-           static int ORTO_SLOT_FREE_HEAD = -1;\n\
+           ORTO_TLS OrtoSlot ORTO_SLOTS[ORTO_SLOT_COUNT];\n\
+           ORTO_TLS int ORTO_SLOT_FREE_HEAD = -1;\n\
            \n\
            static int orto_slot_alloc(void) {\n\
            \    if (ORTO_SLOT_FREE_HEAD < 0) abort();\n\
@@ -3325,7 +3366,9 @@ let emit (prog : Check.T.program) : string =
            \    return 0;\n\
            }\n\
            \n\
-           static void orto_init_slots(void) __attribute__((constructor));\n\
+           /* Called once per thread (main wrapper invokes it). Was\n\
+            * a constructor in the single-thread era — that doesn't\n\
+            * work with TLS, where every thread has its own pool. */\n\
            static void orto_init_slots(void) {\n\
            \    for (int i = 0; i < ORTO_SLOT_COUNT; i++) {\n\
            \        ORTO_SLOTS[i].gen = 1;\n\
@@ -3336,7 +3379,7 @@ let emit (prog : Check.T.program) : string =
            \    ORTO_SLOTS[ORTO_SLOT_COUNT - 1].next_free = -1;\n\
            \    ORTO_SLOT_FREE_HEAD = 0;\n\
            }"
-          frame_union
+          frame_union slots
       in
       let frames = List.map emit_async_frame_struct async_funcs in
       (* Forward decls for every <name>_step so sync callers (and the
@@ -3364,6 +3407,19 @@ let emit (prog : Check.T.program) : string =
      #include <stdint.h>\n\
      #include <string.h>\n\
      \n\
+     /* Concurrency mode, set by orto's --cores N flag (default 1).\n\
+      * cores=1 → single-thread runtime, no pthread dependency.\n\
+      * cores>1 → shared-nothing per-core: every runtime global\n\
+      * lives in thread-local storage; main forks N pthread\n\
+      * workers, each running its own copy of the program. */\n\
+     #define ORTO_CORES %d\n\
+     #if ORTO_CORES > 1\n\
+     #  include <pthread.h>\n\
+     #  define ORTO_TLS __thread\n\
+     #else\n\
+     #  define ORTO_TLS\n\
+     #endif\n\
+     \n\
      /* Region runtime: a global slab of region slots. Each slot is\n\
       * reused after its region is dropped (gen bumps so old handles\n\
       * see a mismatch and either abort or take the dangling branch).\n\
@@ -3379,8 +3435,8 @@ let emit (prog : Check.T.program) : string =
      \    int is_stack;    /* 1 if buffer is stack memory (do not free) */\n\
      };\n\
      typedef struct { int slot; int expected_gen; } Region;\n\
-     static struct Region_slot ORTO_REGIONS[ORTO_REGION_SLOTS];\n\
-     static int ORTO_REGION_FREE_HEAD = -1;\n\
+     ORTO_TLS struct Region_slot ORTO_REGIONS[ORTO_REGION_SLOTS];\n\
+     ORTO_TLS int ORTO_REGION_FREE_HEAD = -1;\n\
      \n\
      static void drop_Region(Region r) {\n\
      \    if (ORTO_REGIONS[r.slot].gen != r.expected_gen) return;\n\
@@ -3411,7 +3467,7 @@ let emit (prog : Check.T.program) : string =
      \    ORTO_REGIONS[0].next_free = -1;\n\
      \    ORTO_REGION_FREE_HEAD = 1;\n\
      }"
-    static_bytes
+    cores static_bytes
   in
   let async_prelude =
     if async_funcs = [] then []

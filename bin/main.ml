@@ -58,16 +58,48 @@ let rec load_module entry_dir mod_name visiting =
       | _ -> ()) ast
   end
 
-let () =
-  let args = Array.to_list Sys.argv in
-  let (input, output) =
-    match args with
-    | [_; inp]               -> (inp, default_output inp)
-    | [_; inp; "-o"; outp]   -> (inp, outp)
-    | _ ->
-        prerr_endline "usage: orto INPUT.orto [-o OUTPUT.c]";
-        exit 2
+(* CLI is intentionally tiny — flag parsing in OCaml's Arg is heavy
+   for our needs. Walk argv once and pick out --slots / --cores. *)
+let parse_args () =
+  let input    = ref None in
+  let output   = ref None in
+  let slots    = ref 1024 in
+  let cores    = ref 1 in
+  let argv = Sys.argv in
+  let n = Array.length argv in
+  let i = ref 1 in
+  let usage () =
+    prerr_endline
+      "usage: orto INPUT.orto [-o OUTPUT.c] [--slots N] [--cores N]";
+    exit 2
   in
+  while !i < n do
+    (match argv.(!i) with
+     | "-o" ->
+         if !i + 1 >= n then usage ();
+         output := Some argv.(!i + 1);
+         i := !i + 2
+     | "--slots" ->
+         if !i + 1 >= n then usage ();
+         slots := int_of_string argv.(!i + 1);
+         i := !i + 2
+     | "--cores" ->
+         if !i + 1 >= n then usage ();
+         cores := int_of_string argv.(!i + 1);
+         i := !i + 2
+     | s when !input = None ->
+         input := Some s;
+         incr i
+     | _ -> usage ())
+  done;
+  let input = match !input with Some s -> s | None -> usage () in
+  let output = match !output with Some s -> s | None -> default_output input in
+  if !slots <= 0 then begin prerr_endline "--slots must be > 0"; exit 2 end;
+  if !cores <= 0 then begin prerr_endline "--cores must be > 0"; exit 2 end;
+  (input, output, !slots, !cores)
+
+let () =
+  let (input, output, slots, cores) = parse_args () in
   let entry_dir = Filename.dirname input in
   let entry_module = module_name_of_path input in
   try
@@ -89,7 +121,7 @@ let () =
     let merged = Orto.Resolve.resolve modules in
     let typed_ast = Orto.Check.check merged in
     let mono = Orto.Mono.monomorphize typed_ast in
-    let c = Orto.Emit.emit mono in
+    let c = Orto.Emit.emit ~slots ~cores mono in
     write_file output c;
     Printf.printf "wrote %s\n" output
   with
