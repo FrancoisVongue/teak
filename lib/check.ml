@@ -102,9 +102,9 @@ module T = struct
                      and emit.ml comment on TEForStream). *)
     | TESpawn  of expr * ty
                   (* spawn f(args) — second field is the wrapped result
-                     type Task[T] *)
-    | TEYield
-                  (* yield — voluntary scheduling point; type int *)
+                     type Task[T]. `yield` doesn't have a typed node:
+                     the parser desugars it to TEAwait on a call to
+                     the builtin extern `orto_nop`. *)
     | TEForStream of string * ty * expr * expr
                   (* for x in <stream> { body } — multishot drain.
                      Fields: binder, element type T (peeled off
@@ -1821,9 +1821,6 @@ let rec infer (env : env) (tparams : string list)
       let result_ty = TyApp ("Task", [ti_ty]) in
       (T.TESpawn (ti, result_ty), result_ty)
 
-  | EYield ->
-      (T.TEYield, TyInt)
-
   | EAwaitAll branches ->
       (* Static await-all: every branch must be a call expression that
          names an awaitable operation (either an `extern async fn` or
@@ -2072,7 +2069,6 @@ let rec zonk_expr (e : T.expr) : T.expr =
       T.TEAwait (zonk_expr e, zonk_expect t, zonk_expect p)
   | T.TESpawn (e, t) ->
       T.TESpawn (zonk_expr e, zonk_expect t)
-  | T.TEYield -> T.TEYield
   | T.TEForStream (x, et, s, b) ->
       T.TEForStream (x, zonk_expect et, zonk_expr s, zonk_expr b)
   | T.TETuple (es, t) ->
@@ -2417,8 +2413,6 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       let (sub', live) = check_moves_expr env live false sub in
       (T.TESpawn (sub', t), live)
 
-  | T.TEYield -> (e, live)
-
   | T.TEForStream (x, et, src, body) ->
       (* The stream source is consumed by the loop: a bare linear
          name passed in is retired (like await on a Task). The binder
@@ -2502,7 +2496,7 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
 let rec body_has_suspension (e : T.expr) : bool =
   let open T in
   match e with
-  | TEAwait _ | TEYield -> true
+  | TEAwait _ -> true
   | TEForStream _ -> true
   | TESpawn _ -> false
   | TEInt _ | TEFloat _ | TEBool _ | TEStringLit _
@@ -2633,6 +2627,16 @@ let builtin_result_decl : type_decl = {
   is_linear = false;
 }
 
+(* `yield` parses to `await orto_nop()`. orto_nop is injected as a
+   builtin extern returning Task[int] so every program can use yield
+   without an explicit import. The C-side implementation lives in
+   the async runtime block we emit (see emit.ml). *)
+let builtin_orto_nop_decl : extern_decl = {
+  ext_name      = "orto_nop";
+  ext_params    = [];
+  ext_return_ty = TyApp ("Task", [TyInt]);
+}
+
 let check (prog : program) : T.program =
   meta_counter := 0;
   drop_name_counter := 0;
@@ -2665,6 +2669,13 @@ let check (prog : program) : T.program =
              "%S is a built-in Result constructor and cannot be redeclared"
              v.ctor_name))) td.variants) types;
   let types = builtin_option_decl :: builtin_result_decl :: types in
+  (* Reject user redeclaration of reserved extern names. *)
+  List.iter (fun (e : extern_decl) ->
+    if e.ext_name = "orto_nop" then
+      raise (Type_error
+        "\"orto_nop\" is a reserved built-in extern (used by `yield`) \
+         and cannot be redeclared")) externs;
+  let externs = builtin_orto_nop_decl :: externs in
   let env = build_env types records funcs externs in
   check_no_recursive_types env.types env.records;
   let typed_funcs = List.map (check_func env) funcs in

@@ -251,7 +251,6 @@ let rec resolve_expr
   | EAwaitAll branches -> EAwaitAll (List.map r branches)
   | EAwaitAllDyn e -> EAwaitAllDyn (r e)
   | ESpawn e -> ESpawn (r e)
-  | EYield -> EYield
   | EForStream (x, src, body) ->
       let src' = r src in
       let new_locals = x :: locals in
@@ -403,7 +402,6 @@ let expand_in_expr (aliases : (string * ty) list) (e : expr) : expr =
     | EAwaitAll branches -> EAwaitAll (List.map ex branches)
     | EAwaitAllDyn e -> EAwaitAllDyn (ex e)
     | ESpawn e -> ESpawn (ex e)
-    | EYield -> EYield
     | EForStream (x, s, b) -> EForStream (x, ex s, ex b)
     | ETuple es -> ETuple (List.map ex es)
     | ETupleIdx (e, i) -> ETupleIdx (ex e, i)

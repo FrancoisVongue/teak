@@ -91,7 +91,8 @@ type expr =
   | EAwaitAll of expr list                (* await all { e1, e2, ... } — static concurrent block *)
   | EAwaitAllDyn of expr                  (* await all <iterable> — dynamic concurrent join *)
   | ESpawn  of expr                       (* spawn f(args) — detached or joinable task *)
-  | EYield                                (* yield — voluntary scheduling point *)
+  (* `yield` is parser sugar for `EAwait (ECall (EVar "orto_nop", []))` —
+     there is no EYield AST node. *)
   | EForStream of string * expr * expr    (* for x in <stream> { body } — multishot loop *)
   | ETuple    of expr list                (* (e1, e2, ..., en) for n >= 2 *)
   | ETupleIdx of expr * int               (* t.0, t.1 — bounds-checked at type-check time *)
@@ -297,7 +298,6 @@ let rec show_expr = function
         (String.concat ", " (List.map show_expr branches))
   | EAwaitAllDyn e -> Printf.sprintf "await all %s" (show_expr e)
   | ESpawn e -> Printf.sprintf "spawn %s" (show_expr e)
-  | EYield -> "yield"
   | EForStream (x, s, b) ->
       Printf.sprintf "for %s in %s { %s }" x (show_expr s) (show_expr b)
   | ETuple es ->

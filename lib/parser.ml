@@ -261,8 +261,14 @@ and parse_unary st =
       let inner = parse_unary st in
       ESpawn inner
   | TYield ->
+      (* `yield` is pure syntactic sugar for `await orto_nop()` —
+         submit a NOP SQE and let the dispatcher run other tasks.
+         The desugaring keeps the backend free of a separate yield
+         path; everything routes through the async-extern await
+         lowering. orto_nop is injected as a builtin extern by
+         check.ml so no `use` is required. *)
       advance st;
-      EYield
+      EAwait (ECall (EVar "orto_nop", []))
   | _ -> parse_postfix st
 
 (* After `await`: distinguish three forms based on look-ahead.

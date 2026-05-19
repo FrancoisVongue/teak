@@ -280,7 +280,6 @@ let rec collect_expr (e : Check.T.expr) : unit =
   | Check.T.TEDrop (e, t) -> collect_expr e; collect_ty t
   | Check.T.TEAwait (e, t, p) -> collect_expr e; collect_ty t; collect_ty p
   | Check.T.TESpawn (e, t) -> collect_expr e; collect_ty t
-  | Check.T.TEYield -> ()
   | Check.T.TEForStream (_, et, s, b) ->
       collect_ty et; collect_expr s; collect_expr b
   | Check.T.TETuple (es, t) ->
@@ -676,7 +675,6 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
     | TEDrop (e, t) -> TEDrop (rn env e, t)
     | TEAwait (e, t, p) -> TEAwait (rn env e, t, p)
     | TESpawn (e, t) -> TESpawn (rn env e, t)
-    | TEYield -> e
     | TEForStream (x, et, s, b) ->
         let s' = rn env s in
         if x = "_" then
@@ -851,7 +849,6 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TEDrop (_, _) -> TyInt
   | Check.T.TEAwait (_, t, _) -> t
   | Check.T.TESpawn (_, t) -> t
-  | Check.T.TEYield -> TyInt
   | Check.T.TEForStream _ -> TyInt
   | Check.T.TETuple (_, t) -> t
   | Check.T.TETupleIdx (_, _, t) -> t
@@ -1654,9 +1651,6 @@ let rec emit_expr
        | _ ->
            failwith "emit TESpawn (sync caller): only `spawn worker(args)` \
                      where worker is an async function is supported")
-  | Check.T.TEYield ->
-      failwith "emit TEYield: Stage 3 phase 4 (state machine) not yet \
-                implemented — `yield` cannot be lowered yet"
   | Check.T.TEForStream _ ->
       failwith "emit TEForStream: `for x in stream { ... }` only \
                 compiles inside an async function — it requires the \
@@ -1860,7 +1854,7 @@ let async_collect_locals (body : Check.T.expr) : (string * ty) list =
     | TELet (x, t, v, b, _, _) -> add x t; go v; go b
     | TEInt _ | TEFloat _ | TEBool _ | TEStringLit _
     | TEVar _ | TEFnRef _ | TEBreak | TEContinue
-    | TEYield | TENullPtr _ -> ()
+    | TENullPtr _ -> ()
     | TECall (f, args, _) -> go f; List.iter go args
     | TEBinop (_, a, b, _) -> go a; go b
     | TEUnop (_, a, _) -> go a
@@ -1921,7 +1915,7 @@ let async_rewrite_to_frame
   let rec go e =
     match e with
     | TEInt _ | TEFloat _ | TEBool _ | TEStringLit _ | TEFnRef _
-    | TEBreak | TEContinue | TEYield | TENullPtr _ -> e
+    | TEBreak | TEContinue | TENullPtr _ -> e
     | TEVar (x, t) -> TEVar (rename x, t)
     | TECall (f, args, t) -> TECall (go f, List.map go args, t)
     | TEBinop (op, a, b, t) -> TEBinop (op, go a, go b, t)
@@ -1993,7 +1987,7 @@ let async_rewrite_to_frame
 let rec emit_has_suspension (e : Check.T.expr) : bool =
   let open Check.T in
   match e with
-  | TEAwait _ | TEYield -> true
+  | TEAwait _ -> true
   | TEForStream _ -> true     (* drain loop is a suspension shape *)
   | TESpawn _ -> false        (* spawn launches a child frame *)
   (* break/continue inside async functions must reach the
@@ -2074,7 +2068,7 @@ let allocate_await_all_locals_in_body (body : Check.T.expr) : Check.T.expr =
   let rec go e =
     match e with
     | TEInt _ | TEFloat _ | TEBool _ | TEStringLit _
-    | TEVar _ | TEFnRef _ | TEBreak | TEContinue | TEYield
+    | TEVar _ | TEFnRef _ | TEBreak | TEContinue
     | TENullPtr _ -> e
     | TECall (f, args, t) -> TECall (go f, List.map go args, t)
     | TEBinop (op, a, b, t) -> TEBinop (op, go a, go b, t)
@@ -2176,7 +2170,7 @@ let rec desugar_let_tuples (e : Check.T.expr) : Check.T.expr =
   let r = desugar_let_tuples in
   match e with
   | TEInt _ | TEFloat _ | TEBool _ | TEStringLit _
-  | TEVar _ | TEFnRef _ | TEBreak | TEContinue | TEYield
+  | TEVar _ | TEFnRef _ | TEBreak | TEContinue
   | TENullPtr _ -> e
   | TECall (f, args, t) -> TECall (r f, List.map r args, t)
   | TEBinop (op, a, b, t) -> TEBinop (op, r a, r b, t)
@@ -2277,11 +2271,6 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
     curr_state := id;
     curr_lines := [];
     segment_open := true
-  in
-  let suspend_to next_state =
-    [ Printf.sprintf "fr->state = %d;" next_state;
-      "orto_yield_suspend(fr);";
-      "return 1;" ]
   in
   let goto_state next_state =
     [ Printf.sprintf "fr->state = %d;" next_state;
@@ -2525,12 +2514,6 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
      this opens new state segments as needed. *)
   let rec walk (dst : D.t) (e : expr) =
     match e with
-    | TEYield ->
-        let n = alloc_state () in
-        finish_segment (suspend_to n);
-        start_segment n;
-        (* yield's value is 0 — write it to dst, then we're done. *)
-        store_at dst "0"
     | TEAwait (inner, result_ty, pty)
       when (match result_ty with
             | TyApp ("Array", [_]) -> true
@@ -3298,11 +3281,16 @@ let emit (prog : Check.T.program) : string =
            \    }\n\
            }\n\
            \n\
-           static void orto_yield_suspend(void *fr) {\n\
+           /* Built-in async extern that backs the `yield` keyword.\n\
+            * The parser desugars `yield` to `await orto_nop()`, so\n\
+            * the rest of the lowering routes through the ordinary\n\
+            * async-extern await path. The caller emits the submit\n\
+            * after this returns. */\n\
+           int orto_nop(void *fr) {\n\
            \    struct io_uring_sqe *sqe = io_uring_get_sqe(&ORTO_RING);\n\
            \    io_uring_prep_nop(sqe);\n\
            \    io_uring_sqe_set_data(sqe, fr);\n\
-           \    io_uring_submit(&ORTO_RING);\n\
+           \    return 0;\n\
            }\n\
            \n\
            static int orto_dispatch(void) {\n\

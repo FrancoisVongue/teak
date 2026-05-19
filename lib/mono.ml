@@ -285,7 +285,6 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         Check.T.TEAwait (rewrite_expr subst e, rt t, rt p)
     | Check.T.TESpawn (e, t) ->
         Check.T.TESpawn (rewrite_expr subst e, rt t)
-    | Check.T.TEYield -> Check.T.TEYield
     | Check.T.TEForStream (x, et, s, b) ->
         Check.T.TEForStream (x, rt et,
                              rewrite_expr subst s,
