@@ -2573,28 +2573,28 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
         ];
         start_segment body_state;
         (* Body: wrap last_res into Result[T] and write into res[i],
-           then bump i and loop back to head. *)
+           then bump i and loop back to head. last_res is the 16-byte
+           header slot (phase 10) — probe int first, memcpy Ok payload. *)
         let tmp = fresh "_dyn" in
-        let ok_inner_stmts, ok_inner_value =
-          if scalar_like pty then
-            ([], Printf.sprintf "(%s)fr->last_res" (c_type pty))
-          else
-            let blob = fresh "_okv" in
-            let c_pty = c_type pty in
-            ([ Printf.sprintf "%s %s; memcpy(&%s, &fr->last_res, sizeof(%s));"
-                 c_pty blob blob c_pty ],
-             blob)
-        in
+        let c_pty = c_type pty in
+        let check = fresh "_resc" in
+        let okv = fresh "_okv" in
+        emit_into [
+          Printf.sprintf "%s %s;" result_inner_c tmp;
+          Printf.sprintf "int %s;" check;
+          Printf.sprintf "memcpy(&%s, fr->last_res, sizeof(%s));" check check;
+          Printf.sprintf "if (%s >= 0) {" check;
+          Printf.sprintf "    %s %s;" c_pty okv;
+          Printf.sprintf "    memcpy(&%s, fr->last_res, sizeof(%s));" okv okv;
+          Printf.sprintf "    %s = ((%s){ .tag = 0, .as = { .Ok = { .f0 = %s } } });"
+            tmp result_inner_c okv;
+          "} else {";
+          Printf.sprintf "    %s = ((%s){ .tag = 1, .as = { .Err = { .f0 = -%s } } });"
+            tmp result_inner_c check;
+          "}";
+        ];
         emit_into (
-          [ Printf.sprintf "%s %s;" result_inner_c tmp;
-            "if (fr->last_res >= 0) {" ]
-          @ List.map (fun s -> "    " ^ s) ok_inner_stmts
-          @ [ Printf.sprintf "    %s = ((%s){ .tag = 0, .as = { .Ok = { .f0 = %s } } });"
-                tmp result_inner_c ok_inner_value;
-              "} else {";
-              Printf.sprintf "    %s = ((%s){ .tag = 1, .as = { .Err = { .f0 = (int)(-fr->last_res) } } });"
-                tmp result_inner_c;
-              "}";
+          [
               Printf.sprintf "((%s*)(ORTO_REGIONS[fr->%s.slot].buffer + fr->%s.offset))[fr->%s] = %s;"
                 result_inner_c res_n res_n i_n tmp;
               Printf.sprintf "fr->%s = fr->%s + 1;" i_n i_n;
@@ -2770,28 +2770,27 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
             "return 1;";
           ];
           start_segment n_state;
+          (* last_res is now uint8_t[16] (phase 10). Probe the first
+             4 bytes as the CQE int result, build Ok/Err from there
+             with memcpy for the Ok payload (covers Region, Array,
+             nested-tuple etc.). Mirrors store_await_result. *)
           let result_c = "Result_" ^ Mono.mangle_ty pty in
-          let ok_inner_stmts, ok_inner_value =
-            if scalar_like pty then
-              ([], Printf.sprintf "(%s)fr->last_res" (c_type pty))
-            else
-              let blob = fresh "_okv" in
-              let c_pty = c_type pty in
-              ([ Printf.sprintf "%s %s; memcpy(&%s, &fr->last_res, sizeof(%s));"
-                   c_pty blob blob c_pty ],
-               blob)
-          in
-          let stmts =
-            [ "if (fr->last_res >= 0) {" ]
-            @ List.map (fun s -> "    " ^ s) ok_inner_stmts
-            @ [ Printf.sprintf "    fr->%s = ((%s){ .tag = 0, .as = { .Ok = { .f0 = %s } } });"
-                  r_v result_c ok_inner_value;
-                "} else {";
-                Printf.sprintf "    fr->%s = ((%s){ .tag = 1, .as = { .Err = { .f0 = (int)(-fr->last_res) } } });"
-                  r_v result_c;
-                "}";
-              ]
-          in
+          let c_pty = c_type pty in
+          let check = fresh "_resc" in
+          let okv = fresh "_okv" in
+          let stmts = [
+            Printf.sprintf "int %s;" check;
+            Printf.sprintf "memcpy(&%s, fr->last_res, sizeof(%s));" check check;
+            Printf.sprintf "if (%s >= 0) {" check;
+            Printf.sprintf "    %s %s;" c_pty okv;
+            Printf.sprintf "    memcpy(&%s, fr->last_res, sizeof(%s));" okv okv;
+            Printf.sprintf "    fr->%s = ((%s){ .tag = 0, .as = { .Ok = { .f0 = %s } } });"
+              r_v result_c okv;
+            "} else {";
+            Printf.sprintf "    fr->%s = ((%s){ .tag = 1, .as = { .Err = { .f0 = -%s } } });"
+              r_v result_c check;
+            "}";
+          ] in
           emit_into stmts
         ) ptys;
         (* Phase 3: build tuple from the per-branch Result fields. *)
