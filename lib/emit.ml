@@ -1365,24 +1365,26 @@ let rec emit_expr
       { stmts; value = r_var }
 
   | Check.T.TEStackRegion (size_e, _) ->
-      (* Allocate a local C array of N bytes (N is a literal) and wire
-         it into a slab slot. is_stack=1 so drop skips free. *)
-      let n_literal = match size_e with
-        | Check.T.TEInt n -> n
-        | _ -> failwith "emit TEStackRegion: size not an int literal"
-      in
+      (* Allocate a local C VLA (`char buf[N]`) of N bytes and wire
+         it into a slab slot. N can be any runtime int — modern C99
+         supports VLAs on Linux/gcc/clang. is_stack=1 so drop skips
+         the free (the array dies with the C frame). *)
+      let cn = emit_expr ctor_map size_e in
+      let n_var = fresh "_n" in
       let stor_var = fresh "_stack_buf" in
       let slot_var = fresh "_slot" in
       let r_var = fresh "_reg" in
-      let stmts = [
-        Printf.sprintf "char %s[%d];" stor_var n_literal;
+      let stmts = cn.stmts @ [
+        Printf.sprintf "int %s = %s;" n_var cn.value;
+        Printf.sprintf "if (%s <= 0) abort();" n_var;
+        Printf.sprintf "char %s[%s];" stor_var n_var;
         Printf.sprintf "if (ORTO_REGION_FREE_HEAD < 0) abort();";
         Printf.sprintf "int %s = ORTO_REGION_FREE_HEAD;" slot_var;
         Printf.sprintf
           "ORTO_REGION_FREE_HEAD = ORTO_REGIONS[%s].next_free;" slot_var;
         Printf.sprintf "ORTO_REGIONS[%s].buffer = %s;" slot_var stor_var;
-        Printf.sprintf "ORTO_REGIONS[%s].buffer_size = %d;"
-          slot_var n_literal;
+        Printf.sprintf "ORTO_REGIONS[%s].buffer_size = (size_t)%s;"
+          slot_var n_var;
         Printf.sprintf "ORTO_REGIONS[%s].used = 0;" slot_var;
         Printf.sprintf "ORTO_REGIONS[%s].next_free = -1;" slot_var;
         Printf.sprintf "ORTO_REGIONS[%s].is_stack = 1;" slot_var;

@@ -646,15 +646,11 @@ and parse_atom_consume st =
       expect st TRParen;
       EDrop e
   | TStackRegion ->
-      (* stack_region(N) — N must be an int literal (compile-time size).
-         The block lives in the surrounding C function's frame; the
-         slot still goes through the slab so gen-check still works. *)
+      (* stack_region(N) — N is any int expression; lowered to a C99
+         VLA in the surrounding function's frame. Goes through the
+         slab so gen-check still works. *)
       expect st TLParen;
       let n = parse_expr st in
-      (match n with
-       | EInt _ -> ()
-       | _ -> raise (Parse_error
-           "stack_region(N): N must be an integer literal"));
       expect st TRParen;
       EStackRegion n
   | TAlignedRegion ->
@@ -1039,7 +1035,7 @@ let parse_enum st ~is_linear : top_decl =
 (* ---------- use declarations ---------- *)
 
 (* `use foo::bar;` or `use foo::{a, b, c};` — selective import. *)
-let parse_use st : use_decl =
+let parse_use ?(is_pub=false) st : use_decl =
   expect st TUse;
   let module_name = match eat st with
     | TIdent s -> s
@@ -1080,7 +1076,7 @@ let parse_use st : use_decl =
   if items = [] then
     raise (Parse_error
       (Printf.sprintf "use %s::{} — must import at least one item" module_name));
-  { use_module = module_name; use_items = items }
+  { use_module = module_name; use_items = items; use_pub = is_pub }
 
 (* ---------- entry point ---------- *)
 
@@ -1093,6 +1089,15 @@ let parse (toks : token list) : program =
     | TUse ->
         let u = parse_use st in
         loop (TopUse u :: acc)
+    | TPub ->
+        advance st;
+        (match peek st with
+         | TUse ->
+             let u = parse_use ~is_pub:true st in
+             loop (TopUse u :: acc)
+         | t -> raise (Parse_error
+           (Printf.sprintf "after `pub`, expected `use`, got %s"
+              (Token.show t))))
     | TFn   ->
         let f = parse_func st in
         loop (TopFunc f :: acc)

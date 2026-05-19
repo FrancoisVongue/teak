@@ -1540,8 +1540,9 @@ let rec infer (env : env) (tparams : string list)
       (T.TERegion (tn, result_ty), result_ty)
 
   | EStackRegion size_e ->
-      (* stack_region(N) : int → Region. Block on stack of current
-         C function. N must be a literal (parser already enforced). *)
+      (* stack_region(N) : int → Region. Allocated as a C99 VLA in
+         the current function's stack frame; N can be any runtime
+         int. Goes out of scope with the function. *)
       let (tn, tn_ty) = infer env tparams vars size_e in
       (try unify tn_ty TyInt
        with Type_error _ ->

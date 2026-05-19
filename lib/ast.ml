@@ -146,10 +146,13 @@ type extern_decl = {
 }
 
 (* `use mod::{a, b, c};` — selective import from another module.
-   Items must be a non-empty list; bare `use mod;` is not supported. *)
+   Items must be a non-empty list; bare `use mod;` is not supported.
+   With the `pub` prefix (`pub use mod::{a};`), the imported names
+   are re-exported: clients of THIS module can `use this::{a}`. *)
 type use_decl = {
   use_module : string;
   use_items  : string list;
+  use_pub    : bool;
 }
 
 (* `type Bytes = Array[byte];` — a plain alias. Resolved away by the

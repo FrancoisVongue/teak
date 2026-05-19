@@ -40,7 +40,12 @@ let mangle_for_module (module_name : string) (name : string) : string =
   else module_name ^ "__" ^ name
 
 (* What a single module exports, as a set of (bare_name, mangled_name)
-   pairs. Externs use bare_name = mangled_name (no mangling). *)
+   pairs. Externs use bare_name = mangled_name (no mangling).
+
+   `re_exports` is filled in a second pass from `pub use mod::{name};`
+   statements: those names ARE in this module's public surface but
+   their definition lives elsewhere — bare_name → other-module's
+   mangled name. *)
 type module_summary = {
   mod_name      : string;
   type_names    : (string * string) list;
@@ -49,6 +54,7 @@ type module_summary = {
   ctor_names    : (string * string) list;
   alias_names   : (string * string) list;
   extern_names  : string list;
+  mutable re_exports : (string * string) list;
 }
 
 let summarize (module_name : string) (prog : program) : module_summary =
@@ -81,7 +87,45 @@ let summarize (module_name : string) (prog : program) : module_summary =
     fn_names     = !fns;
     ctor_names   = !ctors;
     alias_names  = !aliases;
-    extern_names = !externs }
+    extern_names = !externs;
+    re_exports   = [] }
+
+(* Second pass: fill in re_exports for every module from its
+   `pub use foo::{bar};` decls. Has to come after every module's
+   bare summary is built, because a re-export needs to look the
+   item up in the source module's summary. *)
+let fill_re_exports (summaries : module_summary list) (modules : (string * program) list) : unit =
+  let find_summary m =
+    try List.find (fun s -> s.mod_name = m) summaries
+    with Not_found ->
+      raise (Resolve_error
+        (Printf.sprintf "module %S not found (referenced by `pub use`)" m))
+  in
+  let lookup_in (s : module_summary) (item : string) : string option =
+    match List.assoc_opt item s.type_names with Some m -> Some m | None ->
+    match List.assoc_opt item s.record_names with Some m -> Some m | None ->
+    match List.assoc_opt item s.fn_names with Some m -> Some m | None ->
+    match List.assoc_opt item s.ctor_names with Some m -> Some m | None ->
+    match List.assoc_opt item s.alias_names with Some m -> Some m | None ->
+    match List.assoc_opt item s.re_exports with Some m -> Some m | None ->
+    if List.mem item s.extern_names then Some item else None
+  in
+  List.iter (fun (mod_name, prog) ->
+    let m_summary = find_summary mod_name in
+    List.iter (fun decl ->
+      match decl with
+      | TopUse u when u.use_pub ->
+          let src = find_summary u.use_module in
+          List.iter (fun item ->
+            match lookup_in src item with
+            | Some target ->
+                m_summary.re_exports <- (item, target) :: m_summary.re_exports
+            | None ->
+                raise (Resolve_error
+                  (Printf.sprintf
+                     "pub use %s::%s — %S is not declared in module %S"
+                     u.use_module item item u.use_module))) u.use_items
+      | _ -> ()) prog) modules
 
 (* For a module M, build the resolution table that maps bare names
    visible in M's source to their target form (mangled or unchanged). *)
@@ -122,6 +166,9 @@ let build_resolution_map
         | Some m -> (item, m)
         | None ->
         match lookup item other.alias_names with
+        | Some m -> (item, m)
+        | None ->
+        match lookup item other.re_exports with
         | Some m -> (item, m)
         | None ->
           if List.mem item other.extern_names then (item, item)
@@ -452,6 +499,7 @@ let expand_in_decl (aliases : (string * ty) list) (d : top_decl) : top_decl =
    checker. Externs are deduplicated by name. *)
 let resolve (modules : (string * program) list) : program =
   let summaries = List.map (fun (mn, p) -> summarize mn p) modules in
+  fill_re_exports summaries modules;
   let resolved_per_module = List.map (fun (mn, prog) ->
     let m_summary = List.find (fun s -> s.mod_name = mn) summaries in
     let uses = List.filter_map (function

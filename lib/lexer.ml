@@ -67,6 +67,7 @@ let lower_ident_or_keyword s =
   | "spawn" -> TSpawn
   | "yield" -> TYield
   | "test"  -> TTest
+  | "pub"   -> TPub
   | "_"     -> TUnderscore
   | _       -> TIdent s
 
