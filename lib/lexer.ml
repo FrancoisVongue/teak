@@ -68,6 +68,7 @@ let lower_ident_or_keyword s =
   | "yield" -> TYield
   | "test"  -> TTest
   | "pub"   -> TPub
+  | "namespace" -> TNamespace
   | "_"     -> TUnderscore
   | _       -> TIdent s
 

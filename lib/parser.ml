@@ -1034,88 +1034,142 @@ let parse_enum st ~is_linear : top_decl =
 
 (* ---------- use declarations ---------- *)
 
-(* `use foo::bar;` or `use foo::{a, b, c};` — selective import. *)
+(* `use a::b::c::{x, y};` — selective import with a multi-component path.
+   Grammar: `use` PATH `;`  where PATH is one of
+     - ident (:: ident)*               (single-item, last ident is item)
+     - ident (:: ident)* :: { items }  (block form, all idents form path)
+   We disambiguate with two-token lookahead: after consuming
+   `ident ::` we check if what follows is another `ident ::` (more
+   path), an ident-then-not-`::` (single item form), or `{` (block). *)
 let parse_use ?(is_pub=false) st : use_decl =
   expect st TUse;
-  let module_name = match eat st with
-    | TIdent s -> s
+  let first = match eat st with
+    | TIdent s | TCtorIdent s -> s
     | t -> raise (Parse_error
-      (Printf.sprintf "expected module name after `use`, got %s"
+      (Printf.sprintf "expected namespace name after `use`, got %s"
          (Token.show t)))
   in
   expect st TColonCol;
+  let path_rev = ref [first] in
+  let single_item = ref None in
+  let rec loop () =
+    match st.toks with
+    | (TIdent s | TCtorIdent s) :: TColonCol :: _ ->
+        advance st; advance st;
+        path_rev := s :: !path_rev;
+        loop ()
+    | (TIdent s | TCtorIdent s) :: _ ->
+        advance st;
+        single_item := Some s
+    | TLBrace :: _ -> ()
+    | t :: _ -> raise (Parse_error
+        (Printf.sprintf "expected path component, import item, or `{`, got %s"
+           (Token.show t)))
+    | [] -> raise (Parse_error "unexpected end of input in `use` declaration")
+  in
+  loop ();
+  let module_path = List.rev !path_rev in
   let items =
-    if peek st = TLBrace then begin
-      advance st;
-      let rec collect () =
-        let item = match eat st with
-          | TIdent s     -> s
-          | TCtorIdent s -> s
-          | t -> raise (Parse_error
-            (Printf.sprintf "expected import item, got %s" (Token.show t)))
+    match !single_item with
+    | Some i -> [i]
+    | None ->
+        expect st TLBrace;
+        let rec collect_items () =
+          let item = match eat st with
+            | TIdent s | TCtorIdent s -> s
+            | t -> raise (Parse_error
+              (Printf.sprintf "expected import item, got %s" (Token.show t)))
+          in
+          if peek st = TComma then begin
+            advance st;
+            if peek st = TRBrace then [item]
+            else item :: collect_items ()
+          end else [item]
         in
-        if peek st = TComma then begin
-          advance st;
-          if peek st = TRBrace then [item]
-          else item :: collect ()
-        end else [item]
-      in
-      let items = collect () in
-      expect st TRBrace;
-      items
-    end else
-      let item = match eat st with
-        | TIdent s     -> s
-        | TCtorIdent s -> s
-        | t -> raise (Parse_error
-          (Printf.sprintf "expected import item, got %s" (Token.show t)))
-      in
-      [item]
+        let items = collect_items () in
+        expect st TRBrace;
+        items
   in
   expect st TSemi;
   if items = [] then
     raise (Parse_error
-      (Printf.sprintf "use %s::{} — must import at least one item" module_name));
-  { use_module = module_name; use_items = items; use_pub = is_pub }
+      (Printf.sprintf "use %s::{} — must import at least one item"
+         (String.concat "::" module_path)));
+  { use_module = module_path; use_items = items; use_pub = is_pub }
+
+(* Parse a dotted namespace path: ident (:: ident)*. At least one
+   component; used only for the header of `namespace a::b::c { ... }`. *)
+let parse_namespace_path st : string list =
+  let first = match eat st with
+    | TIdent s -> s
+    | t -> raise (Parse_error
+      (Printf.sprintf "expected namespace name after `namespace`, got %s"
+         (Token.show t)))
+  in
+  let rec loop acc =
+    if peek st = TColonCol then begin
+      advance st;
+      let nxt = match eat st with
+        | TIdent s -> s
+        | t -> raise (Parse_error
+          (Printf.sprintf "expected namespace component after `::`, got %s"
+             (Token.show t)))
+      in
+      loop (nxt :: acc)
+    end else List.rev acc
+  in
+  loop [first]
 
 (* ---------- entry point ---------- *)
 
 let parse (toks : token list) : program =
   try_counter := 0;
   let st = { toks } in
-  let rec loop acc =
-    match peek st with
-    | TEOF  -> List.rev acc
+  (* Parse the body of a top-level region — either the whole file
+     (terminator = TEOF) or the inside of a `namespace { ... }` block
+     (terminator = TRBrace). Namespace blocks nest via `loop` calling
+     itself with TRBrace. *)
+  let rec loop terminator acc =
+    let t = peek st in
+    if t = terminator then List.rev acc
+    else match t with
     | TUse ->
         let u = parse_use st in
-        loop (TopUse u :: acc)
+        loop terminator (TopUse u :: acc)
     | TPub ->
         advance st;
         (match peek st with
          | TUse ->
              let u = parse_use ~is_pub:true st in
-             loop (TopUse u :: acc)
+             loop terminator (TopUse u :: acc)
          | t -> raise (Parse_error
            (Printf.sprintf "after `pub`, expected `use`, got %s"
               (Token.show t))))
+    | TNamespace ->
+        advance st;
+        let path = parse_namespace_path st in
+        expect st TLBrace;
+        let inner = loop TRBrace [] in
+        expect st TRBrace;
+        loop terminator (TopNamespace (path, inner) :: acc)
     | TFn   ->
         let f = parse_func st in
-        loop (TopFunc f :: acc)
+        loop terminator (TopFunc f :: acc)
     | TStruct ->
         let td = parse_struct st ~is_linear:false in
-        loop (td :: acc)
+        loop terminator (td :: acc)
     | TEnum ->
         let td = parse_enum st ~is_linear:false in
-        loop (td :: acc)
+        loop terminator (td :: acc)
     | TLinear ->
         advance st;
         (match peek st with
          | TStruct ->
              let td = parse_struct st ~is_linear:true in
-             loop (td :: acc)
+             loop terminator (td :: acc)
          | TEnum ->
              let td = parse_enum st ~is_linear:true in
-             loop (td :: acc)
+             loop terminator (td :: acc)
          | t -> raise (Parse_error
            (Printf.sprintf "expected `struct` or `enum` after `linear`, got %s"
               (Token.show t))))
@@ -1130,10 +1184,10 @@ let parse (toks : token list) : program =
         expect st TEq;
         let target = parse_ty st in
         expect st TSemi;
-        loop (TopAlias { alias_name = name; alias_ty = target } :: acc)
+        loop terminator (TopAlias { alias_name = name; alias_ty = target } :: acc)
     | TExtern ->
         let e = parse_extern st in
-        loop (TopExtern e :: acc)
+        loop terminator (TopExtern e :: acc)
     | TTest ->
         advance st;
         let name = match eat st with
@@ -1143,9 +1197,9 @@ let parse (toks : token list) : program =
                (Token.show t)))
         in
         let body = parse_block st in
-        loop (TopTest { test_name = name; test_body = body } :: acc)
+        loop terminator (TopTest { test_name = name; test_body = body } :: acc)
     | t -> raise (Parse_error
-      (Printf.sprintf "expected `use`, `fn`, `struct`, `enum`, `linear`, `type`, `extern`, or `test` at top level, got %s"
+      (Printf.sprintf "expected `use`, `fn`, `struct`, `enum`, `linear`, `type`, `extern`, `test`, or `namespace`, got %s"
          (Token.show t)))
   in
-  loop []
+  loop TEOF []

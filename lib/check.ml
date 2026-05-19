@@ -395,6 +395,9 @@ let split_program (prog : program)
     | TopAlias _  :: _    ->
         failwith "check: TopAlias left in program — \
                   the resolver should have inlined all `type` aliases"
+    | TopNamespace _ :: _ ->
+        failwith "check: TopNamespace left in program — \
+                  the resolver should have flattened all `namespace` blocks"
   in
   loop [] [] [] [] [] prog
 

@@ -34,11 +34,24 @@ let module_name_of_path path =
 let modules_loaded : (string, Orto.Ast.program) Hashtbl.t = Hashtbl.create 8
 let load_order : string list ref = ref []
 
+(* Recursively walk all top-level decls including inside namespace
+   blocks, returning every `use` path's first component (= file name
+   to load). *)
+let rec collect_use_files decls =
+  List.concat_map (function
+    | Orto.Ast.TopUse u ->
+        (match u.Orto.Ast.use_module with
+         | first :: _ -> [first]
+         | [] -> [])
+    | Orto.Ast.TopNamespace (_, inner) -> collect_use_files inner
+    | _ -> []) decls
+
 let rec load_module entry_dir mod_name visiting =
-  if List.mem mod_name visiting then
-    failwith (Printf.sprintf "cyclic module dependency: %s -> %s"
-      (String.concat " -> " (List.rev visiting)) mod_name)
-  else if Hashtbl.mem modules_loaded mod_name then ()
+  (* Memoization handles mutual references — A imports B imports A is
+     fine, both end up loaded once. `visiting` is kept for future
+     debugging but no longer used to reject cycles. *)
+  let _ = visiting in
+  if Hashtbl.mem modules_loaded mod_name then ()
   else begin
     let path = Filename.concat entry_dir (mod_name ^ ".orto") in
     let src =
@@ -52,10 +65,9 @@ let rec load_module entry_dir mod_name visiting =
     let ast = Orto.Parser.parse toks in
     Hashtbl.add modules_loaded mod_name ast;
     load_order := mod_name :: !load_order;
-    List.iter (function
-      | Orto.Ast.TopUse u ->
-          load_module entry_dir u.use_module (mod_name :: visiting)
-      | _ -> ()) ast
+    List.iter (fun child ->
+      load_module entry_dir child (mod_name :: visiting))
+      (collect_use_files ast)
   end
 
 (* CLI is intentionally tiny — flag parsing in OCaml's Arg is heavy
@@ -118,10 +130,9 @@ let () =
     let ast = Orto.Parser.parse toks in
     Hashtbl.add modules_loaded entry_module ast;
     load_order := entry_module :: !load_order;
-    List.iter (function
-      | Orto.Ast.TopUse u ->
-          load_module entry_dir u.use_module [entry_module]
-      | _ -> ()) ast;
+    List.iter (fun child ->
+      load_module entry_dir child [entry_module])
+      (collect_use_files ast);
     (* Preserve insertion order (entry first, dependencies after);
        resolve.ml doesn't care about order, only about completeness. *)
     let modules =

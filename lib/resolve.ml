@@ -1,20 +1,27 @@
 (* Module resolution.
 
-   Input:  list of parsed modules, each (module_name, program).
-   Output: single combined program with all `use` decls removed and
-           every cross-module reference rewritten to its mangled form.
+   Input:  list of parsed modules, each (file_name, program).
+   Output: single combined program with all `use` and `namespace`
+           decls removed and every cross-namespace reference rewritten
+           to its mangled form.
 
-   Mangling: a top-level decl named `foo` in module `bar` becomes
-   `bar__foo`. Externs are NOT mangled — their name is the C linker
-   symbol and must round-trip unchanged. Builtins (Array, Region,
-   Option, byte, Some, None, Result, Ok, Err) are never mangled.
+   Namespaces: a file `foo.orto` implicitly defines a namespace `foo`
+   for decls outside any `namespace { ... }` block. Each
+   `namespace a::b::c { decls }` block defines that dotted namespace.
+   Multiple files may declare the same namespace; they all merge.
 
-   Within a module, references resolve in this order:
+   Mangling: decl `foo` in namespace `a::b` becomes `a__b__foo`.
+   Externs are NOT mangled — their name is the C linker symbol and
+   must round-trip unchanged. Builtins (Array, Region, Option, byte,
+   Some, None, Result, Ok, Err) are never mangled.
+
+   Within a namespace, references resolve in this order:
      1. Local scope (let bindings, parameters, pattern vars, type
         parameters) — never renamed.
-     2. The module's `use foo::bar;` imports — renamed to `foo__bar`
-        (or kept bare if `bar` is an extern in `foo`).
-     3. The module's own top-level decls — renamed to `M__name`.
+     2. The namespace's `use a::b::{x};` imports — renamed to
+        `a__b__x` (or kept bare if `x` is an extern in `a::b`).
+     3. The namespace's own top-level decls — renamed with its
+        mangled prefix.
      4. Builtins — kept as-is.
      5. Anything else — left alone (check.ml will complain). *)
 
@@ -35,19 +42,22 @@ let is_builtin name = List.mem name builtin_names
    whole compilation may. *)
 let is_unmanglable name = (name = "main")
 
-let mangle_for_module (module_name : string) (name : string) : string =
-  if is_unmanglable name then name
-  else module_name ^ "__" ^ name
+let path_to_string (p : string list) = String.concat "::" p
+let path_to_mangle (p : string list) = String.concat "__" p
 
-(* What a single module exports, as a set of (bare_name, mangled_name)
+let mangle_for_module (module_path : string list) (name : string) : string =
+  if is_unmanglable name then name
+  else path_to_mangle module_path ^ "__" ^ name
+
+(* What a single namespace exports, as a set of (bare_name, mangled_name)
    pairs. Externs use bare_name = mangled_name (no mangling).
 
    `re_exports` is filled in a second pass from `pub use mod::{name};`
-   statements: those names ARE in this module's public surface but
-   their definition lives elsewhere — bare_name → other-module's
+   statements: those names ARE in this namespace's public surface but
+   their definition lives elsewhere — bare_name → other-namespace's
    mangled name. *)
 type module_summary = {
-  mod_name      : string;
+  mod_path      : string list;
   type_names    : (string * string) list;
   record_names  : (string * string) list;
   fn_names      : (string * string) list;
@@ -57,8 +67,40 @@ type module_summary = {
   mutable re_exports : (string * string) list;
 }
 
-let summarize (module_name : string) (prog : program) : module_summary =
-  let m n = mangle_for_module module_name n in
+(* Flatten one file's program into (namespace_path, decls) pairs.
+   The default namespace = [file_name] catches decls outside any
+   `namespace { ... }` block; explicit blocks contribute their own
+   paths. Nested namespace blocks are not supported syntactically
+   (parse_namespace_path consumes the whole dotted path inline);
+   if one appears anyway we still flatten it conservatively. *)
+let flatten_namespaces (file_name : string) (prog : program)
+  : (string list * top_decl list) list =
+  let buckets : (string list, top_decl list ref) Hashtbl.t = Hashtbl.create 4 in
+  let order : string list list ref = ref [] in
+  let bucket_for path =
+    match Hashtbl.find_opt buckets path with
+    | Some r -> r
+    | None ->
+        let r = ref [] in
+        Hashtbl.add buckets path r;
+        order := path :: !order;
+        r
+  in
+  let rec visit path decls =
+    List.iter (fun d ->
+      match d with
+      | TopNamespace (sub, inner) -> visit sub inner
+      | _ ->
+          let r = bucket_for path in
+          r := d :: !r) decls
+  in
+  visit [file_name] prog;
+  List.rev_map (fun path ->
+    let r = Hashtbl.find buckets path in
+    (path, List.rev !r)) !order
+
+let summarize (module_path : string list) (prog : top_decl list) : module_summary =
+  let m n = mangle_for_module module_path n in
   let types   = ref [] in
   let records = ref [] in
   let fns     = ref [] in
@@ -79,9 +121,11 @@ let summarize (module_name : string) (prog : program) : module_summary =
         externs := e.ext_name :: !externs
     | TopAlias a ->
         aliases := (a.alias_name, m a.alias_name) :: !aliases
-    | TopTest _ -> ()  (* test blocks don't introduce module-level names *)
-    | TopUse _ -> ()) prog;
-  { mod_name = module_name;
+    | TopTest _ -> ()  (* test blocks don't introduce namespace-level names *)
+    | TopUse _ -> ()
+    | TopNamespace _ -> ()  (* flattened away by flatten_namespaces *)
+  ) prog;
+  { mod_path     = module_path;
     type_names   = !types;
     record_names = !records;
     fn_names     = !fns;
@@ -90,16 +134,19 @@ let summarize (module_name : string) (prog : program) : module_summary =
     extern_names = !externs;
     re_exports   = [] }
 
-(* Second pass: fill in re_exports for every module from its
-   `pub use foo::{bar};` decls. Has to come after every module's
+(* Second pass: fill in re_exports for every namespace from its
+   `pub use foo::{bar};` decls. Has to come after every namespace's
    bare summary is built, because a re-export needs to look the
-   item up in the source module's summary. *)
-let fill_re_exports (summaries : module_summary list) (modules : (string * program) list) : unit =
-  let find_summary m =
-    try List.find (fun s -> s.mod_name = m) summaries
+   item up in the source namespace's summary. *)
+let fill_re_exports
+    (summaries : module_summary list)
+    (per_ns : (string list * top_decl list) list) : unit =
+  let find_summary p =
+    try List.find (fun s -> s.mod_path = p) summaries
     with Not_found ->
       raise (Resolve_error
-        (Printf.sprintf "module %S not found (referenced by `pub use`)" m))
+        (Printf.sprintf "namespace %S not found (referenced by `pub use`)"
+           (path_to_string p)))
   in
   let lookup_in (s : module_summary) (item : string) : string option =
     match List.assoc_opt item s.type_names with Some m -> Some m | None ->
@@ -110,8 +157,8 @@ let fill_re_exports (summaries : module_summary list) (modules : (string * progr
     match List.assoc_opt item s.re_exports with Some m -> Some m | None ->
     if List.mem item s.extern_names then Some item else None
   in
-  List.iter (fun (mod_name, prog) ->
-    let m_summary = find_summary mod_name in
+  List.iter (fun (ns_path, prog) ->
+    let m_summary = find_summary ns_path in
     List.iter (fun decl ->
       match decl with
       | TopUse u when u.use_pub ->
@@ -123,11 +170,12 @@ let fill_re_exports (summaries : module_summary list) (modules : (string * progr
             | None ->
                 raise (Resolve_error
                   (Printf.sprintf
-                     "pub use %s::%s — %S is not declared in module %S"
-                     u.use_module item item u.use_module))) u.use_items
-      | _ -> ()) prog) modules
+                     "pub use %s::%s — %S is not declared in namespace %S"
+                     (path_to_string u.use_module) item item
+                     (path_to_string u.use_module)))) u.use_items
+      | _ -> ()) prog) per_ns
 
-(* For a module M, build the resolution table that maps bare names
+(* For a namespace M, build the resolution table that maps bare names
    visible in M's source to their target form (mangled or unchanged). *)
 let build_resolution_map
     (m_summary : module_summary)
@@ -145,11 +193,11 @@ let build_resolution_map
   let imports =
     List.concat_map (fun u ->
       let other =
-        try List.find (fun s -> s.mod_name = u.use_module) all_summaries
+        try List.find (fun s -> s.mod_path = u.use_module) all_summaries
         with Not_found ->
           raise (Resolve_error
-            (Printf.sprintf "module %S not found (referenced by `use`)"
-               u.use_module))
+            (Printf.sprintf "namespace %S not found (referenced by `use`)"
+               (path_to_string u.use_module)))
       in
       List.map (fun item ->
         let lookup name lst = List.assoc_opt name lst in
@@ -174,8 +222,9 @@ let build_resolution_map
           if List.mem item other.extern_names then (item, item)
           else raise (Resolve_error
             (Printf.sprintf
-               "use %s::%s — %S is not declared in module %S"
-               u.use_module item item u.use_module))) u.use_items)
+               "use %s::%s — %S is not declared in namespace %S"
+               (path_to_string u.use_module) item item
+               (path_to_string u.use_module)))) u.use_items)
       uses
   in
   let bare_own = List.map fst own in
@@ -183,15 +232,15 @@ let build_resolution_map
     if List.mem n bare_own then
       raise (Resolve_error
         (Printf.sprintf
-           "imported name %S clashes with a local declaration in module %S"
-           n m_summary.mod_name))) imports;
+           "imported name %S clashes with a local declaration in namespace %S"
+           n (path_to_string m_summary.mod_path)))) imports;
   let rec check_dups = function
     | [] -> ()
     | (x, _) :: rest ->
         if List.exists (fun (y, _) -> y = x) rest then
           raise (Resolve_error
-            (Printf.sprintf "duplicate import of %S in module %S"
-               x m_summary.mod_name));
+            (Printf.sprintf "duplicate import of %S in namespace %S"
+               x (path_to_string m_summary.mod_path)));
         check_dups rest
   in
   check_dups imports;
@@ -321,11 +370,12 @@ let rec resolve_expr
       ELetTuple (vs, v', body')
 
 let resolve_decl
-    (map : (string * string) list) (mod_name : string) (decl : top_decl)
+    (map : (string * string) list) (mod_path : string list) (decl : top_decl)
   : top_decl option =
-  let m_name n = mangle_for_module mod_name n in
+  let m_name n = mangle_for_module mod_path n in
   match decl with
   | TopUse _ -> None
+  | TopNamespace _ -> None  (* flattened away upstream *)
   | TopAlias a ->
       Some (TopAlias {
         alias_name = m_name a.alias_name;
@@ -493,22 +543,39 @@ let expand_in_decl (aliases : (string * ty) list) (d : top_decl) : top_decl =
         ext_return_ty = xt e.ext_return_ty; }
   | TopTest td -> TopTest { td with test_body = expand_in_expr aliases td.test_body }
   | TopUse _ | TopAlias _ -> d
+  | TopNamespace _ -> d
 
-(* Top-level entry: take an ordered list of (module_name, parsed program),
-   resolve all references, return one merged program ready for the type
-   checker. Externs are deduplicated by name. *)
+(* Top-level entry: take an ordered list of (file_name, parsed program),
+   flatten namespace blocks into per-namespace decl lists, resolve all
+   references, return one merged program ready for the type checker.
+   Externs are deduplicated by name. *)
 let resolve (modules : (string * program) list) : program =
-  let summaries = List.map (fun (mn, p) -> summarize mn p) modules in
-  fill_re_exports summaries modules;
-  let resolved_per_module = List.map (fun (mn, prog) ->
-    let m_summary = List.find (fun s -> s.mod_name = mn) summaries in
+  (* Step 1: each file → list of (namespace_path, decls). Multiple
+     files contributing to the same namespace path are merged. *)
+  let merged : (string list * top_decl list) list =
+    let acc : (string list, top_decl list ref) Hashtbl.t = Hashtbl.create 8 in
+    let order : string list list ref = ref [] in
+    List.iter (fun (fn, prog) ->
+      let per_ns = flatten_namespaces fn prog in
+      List.iter (fun (path, decls) ->
+        match Hashtbl.find_opt acc path with
+        | Some r -> r := !r @ decls
+        | None ->
+            Hashtbl.add acc path (ref decls);
+            order := path :: !order) per_ns) modules;
+    List.rev_map (fun path -> (path, !(Hashtbl.find acc path))) !order
+  in
+  let summaries = List.map (fun (p, decls) -> summarize p decls) merged in
+  fill_re_exports summaries merged;
+  let resolved_per_module = List.map (fun (path, prog) ->
+    let m_summary = List.find (fun s -> s.mod_path = path) summaries in
     let uses = List.filter_map (function
       | TopUse u -> Some u
       | _ -> None) prog
     in
     let map = build_resolution_map m_summary uses summaries in
-    List.filter_map (resolve_decl map mn) prog
-  ) modules
+    List.filter_map (resolve_decl map path) prog
+  ) merged
   in
   let combined = List.concat resolved_per_module in
   (* Collect aliases by their mangled name, then expand all references

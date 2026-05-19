@@ -61,6 +61,7 @@ type token =
   | TQuestion     (* postfix `?` — Result early-return *)
   | TPub          (* `pub use foo::{a};` — re-export *)
   | TTest         (* `test "name" { body }` — test block, --test mode *)
+  | TNamespace    (* `namespace foo::bar { decls }` — nested namespace block *)
   (* punctuation *)
   | TLParen
   | TRParen
@@ -160,6 +161,7 @@ let show = function
   | TQuestion     -> "?"
   | TPub          -> "PUB"
   | TTest         -> "TEST"
+  | TNamespace    -> "NAMESPACE"
   | TLParen       -> "("
   | TRParen       -> ")"
   | TLBrace       -> "{"

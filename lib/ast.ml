@@ -145,12 +145,14 @@ type extern_decl = {
   ext_return_ty : ty;
 }
 
-(* `use mod::{a, b, c};` — selective import from another module.
-   Items must be a non-empty list; bare `use mod;` is not supported.
-   With the `pub` prefix (`pub use mod::{a};`), the imported names
-   are re-exported: clients of THIS module can `use this::{a}`. *)
+(* `use a::b::c::{x, y};` — selective import from a namespace.
+   The path may be any depth; in the common single-component case
+   `use foo::{x}` the list has one element ["foo"]. Items must be a
+   non-empty list; bare `use mod;` is not supported. With the `pub`
+   prefix (`pub use a::b::{x};`), the imported names are re-exported:
+   clients of THIS namespace can `use this::{x}`. *)
 type use_decl = {
-  use_module : string;
+  use_module : string list;
   use_items  : string list;
   use_pub    : bool;
 }
@@ -179,6 +181,10 @@ type top_decl =
   | TopUse    of use_decl
   | TopAlias  of alias_decl
   | TopTest   of test_decl
+  | TopNamespace of string list * top_decl list
+                                          (* `namespace a::b::c { ... }` —
+                                             decls inside live in that
+                                             dotted namespace path *)
 
 type program = top_decl list
 
