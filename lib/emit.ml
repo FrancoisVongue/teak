@@ -174,6 +174,8 @@ let rec collect_ty (t : ty) : unit =
       failwith "emit collect_ty: Region takes no type arguments"
   | TyApp ("byte", []) -> ()
       (* byte is a primitive; maps directly to uint8_t in C. *)
+  | TyApp ("__cll", []) -> ()
+      (* internal pseudo-type for `long long` frame fields *)
   | TyApp ("byte", _) ->
       failwith "emit collect_ty: byte takes no type arguments"
   | TyApp ("float", []) -> ()
@@ -333,6 +335,10 @@ let rec c_type (t : ty) : string =
   | TyBool -> "int"
   | TyApp ("byte", []) -> "uint8_t"
   | TyApp ("float", []) -> "double"
+  (* Compiler-internal pseudo-type. Never appears in user surface;
+     used by emit to mark frame fields that must hold a 64-bit gen
+     counter so per-slot wrap can't false-match an old handle. *)
+  | TyApp ("__cll", []) -> "long long"
   | TyApp ("Array", [inner]) -> mangle_array_name inner
   | TyApp ("Region", []) -> "Region"
   | TyApp ("Task", [inner]) ->
@@ -372,7 +378,7 @@ let emit_fn_typedefs () : string list =
 let emit_array_forwards () : string list =
   List.rev_map (fun (mangled, _inner) ->
     Printf.sprintf
-      "typedef struct { int slot; int offset; int len; int expected_gen; } %s;"
+      "typedef struct { int slot; int offset; int len; long long expected_gen; } %s;"
       mangled)
     !array_types_order
 
@@ -383,13 +389,13 @@ let emit_task_forwards () : string list =
   let task_fwd =
     List.rev_map (fun m ->
       Printf.sprintf
-        "typedef struct { int slot; int gen; } Task_%s;" m)
+        "typedef struct { int slot; long long gen; } Task_%s;" m)
       !task_wrappers_order
   in
   let stream_fwd =
     List.rev_map (fun m ->
       Printf.sprintf
-        "typedef struct { int slot; int gen; } Stream_%s;" m)
+        "typedef struct { int slot; long long gen; } Stream_%s;" m)
       !stream_wrappers_order
   in
   task_fwd @ stream_fwd
@@ -1638,7 +1644,7 @@ let rec emit_expr
              Printf.sprintf "%s->_orto_slot = %s;" fr_v slot_v;
              Printf.sprintf "ORTO_SLOTS[%s].status = ORTO_SLOT_RUNNING;" slot_v;
              Printf.sprintf "ORTO_SLOTS[%s].waiter = NULL;" slot_v;
-             Printf.sprintf "int %s = ORTO_SLOTS[%s].gen;" gen_v slot_v;
+             Printf.sprintf "long long %s = ORTO_SLOTS[%s].gen;" gen_v slot_v;
            ] @ param_inits @ [
              Printf.sprintf "int %s = %s_step((void*)%s);" rc_v worker fr_v;
              Printf.sprintf "if (%s == 1) ORTO_PENDING++;" rc_v;
@@ -2139,7 +2145,10 @@ let allocate_await_all_locals_in_body (body : Check.T.expr) : Check.T.expr =
         for i = 0 to n - 1 do
           await_all_synth_locals :=
             (Printf.sprintf "_aw%d_slot_%d" k i, TyInt) ::
-            (Printf.sprintf "_aw%d_gen_%d"  k i, TyInt) ::
+            (* 64-bit gen so the counter can't wrap during long-running
+               servers. Must match the `long long gen` in OrtoSlot.
+               __cll is an emit-internal pseudo-type for `long long`. *)
+            (Printf.sprintf "_aw%d_gen_%d"  k i, TyApp ("__cll", [])) ::
             !await_all_synth_locals
         done;
         (* The Result[T] type is built-in but after mono its name is
@@ -2351,7 +2360,7 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
       Printf.sprintf "%s->more = 0;" fr_v;
       Printf.sprintf "ORTO_SLOTS[%s].status = %s;" slot_v init_status;
       Printf.sprintf "ORTO_SLOTS[%s].waiter = NULL;" slot_v;
-      Printf.sprintf "int %s = ORTO_SLOTS[%s].gen;" gen_v slot_v;
+      Printf.sprintf "long long %s = ORTO_SLOTS[%s].gen;" gen_v slot_v;
     ] @ param_inits @ [
       Printf.sprintf "int %s = %s_step((void*)%s);" rc_v worker fr_v;
       Printf.sprintf "if (%s == 1) ORTO_PENDING++;" rc_v;
@@ -2395,7 +2404,7 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
       let tmp = fresh "_sync_ret" in
       emit_into [
         Printf.sprintf "int %s = orto_slot_alloc();" slot_v;
-        Printf.sprintf "int %s = ORTO_SLOTS[%s].gen;" gen_v slot_v;
+        Printf.sprintf "long long %s = ORTO_SLOTS[%s].gen;" gen_v slot_v;
         Printf.sprintf "{ __typeof__(%s) %s = (%s);" call_expr tmp call_expr;
         Printf.sprintf "  memset(ORTO_SLOTS[%s].result, 0, sizeof(ORTO_SLOTS[%s].result));"
           slot_v slot_v;
@@ -3465,15 +3474,18 @@ let emit ?(slots=1024) ?(cores=1) ?(ring_entries=64) (prog : Check.T.program) : 
       * No allocation per region beyond the user-requested buffer.\n\
       * Slot 0 is reserved for the static string-literal pool. */\n\
      #define ORTO_REGION_SLOTS 4096\n\
+     /* The handle is a (slot, expected_gen) pair. expected_gen is\n\
+      * 64-bit so it can't wrap in any realistic uptime — even at\n\
+      * 1G reuses/s per slot, wrapping takes ~300 years. */\n\
      struct Region_slot {\n\
-     \    int gen;\n\
+     \    long long gen;\n\
      \    char* buffer;\n\
      \    size_t buffer_size;\n\
      \    size_t used;\n\
      \    int next_free;   /* -1 if in use, else next free slot id */\n\
      \    int is_stack;    /* 1 if buffer is stack memory (do not free) */\n\
      };\n\
-     typedef struct { int slot; int expected_gen; } Region;\n\
+     typedef struct { int slot; long long expected_gen; } Region;\n\
      ORTO_TLS struct Region_slot ORTO_REGIONS[ORTO_REGION_SLOTS];\n\
      ORTO_TLS int ORTO_REGION_FREE_HEAD = -1;\n\
      \n\
