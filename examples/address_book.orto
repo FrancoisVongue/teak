@@ -14,7 +14,7 @@
 //
 // The whole thing prints to stdout.
 
-use io::{print, println};
+// print/println are intrinsics
 use str::{concat_all, parse_int, int_to_bytes, lookup};
 use db::{Person, all_users, find_by_id, search_by_name};
 

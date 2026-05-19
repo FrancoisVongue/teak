@@ -15,7 +15,7 @@ use iouring::{Ring, Completion, ring_new, ring_failed,
               submit_read, flush, wait_one};
 use sys::{o_wronly, o_rdonly, o_creat, o_trunc};
 use str::{c_str, int_to_bytes, concat_all};
-use io::{print, println};
+// print/println are intrinsics
 
 fn write_temp(ring: Ring, path: Array[byte], content: Array[byte]) -> int {
     let fd = uring_open(ring, path, o_wronly() + o_creat() + o_trunc(), 420);

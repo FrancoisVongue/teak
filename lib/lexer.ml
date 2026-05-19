@@ -69,6 +69,8 @@ let lower_ident_or_keyword s =
   | "test"  -> TTest
   | "pub"   -> TPub
   | "namespace" -> TNamespace
+  | "print"   -> TPrint
+  | "println" -> TPrintln
   | "_"     -> TUnderscore
   | _       -> TIdent s
 

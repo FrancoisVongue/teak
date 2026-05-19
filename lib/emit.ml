@@ -298,6 +298,8 @@ let rec collect_expr (e : Check.T.expr) : unit =
   | Check.T.TEAwaitAll (bs, t, ptys) ->
       List.iter collect_expr bs; collect_ty t;
       List.iter collect_ty ptys
+  | Check.T.TEPrint (_, es, ts) ->
+      List.iter collect_expr es; List.iter collect_ty ts
 
 let collect_program (prog : Check.T.program) : unit =
   Hashtbl.clear fn_types_seen;
@@ -731,6 +733,8 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
         TELetTuple (renames, vt, v', rn env' b, bt, ads)
     | TEAwaitAll (bs, t, ptys) ->
         TEAwaitAll (List.map (rn env) bs, t, ptys)
+    | TEPrint (nl, es, ts) ->
+        TEPrint (nl, List.map (rn env) es, ts)
   in
   let initial_env = List.map (fun (p, _) -> (p, p)) f.params in
   { f with body = rn initial_env f.body }
@@ -890,6 +894,7 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TETupleIdx (_, _, t) -> t
   | Check.T.TELetTuple (_, _, _, _, t, _) -> t
   | Check.T.TEAwaitAll (_, t, _) -> t
+  | Check.T.TEPrint _ -> TyInt
 
 (* Release a Region's buffer (if it's heap-allocated), bump the
    generation, and push the slot back onto the free list. Stack
@@ -1805,6 +1810,83 @@ let rec emit_expr
                 inside an async function — it requires the state-machine \
                 lowering."
 
+  | Check.T.TEPrint (newline, parts, tys) ->
+      (* writev-based print intrinsic. Each component contributes one
+         iovec; formatted scalars use a per-component stack buffer.
+         Strings (Array[byte]) reference the runtime buffer directly,
+         zero-copy. Trailing newline (println) is an extra iovec
+         pointing at a static "\n". *)
+      let n_iov = List.length parts + (if newline then 1 else 0) in
+      let iov  = fresh "_iov" in
+      let i_iov = ref 0 in
+      let stmts = ref [] in
+      let push s = stmts := s :: !stmts in
+      push (Printf.sprintf "struct iovec %s[%d];" iov n_iov);
+      List.iter2 (fun e t ->
+        let ce = emit_expr ctor_map e in
+        push (String.concat "\n" ce.stmts);
+        let i = !i_iov in
+        incr i_iov;
+        let v = ce.value in
+        (match t with
+         | TyApp ("Array", [TyApp ("byte", [])]) ->
+             let h = fresh "_h" in
+             push (Printf.sprintf "Array_byte %s = %s;" h v);
+             push (Printf.sprintf
+               "%s[%d].iov_base = ORTO_REGIONS[%s.slot].buffer + %s.offset;"
+               iov i h h);
+             push (Printf.sprintf "%s[%d].iov_len  = (size_t)%s.len;" iov i h)
+         | TyBool ->
+             push (Printf.sprintf
+               "%s[%d].iov_base = (void*)((%s) ? \"true\" : \"false\");" iov i v);
+             push (Printf.sprintf
+               "%s[%d].iov_len  = (%s) ? 4 : 5;" iov i v)
+         | TyInt ->
+             let b = fresh "_b" in
+             let n = fresh "_n" in
+             push (Printf.sprintf "char %s[32];" b);
+             push (Printf.sprintf
+               "int %s = snprintf(%s, sizeof(%s), \"%%lld\", (long long)(%s));"
+               n b b v);
+             push (Printf.sprintf "%s[%d].iov_base = %s;" iov i b);
+             push (Printf.sprintf "%s[%d].iov_len  = (size_t)%s;" iov i n)
+         | TyApp ("byte", []) | TyApp ("u16", [])
+         | TyApp ("u32", []) | TyApp ("u64", []) ->
+             let b = fresh "_b" in
+             let n = fresh "_n" in
+             push (Printf.sprintf "char %s[32];" b);
+             push (Printf.sprintf
+               "int %s = snprintf(%s, sizeof(%s), \"%%llu\", (unsigned long long)(%s));"
+               n b b v);
+             push (Printf.sprintf "%s[%d].iov_base = %s;" iov i b);
+             push (Printf.sprintf "%s[%d].iov_len  = (size_t)%s;" iov i n)
+         | TyApp ("float", []) ->
+             let b = fresh "_b" in
+             let n = fresh "_n" in
+             push (Printf.sprintf "char %s[32];" b);
+             push (Printf.sprintf
+               "int %s = snprintf(%s, sizeof(%s), \"%%g\", (double)(%s));"
+               n b b v);
+             push (Printf.sprintf "%s[%d].iov_base = %s;" iov i b);
+             push (Printf.sprintf "%s[%d].iov_len  = (size_t)%s;" iov i n)
+         | other ->
+             failwith (Printf.sprintf
+               "emit TEPrint: unhandled printable type %s — checker should \
+                have rejected this earlier"
+               (Ast.show_ty other)))) parts tys;
+      if newline then begin
+        let i = !i_iov in
+        push (Printf.sprintf "%s[%d].iov_base = (void*)\"\\n\";" iov i);
+        push (Printf.sprintf "%s[%d].iov_len  = 1;" iov i)
+      end;
+      (* writev to stdout. Return value of the intrinsic is int — we
+         ignore writev's ssize_t result; on error we still return 0
+         (best-effort; debug prints shouldn't abort the program). *)
+      let rc = fresh "_rc" in
+      push (Printf.sprintf "ssize_t %s = writev(1, %s, %d); (void)%s;"
+        rc iov n_iov rc);
+      { stmts = List.rev !stmts; value = "0" }
+
 (* Shared setup for a[i] and a[i] := v. Returns the array/index codes,
    fresh names, the array's C type, the abort-checks, and the C
    expression for the slot at index. *)
@@ -2035,6 +2117,7 @@ let async_collect_locals (body : Check.T.expr) : (string * ty) list =
         List.iter2 add ns comp_tys;
         go v; go b
     | TEAwaitAll (bs, _, _) -> List.iter go bs
+    | TEPrint (_, es, _) -> List.iter go es
   in
   go body;
   List.rev !acc
@@ -2116,6 +2199,7 @@ let async_rewrite_to_frame
     | TETupleIdx (e, i, t) -> TETupleIdx (go e, i, t)
     | TEAwaitAll (bs, t, ptys) ->
         TEAwaitAll (List.map go bs, t, ptys)
+    | TEPrint (nl, es, ts) -> TEPrint (nl, List.map go es, ts)
   in go e
 
 (* Does the expression contain a reachable suspension point? Same
@@ -2186,6 +2270,7 @@ let rec emit_has_suspension (e : Check.T.expr) : bool =
   | TELetTuple (_, _, v, b, _, _) ->
       emit_has_suspension v || emit_has_suspension b
   | TEAwaitAll _ -> true
+  | TEPrint (_, es, _) -> List.exists emit_has_suspension es
 
 (* Synthetic frame locals required by `await all { ... }` lowerings.
    Reset per function; the walker reads it to know what `fr->...` to
@@ -2298,6 +2383,7 @@ let allocate_await_all_locals_in_body (body : Check.T.expr) : Check.T.expr =
             :: !await_all_synth_locals)
           ptys;
         TEAwaitAll (List.map go bs, t, ptys)
+    | TEPrint (nl, es, ts) -> TEPrint (nl, List.map go es, ts)
   in
   go body
 
@@ -2362,6 +2448,7 @@ let rec desugar_let_tuples (e : Check.T.expr) : Check.T.expr =
   | TETuple (es, t) -> TETuple (List.map r es, t)
   | TETupleIdx (e, i, t) -> TETupleIdx (r e, i, t)
   | TEAwaitAll (bs, t, ptys) -> TEAwaitAll (List.map r bs, t, ptys)
+  | TEPrint (nl, es, ts) -> TEPrint (nl, List.map r es, ts)
   | TELetTuple (names, vt, v, b, bt, ads) ->
       let v' = r v in
       let b' = r b in
@@ -3596,6 +3683,9 @@ let emit ?(slots=1024) ?(cores=1) ?(ring_entries=64) ?(test_mode=false) (prog : 
      #include <stddef.h>\n\
      #include <stdint.h>\n\
      #include <string.h>\n\
+     #include <stdio.h>\n\
+     #include <unistd.h>\n\
+     #include <sys/uio.h>\n\
      \n\
      /* Concurrency mode, set by orto's --cores N flag (default 1).\n\
       * cores=1 → single-thread runtime, no pthread dependency.\n\

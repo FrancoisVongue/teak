@@ -306,6 +306,9 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
     | Check.T.TEAwaitAll (bs, t, ptys) ->
         Check.T.TEAwaitAll (List.map (rewrite_expr subst) bs,
                             rt t, List.map rt ptys)
+    | Check.T.TEPrint (nl, es, ts) ->
+        Check.T.TEPrint (nl, List.map (rewrite_expr subst) es,
+                         List.map rt ts)
   in
 
   (* Start mono from main when present; if the program has tests

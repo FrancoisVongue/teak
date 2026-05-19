@@ -10,7 +10,6 @@
 // take Region by value and don't free it. The first half here would
 // live in `std::str` once we have modules.
 
-extern fn putchar(c: int) -> int
 
 // ---------- "stdlib" — library functions over Array[byte] ----------
 
@@ -119,13 +118,9 @@ fn lookup(s: Array[byte], key: Array[byte]) -> Array[byte] {
 }
 
 // ---------- application code ----------
-
-fn print(s: Array[byte], i: int) -> int {
-    if i >= len(s) { 0 }
-    else { putchar(to_int(s[i])); print(s, i + 1) }
-}
-
-fn println(s: Array[byte]) -> int { print(s, 0); putchar(10) }
+//
+// Output uses the `println` language intrinsic (one writev syscall);
+// no putchar-loop helper needed.
 
 // Build ">> ALICE (30) lives in NYC <<" from "user=alice,age=30,city=NYC".
 fn format_log(r: Region, input: Array[byte]) -> Array[byte] {

@@ -1,15 +1,7 @@
-// std::io — tiny output helpers built on libc putchar.
+// std::io — kept only for `putchar` legacy users.
+//
+// The functions `print` and `println` used to live here as
+// `putchar`-loops. They are now language intrinsics — call
+// `print(...)` / `println(...)` directly without importing anything.
 
 extern fn putchar(c: int) -> int
-
-fn print_loop(s: Array[byte], i: int) -> int {
-    if i >= len(s) { 0 }
-    else { putchar(to_int(s[i])); print_loop(s, i + 1) }
-}
-
-fn print(s: Array[byte]) -> int { print_loop(s, 0) }
-
-fn println(s: Array[byte]) -> int {
-    print_loop(s, 0);
-    putchar(10)
-}

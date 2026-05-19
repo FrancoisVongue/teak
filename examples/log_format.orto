@@ -5,7 +5,7 @@
 // We pull in just what we need via `use`.
 
 use str::{lookup, to_upper, concat_all, parse_int, int_to_bytes};
-use io::println;
+// println is an intrinsic
 
 fn format_log(r: Region, input: Array[byte]) -> Array[byte] {
     let name = to_upper(r, lookup(input, "user"));

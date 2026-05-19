@@ -62,6 +62,8 @@ type token =
   | TPub          (* `pub use foo::{a};` — re-export *)
   | TTest         (* `test "name" { body }` — test block, --test mode *)
   | TNamespace    (* `namespace foo::bar { decls }` — nested namespace block *)
+  | TPrint        (* print(expr)    — intrinsic: writev a tuple or scalar *)
+  | TPrintln      (* println(expr)  — same, plus trailing '\n' *)
   (* punctuation *)
   | TLParen
   | TRParen
@@ -162,6 +164,8 @@ let show = function
   | TPub          -> "PUB"
   | TTest         -> "TEST"
   | TNamespace    -> "NAMESPACE"
+  | TPrint        -> "PRINT"
+  | TPrintln      -> "PRINTLN"
   | TLParen       -> "("
   | TRParen       -> ")"
   | TLBrace       -> "{"

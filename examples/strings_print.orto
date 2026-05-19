@@ -1,25 +1,10 @@
-// Hello world via putchar + recursion + byte indexing.
+// Hello world via the `print` language intrinsic.
 //
-// Demonstrates the round trip: literal "..." → Array[byte] in static
-// region → s[i] yields byte → to_int(b) widens to int → putchar.
-// Exit code 0.
-
-extern fn putchar(c: int) -> int
-
-fn print_loop(s: Array[byte], i: int) -> int {
-    if i >= len(s) {
-        0
-    } else {
-        putchar(to_int(s[i]));
-        print_loop(s, i + 1)
-    }
-}
-
-fn print(s: Array[byte]) -> int {
-    print_loop(s, 0)
-}
+// `print(s)` and `println(s)` are builtin — they take any printable
+// type (Array[byte], int, bool, float, byte, u16, u32, u64) or a
+// tuple of printable values. Both lower to one writev syscall.
 
 fn main() -> int {
-    print("Hello, world!\n");
+    print(("Hello, world!\n"));
     0
 }

@@ -411,7 +411,8 @@ and parse_atom st =
   | TArray | TLen | TSlice
   | TToInt | TToByte | TToFloat | TToU16 | TToU32 | TToU64
   | TCAlloc | TCFree | TNullPtr | TIsNull | TArrayData | TTryAt | TDrop
-  | TRegion | TStackRegion | TAlignedRegion -> parse_atom_consume st
+  | TRegion | TStackRegion | TAlignedRegion
+  | TPrint | TPrintln -> parse_atom_consume st
   | t -> raise (Parse_error
     (Printf.sprintf "expected expression, got %s" (Token.show t)))
 
@@ -645,6 +646,16 @@ and parse_atom_consume st =
       let e = parse_expr st in
       expect st TRParen;
       EDrop e
+  | TPrint ->
+      expect st TLParen;
+      let e = parse_expr st in
+      expect st TRParen;
+      EPrint (false, e)
+  | TPrintln ->
+      expect st TLParen;
+      let e = parse_expr st in
+      expect st TRParen;
+      EPrint (true, e)
   | TStackRegion ->
       (* stack_region(N) — N is any int expression; lowered to a C99
          VLA in the surrounding function's frame. Goes through the

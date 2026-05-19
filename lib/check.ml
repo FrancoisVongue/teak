@@ -130,6 +130,13 @@ module T = struct
                      payload types (the T inside the Task[T] each branch
                      would have produced).  Lowered to "kick all, then
                      sequentially await each" in emit. *)
+    | TEPrint of bool * expr list * ty list
+                  (* print/println intrinsic.
+                     bool = trailing newline? expr list = per-component
+                     subexprs (flattened from tuple literal, or
+                     [single_expr] if a scalar was passed). ty list =
+                     parallel list of each component's type — emit uses
+                     it to pick the right writev formatter. *)
 
   type func = {
     name        : string;
@@ -2048,6 +2055,8 @@ let rec infer (env : env) (tparams : string list)
          `break;` or other ints. The whole `for` returns int 0. *)
       (T.TEForStream (x, elem, tsrc, tbody), TyInt)
 
+  | EPrint (nl, inner) -> infer_print env tparams vars nl inner
+
   | EAwaitAllDyn coll_e ->
       (* `await all coll` requires coll : Array[Task[T]], returns
          Array[Result[T]] — each Task is awaited, each result wrapped
@@ -2064,6 +2073,40 @@ let rec infer (env : env) (tparams : string list)
       let wrapped = TyApp ("Result", [elem]) in
       let result_ty = TyApp ("Array", [wrapped]) in
       (T.TEAwait (tc, result_ty, elem), result_ty)
+
+and is_printable_ty (t : ty) : bool =
+  match zonk t with
+  | TyInt | TyBool -> true
+  | TyApp ("byte", []) | TyApp ("u16", []) | TyApp ("u32", [])
+  | TyApp ("u64", []) | TyApp ("float", []) -> true
+  | TyApp ("Array", [TyApp ("byte", [])]) -> true
+  | _ -> false
+
+and infer_print env tparams vars nl inner =
+  (* println/print accepts either a tuple literal `(e1, e2, ..., en)`
+     where each component is a printable type, or a single printable
+     scalar.  We flatten to a parallel (exprs, tys) pair so emit can
+     just walk one list. *)
+  let parts =
+    match inner with
+    | ETuple es -> es
+    | other     -> [other]
+  in
+  if parts = [] then
+    raise (Type_error "print/println: empty tuple is not allowed");
+  let texprs_tys = List.map (fun e ->
+    let (te, t) = infer env tparams vars e in
+    let zt = zonk t in
+    if not (is_printable_ty zt) then
+      raise (Type_error
+        (Printf.sprintf
+           "print/println: component of type %s is not printable. \
+            Allowed: int, bool, byte, u16, u32, u64, float, Array[byte]"
+           (show_ty zt)));
+    (te, zt)) parts
+  in
+  let texprs, tys = List.split texprs_tys in
+  (T.TEPrint (nl, texprs, tys), TyInt)
 
 and check_args env tparams vars callee_name param_tys args : T.expr list =
   let n_expected = List.length param_tys in
@@ -2177,6 +2220,8 @@ let rec zonk_expr (e : T.expr) : T.expr =
   | T.TEAwaitAll (bs, t, ptys) ->
       T.TEAwaitAll (List.map zonk_expr bs, zonk_expect t,
                     List.map zonk_expect ptys)
+  | T.TEPrint (nl, es, ts) ->
+      T.TEPrint (nl, List.map zonk_expr es, List.map zonk_expect ts)
 
 and zonk_expect (t : ty) : ty =
   let t = zonk t in
@@ -2609,6 +2654,13 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       in
       (T.TEAwaitAll (List.rev bs_rev, t, ptys), live)
 
+  | T.TEPrint (nl, es, ts) ->
+      let (es_rev, live) = List.fold_left (fun (acc, l) e ->
+        let (e', l) = check_moves_expr env l false e in
+        (e' :: acc, l)) ([], live) es
+      in
+      (T.TEPrint (nl, List.rev es_rev, ts), live)
+
 (* ---------- check a function ---------- *)
 
 (* True if the typed body contains an `await` or `yield` reachable
@@ -2684,6 +2736,7 @@ let rec body_has_suspension (e : T.expr) : bool =
   | TELetTuple (_, _, v, b, _, _) ->
       body_has_suspension v || body_has_suspension b
   | TEAwaitAll _ -> true
+  | TEPrint (_, es, _) -> List.exists body_has_suspension es
 
 let check_func (env : env) (f : func) : T.func =
   let (_, (param_tys, ret_ty)) = List.assoc f.name env.fns in

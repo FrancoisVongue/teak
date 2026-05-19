@@ -368,6 +368,7 @@ let rec resolve_expr
       in
       let body' = resolve_expr map new_locals body in
       ELetTuple (vs, v', body')
+  | EPrint (nl, e) -> EPrint (nl, r e)
 
 let resolve_decl
     (map : (string * string) list) (mod_path : string list) (decl : top_decl)
@@ -517,6 +518,7 @@ let expand_in_expr (aliases : (string * ty) list) (e : expr) : expr =
     | ETuple es -> ETuple (List.map ex es)
     | ETupleIdx (e, i) -> ETupleIdx (ex e, i)
     | ELetTuple (vs, v, b) -> ELetTuple (vs, ex v, ex b)
+    | EPrint (nl, e) -> EPrint (nl, ex e)
   in
   ex e
 

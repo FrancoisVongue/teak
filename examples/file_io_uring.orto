@@ -17,7 +17,7 @@ use iouring::{Ring, ring_new, ring_failed,
               uring_open, uring_read, uring_write, uring_close};
 use sys::{o_wronly, o_rdonly, o_creat, o_trunc};
 use str::c_str;
-use io::print;
+// print is an intrinsic
 
 fn do_write(r: Region, ring: Ring, path: Array[byte]) -> int {
     let flags = o_wronly() + o_creat() + o_trunc();

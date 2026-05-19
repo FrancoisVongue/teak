@@ -13,7 +13,7 @@
 use sys::{Fd, fd_wrap, fd_read, fd_write,
           sys_open, o_wronly, o_rdonly, o_creat, o_trunc};
 use str::c_str;
-use io::print;
+// print is an intrinsic
 
 fn do_write(path: Array[byte]) -> int {
     let raw = sys_open(path, o_wronly() + o_creat() + o_trunc(), 420);

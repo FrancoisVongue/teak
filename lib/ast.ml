@@ -102,6 +102,12 @@ type expr =
   | ETupleIdx of expr * int               (* t.0, t.1 — bounds-checked at type-check time *)
   | ELetTuple of string list * expr * expr
                                           (* let (x, y, z) = expr; body — destructuring let *)
+  | EPrint    of bool * expr              (* print/println intrinsic.
+                                             bool = newline?  Inner expr is
+                                             either a tuple literal (each
+                                             component printed in order) or
+                                             a single printable scalar.
+                                             Lowers to one writev syscall. *)
 
 and record_init_elem =
   | RAssign of string * expr   (* field: value *)
@@ -335,3 +341,5 @@ let rec show_expr = function
   | ELetTuple (vs, v, b) ->
       Printf.sprintf "let (%s) = %s; %s"
         (String.concat ", " vs) (show_expr v) (show_expr b)
+  | EPrint (nl, e) ->
+      Printf.sprintf "%s(%s)" (if nl then "println" else "print") (show_expr e)

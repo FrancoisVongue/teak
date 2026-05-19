@@ -12,7 +12,7 @@
 // works in plain orto with our stdlib. No `unsafe`, no reflection;
 // every byte is explicit.
 
-use io::{print, println};
+// print/println are intrinsics
 use str::{int_to_bytes, concat_all};
 use bin::{read_u32_le, read_u16_le, write_u32_le, write_u16_le};
 
