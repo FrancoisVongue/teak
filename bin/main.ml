@@ -65,12 +65,13 @@ let parse_args () =
   let output   = ref None in
   let slots    = ref 1024 in
   let cores    = ref 1 in
+  let ring     = ref 64 in
   let argv = Sys.argv in
   let n = Array.length argv in
   let i = ref 1 in
   let usage () =
     prerr_endline
-      "usage: orto INPUT.orto [-o OUTPUT.c] [--slots N] [--cores N]";
+      "usage: orto INPUT.orto [-o OUTPUT.c] [--slots N] [--cores N] [--ring-entries N]";
     exit 2
   in
   while !i < n do
@@ -87,6 +88,10 @@ let parse_args () =
          if !i + 1 >= n then usage ();
          cores := int_of_string argv.(!i + 1);
          i := !i + 2
+     | "--ring-entries" ->
+         if !i + 1 >= n then usage ();
+         ring := int_of_string argv.(!i + 1);
+         i := !i + 2
      | s when !input = None ->
          input := Some s;
          incr i
@@ -96,10 +101,11 @@ let parse_args () =
   let output = match !output with Some s -> s | None -> default_output input in
   if !slots <= 0 then begin prerr_endline "--slots must be > 0"; exit 2 end;
   if !cores <= 0 then begin prerr_endline "--cores must be > 0"; exit 2 end;
-  (input, output, !slots, !cores)
+  if !ring  <= 0 then begin prerr_endline "--ring-entries must be > 0"; exit 2 end;
+  (input, output, !slots, !cores, !ring)
 
 let () =
-  let (input, output, slots, cores) = parse_args () in
+  let (input, output, slots, cores, ring_entries) = parse_args () in
   let entry_dir = Filename.dirname input in
   let entry_module = module_name_of_path input in
   try
@@ -121,7 +127,7 @@ let () =
     let merged = Orto.Resolve.resolve modules in
     let typed_ast = Orto.Check.check merged in
     let mono = Orto.Mono.monomorphize typed_ast in
-    let c = Orto.Emit.emit ~slots ~cores mono in
+    let c = Orto.Emit.emit ~slots ~cores ~ring_entries mono in
     write_file output c;
     Printf.printf "wrote %s\n" output
   with

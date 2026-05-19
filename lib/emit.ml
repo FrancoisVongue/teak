@@ -2283,7 +2283,13 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
     let all_args = arg_values @ ["fr"] in
     emit_into [
       Printf.sprintf "%s(%s);" name (String.concat ", " all_args);
-      "io_uring_submit(&ORTO_RING);";
+      (* Don't submit here — the dispatcher flushes accumulated SQEs
+         in one syscall just before it waits for a CQE. Batching N
+         awaits in a row drops N submit-syscalls to one. *)
+      "ORTO_NEEDS_SUBMIT = 1;";
+      (* Flush if the ring's near full so a long burst of preps\n
+         doesn't overflow into NULL sqes. *)
+      "if (io_uring_sq_space_left(&ORTO_RING) < 4) { io_uring_submit(&ORTO_RING); ORTO_NEEDS_SUBMIT = 0; }";
     ];
     finish_segment
       [ Printf.sprintf "fr->state = %d;" next_state;
@@ -2741,8 +2747,8 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
                  "await all: each branch must be an `extern async` call \
                   or `spawn worker(args)`"))
           (List.combine branches ptys);
-        (* Single submit after all SQEs are prepared. *)
-        emit_into ["io_uring_submit(&ORTO_RING);"];
+        (* Mark SQEs ready; dispatcher submits before its next wait. *)
+        emit_into ["ORTO_NEEDS_SUBMIT = 1;"];
         (* Phase 2: sequentially await each sub-slot. *)
         List.iteri (fun i pty ->
           let slot_v = slot_name i in
@@ -2865,7 +2871,10 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
         let exit_s = alloc_state () in
         emit_into [
           Printf.sprintf "%s(%s);" extern_name (String.concat ", " all_args);
-          "io_uring_submit(&ORTO_RING);";
+          "ORTO_NEEDS_SUBMIT = 1;";
+      (* Flush if the ring's near full so a long burst of preps\n
+         doesn't overflow into NULL sqes. *)
+      "if (io_uring_sq_space_left(&ORTO_RING) < 4) { io_uring_submit(&ORTO_RING); ORTO_NEEDS_SUBMIT = 0; }";
         ];
         finish_segment [
           Printf.sprintf "fr->state = %d;" head_s;
@@ -3026,7 +3035,7 @@ let emit_async_main_wrapper (f : Check.T.func) : string =
   let body init_fail_return =
     Printf.sprintf
       "    int result = 0;\n\
-       \    if (io_uring_queue_init(64, &ORTO_RING, 0) < 0) {\n\
+       \    if (io_uring_queue_init(ORTO_RING_ENTRIES, &ORTO_RING, 0) < 0) {\n\
        \        result = 1;\n\
        \        %s;\n\
        \    }\n\
@@ -3143,7 +3152,7 @@ let emit_static_bytes_array () : string =
 
 (* ---------- whole program ---------- *)
 
-let emit ?(slots=1024) ?(cores=1) (prog : Check.T.program) : string =
+let emit ?(slots=1024) ?(cores=1) ?(ring_entries=64) (prog : Check.T.program) : string =
   let prog =
     { prog with funcs = List.map alpha_rename_func prog.funcs }
   in
@@ -3234,6 +3243,10 @@ let emit ?(slots=1024) ?(cores=1) (prog : Check.T.program) : string =
             * `extern __thread struct io_uring ORTO_RING;` then. */\n\
            ORTO_TLS struct io_uring ORTO_RING;\n\
            ORTO_TLS int ORTO_PENDING = 0;\n\
+           /* Set by every SQE-prep emit site; cleared by the\n\
+            * dispatcher right after it flushes them. Lets us coalesce\n\
+            * N back-to-back preps into one io_uring_submit syscall. */\n\
+           ORTO_TLS int ORTO_NEEDS_SUBMIT = 0;\n\
            \n\
            %s\n\
            \n\
@@ -3333,23 +3346,37 @@ let emit ?(slots=1024) ?(cores=1) (prog : Check.T.program) : string =
            \    return 0;\n\
            }\n\
            \n\
+           /* Single iteration: handle one CQE. Factored so we can\n\
+            * drain a whole batch in one pass without syscalls. */\n\
+           static inline void orto_handle_cqe(struct io_uring_cqe *cqe) {\n\
+           \    OrtoFrameHeader *fr = io_uring_cqe_get_data(cqe);\n\
+           \    memset(&fr->last_res, 0, sizeof(fr->last_res));\n\
+           \    memcpy(&fr->last_res, &cqe->res, sizeof(cqe->res));\n\
+           \    fr->more = (cqe->flags & IORING_CQE_F_MORE) ? 1 : 0;\n\
+           \    io_uring_cqe_seen(&ORTO_RING, cqe);\n\
+           \    int sr = fr->step(fr);\n\
+           \    if (sr == 0) {\n\
+           \        ORTO_PENDING--;\n\
+           \        ORTO_PENDING -= orto_complete(fr);\n\
+           \    }\n\
+           }\n\
+           \n\
            static int orto_dispatch(void) {\n\
            \    while (ORTO_PENDING > 0) {\n\
+           \        if (ORTO_NEEDS_SUBMIT) {\n\
+           \            io_uring_submit(&ORTO_RING);\n\
+           \            ORTO_NEEDS_SUBMIT = 0;\n\
+           \        }\n\
            \        struct io_uring_cqe *cqe;\n\
            \        int rc = io_uring_wait_cqe(&ORTO_RING, &cqe);\n\
            \        if (rc < 0) return rc;\n\
-           \        OrtoFrameHeader *fr = io_uring_cqe_get_data(cqe);\n\
-           \        /* cqe->res is int (32-bit); zero the rest of the\n\
-           \         * 16-byte slot so a later read of a smaller T\n\
-           \         * doesn't pick up stale high bytes. */\n\
-           \        memset(&fr->last_res, 0, sizeof(fr->last_res));\n\
-           \        memcpy(&fr->last_res, &cqe->res, sizeof(cqe->res));\n\
-           \        fr->more = (cqe->flags & IORING_CQE_F_MORE) ? 1 : 0;\n\
-           \        io_uring_cqe_seen(&ORTO_RING, cqe);\n\
-           \        int sr = fr->step(fr);\n\
-           \        if (sr == 0) {\n\
-           \            ORTO_PENDING--;\n\
-           \            ORTO_PENDING -= orto_complete(fr);\n\
+           \        orto_handle_cqe(cqe);\n\
+           \        /* Drain everything else ready in userspace — no\n\
+           \         * extra syscalls; halves syscall count for any\n\
+           \         * fan-out workload. */\n\
+           \        while (ORTO_PENDING > 0) {\n\
+           \            if (io_uring_peek_cqe(&ORTO_RING, &cqe) != 0) break;\n\
+           \            orto_handle_cqe(cqe);\n\
            \        }\n\
            \    }\n\
            \    return 0;\n\
@@ -3413,6 +3440,11 @@ let emit ?(slots=1024) ?(cores=1) (prog : Check.T.program) : string =
       * lives in thread-local storage; main forks N pthread\n\
       * workers, each running its own copy of the program. */\n\
      #define ORTO_CORES %d\n\
+     /* Size of the io_uring submission/completion ring (in SQEs).\n\
+      * Controlled by --ring-entries N. Larger = more concurrent\n\
+      * SQEs may live in-kernel; smaller = less per-thread memory.\n\
+      * Must be a power of two; clamped by the kernel to its max. */\n\
+     #define ORTO_RING_ENTRIES %d\n\
      #if ORTO_CORES > 1\n\
      #  include <pthread.h>\n\
      #  define ORTO_TLS __thread\n\
@@ -3467,7 +3499,7 @@ let emit ?(slots=1024) ?(cores=1) (prog : Check.T.program) : string =
      \    ORTO_REGIONS[0].next_free = -1;\n\
      \    ORTO_REGION_FREE_HEAD = 1;\n\
      }"
-    cores static_bytes
+    cores ring_entries static_bytes
   in
   let async_prelude =
     if async_funcs = [] then []
