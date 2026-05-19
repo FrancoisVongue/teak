@@ -3166,19 +3166,26 @@ let emit ?(slots=1024) ?(cores=1) ?(ring_entries=64) (prog : Check.T.program) : 
   let tuple_drop_forwards = emit_tuple_drop_forwards () in
   let tuple_drop_defs = emit_tuple_drop_defs () in
   let array_drop_forwards = emit_array_drop_forwards () in
-  let task_drop_forwards = emit_task_drop_forwards () in
-  let task_drop_defs = emit_task_drop_defs () in
-  let stream_drop_forwards = emit_stream_drop_forwards () in
-  let stream_drop_defs = emit_stream_drop_defs () in
+  let async_funcs =
+    List.filter (fun (f : Check.T.func) -> f.is_async) prog.funcs
+  in
+  (* drop_Task / drop_Stream reference ORTO_SLOTS, which only exists
+     when the async runtime is emitted. A fully-sync program may
+     still have Task[T] in its type universe (orto_nop builtin),
+     but it never instantiates one, so the drop helpers aren't
+     needed — and if emitted, they'd fail to compile against the
+     missing slot pool. Skip them in sync mode. *)
+  let has_async = async_funcs <> [] in
+  let task_drop_forwards = if has_async then emit_task_drop_forwards () else [] in
+  let task_drop_defs     = if has_async then emit_task_drop_defs ()     else [] in
+  let stream_drop_forwards = if has_async then emit_stream_drop_forwards () else [] in
+  let stream_drop_defs     = if has_async then emit_stream_drop_defs ()     else [] in
   let fn_typedefs  = emit_fn_typedefs () in
   let ordered_structs = topo_sort_structs prog.types prog.records in
   let struct_defs = List.map (function
     | DAdt td -> emit_adt_definition td
     | DRec rd -> emit_record_definition rd) ordered_structs in
   let extern_decls = List.map emit_extern_decl prog.externs in
-  let async_funcs =
-    List.filter (fun (f : Check.T.func) -> f.is_async) prog.funcs
-  in
   let sync_funcs =
     List.filter (fun (f : Check.T.func) -> not f.is_async) prog.funcs
   in
