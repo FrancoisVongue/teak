@@ -867,19 +867,6 @@ let parse_func st =
 
 let parse_extern st =
   expect st TExtern;
-  let is_async =
-    if peek st = TAsync then (advance st; true) else false
-  in
-  (* `extern async stream fn ...` — multishot variant. `stream` is
-     only meaningful after `async`; reject `extern stream fn ...`. *)
-  let is_stream =
-    if peek st = TStream then begin
-      if not is_async then
-        raise (Parse_error
-          "`extern stream fn ...` requires `async`: write `extern async stream fn ...`");
-      advance st; true
-    end else false
-  in
   expect st TFn;
   let name = match eat st with
     | TIdent s -> s
@@ -892,8 +879,12 @@ let parse_extern st =
   expect st TRParen;
   expect st TArrow;
   let return_ty = parse_ty st in
-  { ext_name = name; ext_params = params; ext_return_ty = return_ty;
-    ext_is_async = is_async; ext_is_stream = is_stream }
+  (* The return type drives the calling convention:
+       -> Task[T]    — SQE-prep extern, lowers under `await`
+       -> Stream[T]  — multishot SQE source, drained by `for x in s`
+       -> T          — ordinary sync FFI call
+     No modifier keywords; the type IS the signal. *)
+  { ext_name = name; ext_params = params; ext_return_ty = return_ty }
 
 (* ---------- type declarations ---------- *)
 

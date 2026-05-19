@@ -714,18 +714,11 @@ let build_env
         List.map (fun (_, t) ->
           validate_ty type_env record_env [] t) e.ext_params
       in
-      let declared_ret = validate_ty type_env record_env [] e.ext_return_ty in
-      (* `extern async fn f(...) -> T` is exposed to the source as a
-         function returning Task[T] — its result can only be consumed
-         through `await`. `extern async stream fn ...` wraps in
-         Stream[T] instead and is drained with `for x in call(...)`.
-         The C-side declaration keeps the bare T in both cases; emit
-         handles the indirection. *)
-      let ret_ty =
-        if e.ext_is_stream then TyApp ("Stream", [declared_ret])
-        else if e.ext_is_async then TyApp ("Task", [declared_ret])
-        else declared_ret
-      in
+      let ret_ty = validate_ty type_env record_env [] e.ext_return_ty in
+      (* Calling convention is read straight off the declared return
+         type. The C-side glue exposed by an extern returning Task[T]
+         or Stream[T] writes results back via a hidden frame pointer
+         argument — emit handles that indirection. *)
       (e.ext_name, ([], (param_tys, ret_ty)))) externs
   in
   let env = { types = type_env;
@@ -2678,11 +2671,17 @@ let check (prog : program) : T.program =
   let typed_externs =
     List.map (fun (e : extern_decl) ->
       let (_, (param_tys, ret_ty)) = List.assoc e.ext_name env.fns in
+      (* The calling-convention flags now derive from the declared
+         return type: Task[T] / Stream[T] mean SQE-prep, anything
+         else is an ordinary sync FFI call. *)
+      let is_async = match ret_ty with
+        | TyApp ("Task", _) -> true | _ -> false in
+      let is_stream = match ret_ty with
+        | TyApp ("Stream", _) -> true | _ -> false in
       { T.name = e.ext_name;
         T.params = List.combine (List.map fst e.ext_params) param_tys;
         T.return_ty = ret_ty;
-        T.is_async = e.ext_is_async;
-        T.is_stream = e.ext_is_stream }) externs
+        T.is_async; T.is_stream }) externs
   in
   let resolved_types   = List.map snd env.types in
   let resolved_records = List.map snd env.records in

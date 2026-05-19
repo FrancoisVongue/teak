@@ -132,18 +132,12 @@ type func = {
 type extern_decl = {
   ext_name      : string;
   ext_params    : (string * ty) list;
+  (* The return type drives the calling convention. Write it
+     directly: `Task[T]` for SQE-prep externs lowered under `await`,
+     `Stream[T]` for multishot sources drained by `for x in call`,
+     bare `T` for ordinary sync FFI. The compiler picks the C-side
+     signature shape from the declared return type. *)
   ext_return_ty : ty;
-  (* `extern async fn ...` — the C-side glue prepares an io_uring SQE
-     and the call only makes sense inside `await`. Compiler reads it
-     and (a) wraps the declared return type in Task[T] for the type
-     system, (b) lowers `await call(...)` to a submit-and-suspend
-     pattern in async functions. *)
-  ext_is_async  : bool;
-  (* `extern async stream fn ...` — the C-side glue prepares a
-     multishot SQE (e.g. recv_multishot / accept_multishot / timeout
-     multishot). The source-visible return is Stream[T] rather than
-     Task[T], and the operation is drained via `for x in call(...)`. *)
-  ext_is_stream : bool;
 }
 
 (* `use mod::{a, b, c};` — selective import from another module.

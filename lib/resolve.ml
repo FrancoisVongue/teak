@@ -327,8 +327,6 @@ let resolve_decl
         ext_name = e.ext_name;
         ext_params = params;
         ext_return_ty = return_ty;
-        ext_is_async = e.ext_is_async;
-        ext_is_stream = e.ext_is_stream;
       })
 
 (* Expand type aliases transitively, with cycle detection. *)
