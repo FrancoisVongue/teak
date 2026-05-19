@@ -414,3 +414,130 @@ concat_all(r, array(r, [a, b, c]))
 
 После cleanup compiler 6003 → 5808 строк OCaml. Без потери
 функциональности.
+
+---
+
+# Часть II. Конкурентность (Stage 3)
+
+Эта часть документа — обзор того что добавил Stage 3 (async, spawn,
+Stream, tuples, Result) с точки зрения тех же двух осей: ядро/поверхность
+и каталог-vs-закон. После 15 фаз и ~1500 LOC OCaml — честная оценка.
+
+## Stage 3: что вышло ортогонально
+
+### Linearity propagation в Task / Stream / Array / Tuple
+
+`Array[T]` где T линейный → массив линейный. `Task[Region]` → линейный
+таск. `(Region, int)` → линейный кортеж. **Одно правило**: «встроенные
+контейнеры наследуют линейность параметра».
+
+Когда мы добавляли tuples, нам ничего не пришлось делать с
+linear-проверками — они уже работали. Это закон, не каталог.
+
+### Single suspension marker — `await`
+
+`await` — единственное слово, помечающее приостановку. `yield` это
+**parser-sugar** для `await orto_nop()` (фаза 11, без отдельного AST-
+узла). `for x in stream` это loop, но **каждая итерация** это
+implicit `await`. Программист помнит одно слово.
+
+### `Result[T]` обёртка для `await`
+
+`await op()` возвращает `Result[T]`. Положительный CQE → `Ok(T)`,
+отрицательный → `Err(int)`. Это не магия — это нормальный ADT.
+
+### State machine — невидимая трансформация
+
+Async функция лоwers в `Frame_X` struct + `X_step()` + sync wrapper.
+Программист этого не видит — пишет линейный код. Поверхность не
+раздута.
+
+## Stage 3: спорные точки и решения
+
+Каждый пункт — место где можно было сделать иначе. **Все 12 закрыты**
+явным решением:
+
+| # | Пункт | Решение |
+|---|---|---|
+| 1 | Result/Option как builtin ADT | Оставлено. Третий аналогичный тип не нужен; Either пользователь объявит сам. |
+| 2 | Task[T] и Stream[T] параллельные linear | Оставлено. Разные семантики (один CQE vs many). Унификация скрыла бы это в типе. |
+| 3 | `await all { }` static + dynamic | Оставлено. Гетерогенный fan-out (статика, tuple) и гомогенный (динамика, array) — разные задачи. Парсер диспатчит по `{`. |
+| 4 | `yield` как keyword | ✅ Починено (фаза 11) — pure parser sugar над `await orto_nop()`. Backend не видит yield. |
+| 5 | `t.0` numeric field | Оставлено. Established practice (Rust/Swift/Scala). |
+| 6 | `extern fn` модификаторы `async`/`stream` | ✅ Починено (фаза 9) — return type сам определяет calling convention. |
+| 7 | Три drop path (Region runtime / user / induced) | Оставлено. Разные по природе; унификация = vtable cost. |
+| 8 | Task[T] для T > 8 байт | ✅ Починено (фаза 10) — slot.result теперь `uint8_t[16]`, memcpy uniform. |
+| 9 | `for i in lo..hi` vs `for x in stream` | Оставлено. `..` локально дизамбигирует. |
+| 10 | `all` context-sensitive после `await` | Оставлено. Строго одна позиция AST. |
+| 11 | Frame `fr->` префикс в emit | Оставлено. Implementation detail, не language surface. |
+| 12 | `spawn` только на ECall | Оставлено. Семантическая необходимость (нечего запустить без call). |
+
+**Три** настоящих бага реально починены. **Девять** пунктов проверены и
+осознанно оставлены с обоснованием. Каталог не растёт.
+
+## Stage 3: ядро vs поверхность (sugar)
+
+После Stage 3 двухслойная модель языка такая:
+
+**Ядро** — то что не выводится из остального:
+
+| Категория | Primitive'ы |
+|---|---|
+| Данные | литералы (int/bool/byte/float), `struct`, `enum`, `fn` тип |
+| Вычисление | `let`, `if`, `match`, `while`, function call, binop/unop |
+| Память | `Region`, `Array[T]`, `linear`, `drop` |
+| Конкурентность | `await`, `spawn`, `Task[T]`, `Stream[T]`, `Result[T]` |
+| FFI | `extern fn` |
+
+**Surface sugar** (раскрывается на этапе parse/check в ядро):
+
+| Sugar | Раскрывается в |
+|---|---|
+| `for i in lo..hi` | `let _hi = hi; let mut i = lo; while i < _hi { body; i := i + 1 }` |
+| `x \|> f(a)` | `f(x, a)` |
+| `yield` | `await orto_nop()` (фаза 11) |
+| `let (a, b) = t` | `let _t = t; let a = _t.0; let b = _t.1;` |
+| string literal `"abc"` | `Array[byte]` handle в статический Region |
+| `0xFF` / `0b1010` | `EInt` |
+| trailing `;` перед `}` | `let _ = body; 0` |
+| pattern guards `pat if c => body` | match arm + check |
+
+**Где не делаем sugar и почему:**
+
+- **`if`/`while` как функции** — не делаем, потому что мы eager-eval.
+  Функция вычислила бы все ветки. Lisp может через macros, Haskell —
+  через lazy, Smalltalk — через blocks. У нас ничего из трёх нет —
+  if/while честно primitive'ы.
+- **`match` как функция** — тоже не делаем. Pattern destructuring и
+  exhaustivity check не выражаются на уровне функций.
+- **`spawn` детачед vs joinable** — одна форма AST, поведение по
+  использованию результата. Это **закон** («отброшенный Task =
+  детач»), не контекстная магия.
+
+## Stage 3: N+M по фактам
+
+Сколько мест компилятора задело Stage 3 (~1500 LOC OCaml):
+- token.ml/lexer.ml — 3 keyword'а (`await`/`spawn`/`yield`); были `async`/`stream` — убраны фазой 9.
+- ast.ml — 5 узлов async + 3 узла tuples.
+- parser.ml — соответствующая парсинговая логика.
+- check.ml — типизация Task/Stream/Result/tuples, induced linearity.
+- mono.ml — пробрасывание новых типов.
+- emit.ml — state machine, slot pool, runtime header, drop generators.
+
+Это **одна ось**: конкурентность. Все фазы строились последовательно,
+каждая опиралась на предыдущую **не модифицируя** её. spawn использовал
+slot pool, который тоже использовал await. Tuples использовали induced
+linearity которая уже работала. Это **N+M**, не N².
+
+## Stage 3: что осталось как debt
+
+1. **Bound Stream form** — `let s = stream_call(...); for x in s {}`
+   требует CQE-буфер или deferred prep. Inline form работает.
+2. **ASYNC_CANCEL для drop_Stream** — пока DETACHED-fallback.
+3. **Match по tuple-паттернам** — есть destructuring let, но
+   `match t { (a, b) => ... }` ещё нет.
+4. **Многоядерность** shared-nothing — single-core dispatcher.
+5. **IOCP backend** для Windows — Linux-only сейчас.
+
+Все эти пункты в TODO.md и STAGE3_ASYNC.md §16 как кандидаты v2.
+Ничего не «думается потом без записи».
