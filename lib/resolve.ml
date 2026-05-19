@@ -73,6 +73,7 @@ let summarize (module_name : string) (prog : program) : module_summary =
         externs := e.ext_name :: !externs
     | TopAlias a ->
         aliases := (a.alias_name, m a.alias_name) :: !aliases
+    | TopTest _ -> ()  (* test blocks don't introduce module-level names *)
     | TopUse _ -> ()) prog;
   { mod_name = module_name;
     type_names   = !types;
@@ -332,6 +333,11 @@ let resolve_decl
         ext_params = params;
         ext_return_ty = return_ty;
       })
+  | TopTest td ->
+      (* Test bodies are normal expressions resolved against the
+         module's import map. Test name kept verbatim. *)
+      let body = resolve_expr map [] td.test_body in
+      Some (TopTest { test_name = td.test_name; test_body = body })
 
 (* Expand type aliases transitively, with cycle detection. *)
 let rec expand_alias_ty
@@ -438,6 +444,7 @@ let expand_in_decl (aliases : (string * ty) list) (d : top_decl) : top_decl =
       TopExtern { e with
         ext_params = List.map (fun (n, t) -> (n, xt t)) e.ext_params;
         ext_return_ty = xt e.ext_return_ty; }
+  | TopTest td -> TopTest { td with test_body = expand_in_expr aliases td.test_body }
   | TopUse _ | TopAlias _ -> d
 
 (* Top-level entry: take an ordered list of (module_name, parsed program),

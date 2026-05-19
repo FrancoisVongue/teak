@@ -159,6 +159,15 @@ type alias_decl = {
   alias_ty   : ty;
 }
 
+(* `test "human description" { body }` — top-level test block.
+   In normal compile mode (no --test) test blocks are silently
+   ignored. In --test mode the driver generates a `main` that
+   runs every test and reports PASS/FAIL with the human name. *)
+type test_decl = {
+  test_name : string;   (* the literal from `test "..." { … }` *)
+  test_body : expr;     (* must return int — 0 = pass, !=0 = fail *)
+}
+
 type top_decl =
   | TopType   of type_decl
   | TopRecord of record_decl
@@ -166,6 +175,7 @@ type top_decl =
   | TopExtern of extern_decl
   | TopUse    of use_decl
   | TopAlias  of alias_decl
+  | TopTest   of test_decl
 
 type program = top_decl list
 

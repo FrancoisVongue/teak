@@ -66,6 +66,7 @@ let lower_ident_or_keyword s =
   | "await" -> TAwait
   | "spawn" -> TSpawn
   | "yield" -> TYield
+  | "test"  -> TTest
   | "_"     -> TUnderscore
   | _       -> TIdent s
 

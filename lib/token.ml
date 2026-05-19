@@ -59,6 +59,7 @@ type token =
   | TYield        (* yield — Stage 3 cooperative scheduling point *)
   | TUnderscore   (* `_` as a standalone token (wildcard pattern) *)
   | TQuestion     (* postfix `?` — Result early-return *)
+  | TTest         (* `test "name" { body }` — test block, --test mode *)
   (* punctuation *)
   | TLParen
   | TRParen
@@ -156,6 +157,7 @@ let show = function
   | TYield        -> "YIELD"
   | TUnderscore   -> "_"
   | TQuestion     -> "?"
+  | TTest         -> "TEST"
   | TLParen       -> "("
   | TRParen       -> ")"
   | TLBrace       -> "{"

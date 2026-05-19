@@ -330,7 +330,8 @@ let collect_program (prog : Check.T.program) : unit =
     List.iter (fun (_, t) -> collect_ty t) f.params;
     collect_ty f.return_ty;
     collect_expr f.body;
-    if f.is_async then register_async_func f.name f.params f.return_ty) prog.funcs
+    if f.is_async then register_async_func f.name f.params f.return_ty) prog.funcs;
+  List.iter (fun (t : Check.T.test) -> collect_expr t.body) prog.tests
 
 (* ---------- rendering C types ---------- *)
 
@@ -1906,6 +1907,64 @@ let emit_func_def ctor_map (f : Check.T.func) : string =
     (c_type f.return_ty) f.name params_s
     (String.concat "\n" indented)
 
+(* Emit one test as a static fn returning int. The runner main calls
+   each through a function pointer table. *)
+let emit_test_def ctor_map (idx : int) (t : Check.T.test) : string =
+  reset_counter ();
+  let cb = emit_expr ctor_map t.body in
+  let body_lines =
+    cb.stmts @ [Printf.sprintf "return %s;" cb.value]
+  in
+  let indented = List.map (fun s -> "    " ^ s) body_lines in
+  Printf.sprintf "static int _test_%d(void) {\n%s\n}" idx
+    (String.concat "\n" indented)
+
+(* Generate the runner main: runs every test, prints PASS/FAIL with
+   the test's human name, returns non-zero if any failed. *)
+let emit_test_main (tests : Check.T.test list) : string =
+  let n = List.length tests in
+  let escape_c s =
+    let b = Buffer.create (String.length s + 2) in
+    String.iter (fun c ->
+      match c with
+      | '"'  -> Buffer.add_string b "\\\""
+      | '\\' -> Buffer.add_string b "\\\\"
+      | '\n' -> Buffer.add_string b "\\n"
+      | '\t' -> Buffer.add_string b "\\t"
+      | _    -> Buffer.add_char b c) s;
+    Buffer.contents b
+  in
+  let names =
+    String.concat ", "
+      (List.map (fun (t : Check.T.test) ->
+        Printf.sprintf "\"%s\"" (escape_c t.name)) tests)
+  in
+  let fns =
+    String.concat ", "
+      (List.mapi (fun i _ -> Printf.sprintf "_test_%d" i) tests)
+  in
+  Printf.sprintf
+    "#include <stdio.h>\n\
+     int main(void) {\n\
+     \    const char *names[] = { %s };\n\
+     \    int (*fns[])(void) = { %s };\n\
+     \    int total = %d;\n\
+     \    int failed = 0;\n\
+     \    for (int i = 0; i < total; i++) {\n\
+     \        int rc = fns[i]();\n\
+     \        if (rc == 0) {\n\
+     \            printf(\"PASS  %%s\\n\", names[i]);\n\
+     \        } else {\n\
+     \            printf(\"FAIL  %%s  (exit=%%d)\\n\", names[i], rc);\n\
+     \            failed++;\n\
+     \        }\n\
+     \    }\n\
+     \    printf(\"---  %%d passed, %%d failed of %%d  ---\\n\",\n\
+     \           total - failed, failed, total);\n\
+     \    return failed > 0 ? 1 : 0;\n\
+     }"
+    names fns n
+
 (* ---------- Stage 3 phase 4b/5 — async lowering for `main` ----------
 
    MVP scope: only `main` may suspend, and the only suspension point
@@ -3240,7 +3299,7 @@ let emit_static_bytes_array () : string =
 
 (* ---------- whole program ---------- *)
 
-let emit ?(slots=1024) ?(cores=1) ?(ring_entries=64) (prog : Check.T.program) : string =
+let emit ?(slots=1024) ?(cores=1) ?(ring_entries=64) ?(test_mode=false) (prog : Check.T.program) : string =
   let prog =
     { prog with funcs = List.map alpha_rename_func prog.funcs }
   in
@@ -3274,8 +3333,15 @@ let emit ?(slots=1024) ?(cores=1) ?(ring_entries=64) (prog : Check.T.program) : 
     | DAdt td -> emit_adt_definition td
     | DRec rd -> emit_record_definition rd) ordered_structs in
   let extern_decls = List.map emit_extern_decl prog.externs in
+  (* test_mode: drop the user's main (if any) — we synthesize our
+     own runner. Test bodies emit as `_test_N` fns. *)
+  let user_funcs =
+    if test_mode then
+      List.filter (fun (f : Check.T.func) -> f.name <> "main") prog.funcs
+    else prog.funcs
+  in
   let sync_funcs =
-    List.filter (fun (f : Check.T.func) -> not f.is_async) prog.funcs
+    List.filter (fun (f : Check.T.func) -> not f.is_async) user_funcs
   in
   let decls        = List.map emit_func_decl sync_funcs in
   (* Non-main async functions also expose a sync C symbol (forward
@@ -3603,6 +3669,12 @@ let emit ?(slots=1024) ?(cores=1) ?(ring_entries=64) (prog : Check.T.program) : 
     if async_funcs = [] then []
     else ["typedef int (*OrtoStepFn)(void *frame_ptr);"]
   in
+  let test_defs, test_main =
+    if test_mode then
+      let ds = List.mapi (emit_test_def ctor_map) prog.tests in
+      (ds, [emit_test_main prog.tests])
+    else ([], [])
+  in
   String.concat "\n\n"
     ([header]
      @ adt_forwards
@@ -3627,4 +3699,6 @@ let emit ?(slots=1024) ?(cores=1) ?(ring_entries=64) (prog : Check.T.program) : 
      @ task_drop_defs
      @ stream_drop_defs
      @ defs
-     @ async_defs)
+     @ async_defs
+     @ test_defs
+     @ test_main)

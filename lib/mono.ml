@@ -308,7 +308,16 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
                             rt t, List.map rt ptys)
   in
 
-  request_fn "main" [];
+  (* Start mono from main when present; if the program has tests
+     but no main (--test mode), seed mono from test bodies instead.
+     Tests themselves aren't fns in mono's queue — they're walked
+     once below to trigger every fn they call. *)
+  if List.exists (fun (f : Check.T.func) -> f.name = "main") prog.funcs then
+    request_fn "main" []
+  else begin
+    List.iter (fun (t : Check.T.test) ->
+      ignore (rewrite_expr [] t.body)) prog.tests
+  end;
 
   (* Indexes for O(1) lookup of original fns/types by name. *)
   let orig_fns_idx : (string, Check.T.func) Hashtbl.t =
@@ -409,7 +418,16 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
   let final_records =
     Hashtbl.fold (fun _ v acc -> v :: acc) mono_recs []
   in
+  (* Tests need rewrite_expr just like fn bodies — they may
+     instantiate generics. The subst environment is empty (tests
+     have no type params themselves), so rewrite_expr just walks
+     the tree and triggers monomorph requests where needed. *)
+  let final_tests =
+    List.map (fun (t : Check.T.test) ->
+      { t with Check.T.body = rewrite_expr [] t.body }) prog.tests
+  in
   { Check.T.types   = final_types;
     Check.T.records = final_records;
     Check.T.funcs   = final_funcs;
-    Check.T.externs = prog.externs }
+    Check.T.externs = prog.externs;
+    Check.T.tests   = final_tests }

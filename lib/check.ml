@@ -158,11 +158,17 @@ module T = struct
     is_stream : bool;
   }
 
+  type test = {
+    name : string;
+    body : expr;
+  }
+
   type program = {
     types   : type_decl list;
     records : record_decl list;
     funcs   : func list;
     externs : extern list;
+    tests   : test list;
   }
 end
 
@@ -375,13 +381,14 @@ type env = {
 }
 
 let split_program (prog : program)
-  : type_decl list * record_decl list * func list * extern_decl list =
-  let rec loop ts rs fs es = function
-    | []                  -> (List.rev ts, List.rev rs, List.rev fs, List.rev es)
-    | TopType t   :: rest -> loop (t :: ts) rs fs es rest
-    | TopRecord r :: rest -> loop ts (r :: rs) fs es rest
-    | TopFunc f   :: rest -> loop ts rs (f :: fs) es rest
-    | TopExtern e :: rest -> loop ts rs fs (e :: es) rest
+  : type_decl list * record_decl list * func list * extern_decl list * test_decl list =
+  let rec loop ts rs fs es ks = function
+    | []                  -> (List.rev ts, List.rev rs, List.rev fs, List.rev es, List.rev ks)
+    | TopType t   :: rest -> loop (t :: ts) rs fs es ks rest
+    | TopRecord r :: rest -> loop ts (r :: rs) fs es ks rest
+    | TopFunc f   :: rest -> loop ts rs (f :: fs) es ks rest
+    | TopExtern e :: rest -> loop ts rs fs (e :: es) ks rest
+    | TopTest t   :: rest -> loop ts rs fs es (t :: ks) rest
     | TopUse _    :: _    ->
         failwith "check: TopUse left in program — \
                   the resolver should have eliminated all `use` decls"
@@ -389,7 +396,7 @@ let split_program (prog : program)
         failwith "check: TopAlias left in program — \
                   the resolver should have inlined all `type` aliases"
   in
-  loop [] [] [] [] prog
+  loop [] [] [] [] [] prog
 
 (* ---------- type validation ---------- *)
 
@@ -2755,7 +2762,7 @@ let builtin_orto_nop_decl : extern_decl = {
 let check (prog : program) : T.program =
   meta_counter := 0;
   drop_name_counter := 0;
-  let (types, records, funcs, externs) = split_program prog in
+  let (types, records, funcs, externs, tests) = split_program prog in
   (* Reject any user attempt to redeclare reserved built-in names. *)
   List.iter (fun (td : type_decl) ->
     if td.type_name = "Option" || td.type_name = "Ref"
@@ -2812,6 +2819,9 @@ let check (prog : program) : T.program =
   let resolved_types   = List.map snd env.types in
   let resolved_records = List.map snd env.records in
   (match List.find_opt (fun (f : T.func) -> f.name = "main") typed_funcs with
+   | None when tests <> [] ->
+       ()  (* test-only programs don't need main; driver --test
+              generates a runner main *)
    | None ->
        raise (Type_error "program must define `fn main() -> int`")
    | Some f ->
@@ -2825,7 +2835,26 @@ let check (prog : program) : T.program =
      get lowered into a Frame + step + sync wrapper just like main
      and are reachable via `spawn` (or a direct sync call, which
      drains the dispatcher locally). *)
+  (* Type-check each test body. Tests must return int — 0 = pass,
+     non-zero = fail with that code as detail. *)
+  let typed_tests =
+    List.map (fun (td : test_decl) ->
+      loop_depth := 0;
+      current_return_ty := Some TyInt;
+      let (tbody, tbody_ty) = infer env [] [] td.test_body in
+      current_return_ty := None;
+      (try unify TyInt tbody_ty
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "test %S body must return int (0 = pass, !=0 = fail), got %s"
+              td.test_name (show_ty (zonk tbody_ty)))));
+      let tbody = zonk_expr tbody in
+      let (tbody, _) = check_moves_expr env SM.empty true tbody in
+      { T.name = td.test_name; T.body = tbody }) tests
+  in
   { T.types   = resolved_types;
     T.records = resolved_records;
     T.funcs   = typed_funcs;
-    T.externs = typed_externs }
+    T.externs = typed_externs;
+    T.tests   = typed_tests }

@@ -1129,8 +1129,18 @@ let parse (toks : token list) : program =
     | TExtern ->
         let e = parse_extern st in
         loop (TopExtern e :: acc)
+    | TTest ->
+        advance st;
+        let name = match eat st with
+          | TStringLit s -> s
+          | t -> raise (Parse_error
+            (Printf.sprintf "expected string literal after `test`, got %s"
+               (Token.show t)))
+        in
+        let body = parse_block st in
+        loop (TopTest { test_name = name; test_body = body } :: acc)
     | t -> raise (Parse_error
-      (Printf.sprintf "expected `use`, `fn`, `struct`, `enum`, `linear`, `type`, or `extern` at top level, got %s"
+      (Printf.sprintf "expected `use`, `fn`, `struct`, `enum`, `linear`, `type`, `extern`, or `test` at top level, got %s"
          (Token.show t)))
   in
   loop []
