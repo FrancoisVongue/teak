@@ -23,6 +23,7 @@ and ty =
   | TyApp  of string * ty list   (* e.g. Option[int], Shape (= TyApp("Shape", [])) *)
   | TyFun  of ty list * ty       (* fn(args) -> ret *)
   | TyPtr  of ty                 (* *T — raw C pointer, escape hatch for FFI *)
+  | TyTuple of ty list           (* (T1, T2, ..., Tn) for n >= 2 — anonymous product *)
   | TyMeta of meta               (* unification variable, only inside the checker *)
 
 type pat =
@@ -92,6 +93,10 @@ type expr =
   | ESpawn  of expr                       (* spawn f(args) — detached or joinable task *)
   | EYield                                (* yield — voluntary scheduling point *)
   | EForStream of string * expr * expr    (* for x in <stream> { body } — multishot loop *)
+  | ETuple    of expr list                (* (e1, e2, ..., en) for n >= 2 *)
+  | ETupleIdx of expr * int               (* t.0, t.1 — bounds-checked at type-check time *)
+  | ELetTuple of string list * expr * expr
+                                          (* let (x, y, z) = expr; body — destructuring let *)
 
 and record_init_elem =
   | RAssign of string * expr   (* field: value *)
@@ -180,6 +185,8 @@ let rec show_ty = function
         (String.concat ", " (List.map show_ty args))
         (show_ty ret)
   | TyPtr t -> "*" ^ show_ty t
+  | TyTuple ts ->
+      Printf.sprintf "(%s)" (String.concat ", " (List.map show_ty ts))
   | TyMeta { resolved = Some t; _ } -> show_ty t
   | TyMeta { id; resolved = None } -> Printf.sprintf "?%d" id
 
@@ -299,3 +306,10 @@ let rec show_expr = function
   | EYield -> "yield"
   | EForStream (x, s, b) ->
       Printf.sprintf "for %s in %s { %s }" x (show_expr s) (show_expr b)
+  | ETuple es ->
+      Printf.sprintf "(%s)" (String.concat ", " (List.map show_expr es))
+  | ETupleIdx (e, i) ->
+      Printf.sprintf "%s.%d" (show_expr e) i
+  | ELetTuple (vs, v, b) ->
+      Printf.sprintf "let (%s) = %s; %s"
+        (String.concat ", " vs) (show_expr v) (show_expr b)

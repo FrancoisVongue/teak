@@ -43,6 +43,37 @@ let rec parse_ty st =
   | TBoolTy       -> TyBool
   | TByteTy       -> TyApp ("byte", [])
   | TFloatTy      -> TyApp ("float", [])
+  | TLParen       ->
+      (* Tuple type: (T1, T2, ..., Tn) for n >= 2.  A single `(T)` is
+         not supported — drop the parens. *)
+      let first = parse_ty st in
+      (match peek st with
+       | TComma ->
+           advance st;
+           if peek st = TRParen then
+             raise (Parse_error
+               "1-element tuple type `(T,)` is not supported — drop the trailing comma");
+           let rec collect () =
+             let t = parse_ty st in
+             match peek st with
+             | TComma ->
+                 advance st;
+                 if peek st = TRParen then [t]
+                 else t :: collect ()
+             | TRParen -> [t]
+             | tok -> raise (Parse_error
+                 (Printf.sprintf "expected `,` or `)` in tuple type, got %s"
+                    (Token.show tok)))
+           in
+           let rest = collect () in
+           expect st TRParen;
+           TyTuple (first :: rest)
+       | TRParen ->
+           raise (Parse_error
+             "single-element tuple type `(T)` is not supported — drop the parens")
+       | t -> raise (Parse_error
+           (Printf.sprintf "expected `,` or `)` in tuple type, got %s"
+              (Token.show t))))
   | TStar         ->
       (* *T — raw C pointer. Prefix only; infix * is multiplication. *)
       let inner = parse_ty st in
@@ -281,13 +312,14 @@ and parse_postfix_chain st head =
       parse_postfix_chain st (ECall (head, args))
   | TDot ->
       advance st;
-      let field = match eat st with
-        | TIdent s -> s
-        | t -> raise (Parse_error
-          (Printf.sprintf "expected field name after '.', got %s"
-             (Token.show t)))
-      in
-      parse_postfix_chain st (EField (head, field))
+      (match eat st with
+       | TIdent s ->
+           parse_postfix_chain st (EField (head, s))
+       | TInt n when n >= 0 ->
+           parse_postfix_chain st (ETupleIdx (head, n))
+       | t -> raise (Parse_error
+         (Printf.sprintf "expected field name or tuple index after `.`, got %s"
+            (Token.show t))))
   | TLBracket ->
       advance st;
       let idx = parse_expr st in
@@ -364,9 +396,40 @@ and parse_atom_consume st =
   | TFalse      -> EBool false
   | TStringLit s -> EStringLit s
   | TLParen     ->
-      let e = parse_expr st in
-      expect st TRParen;
-      e
+      (* Three shapes:
+           ()            — disallowed (no zero-tuple syntax for now)
+           (e)           — parenthesised expression
+           (e1, e2, ...) — tuple literal, n >= 2 (trailing comma allowed)
+         A bare (e,) is rejected — singleton tuples don't add anything
+         orthogonal here, and we'd rather grow that later if we need it. *)
+      if peek st = TRParen then
+        raise (Parse_error "`()` is not a valid expression — use a value or 0 for placeholder");
+      let first = parse_expr st in
+      (match peek st with
+       | TRParen -> advance st; first
+       | TComma ->
+           advance st;
+           if peek st = TRParen then
+             raise (Parse_error
+               "1-element tuple `(e,)` is not supported — drop the trailing comma");
+           let rec collect () =
+             let e = parse_expr st in
+             match peek st with
+             | TComma ->
+                 advance st;
+                 if peek st = TRParen then [e]
+                 else e :: collect ()
+             | TRParen -> [e]
+             | t -> raise (Parse_error
+                 (Printf.sprintf "expected `,` or `)` in tuple literal, got %s"
+                    (Token.show t)))
+           in
+           let rest = collect () in
+           expect st TRParen;
+           ETuple (first :: rest)
+       | t -> raise (Parse_error
+           (Printf.sprintf "expected `)` or `,` after parenthesised expression, got %s"
+              (Token.show t))))
   | TIdent name -> EVar name
   | TCtorIdent name ->
       (match peek st with
@@ -678,6 +741,41 @@ and parse_block_body st =
   match peek st with
   | TLet ->
       advance st;
+      (* Tuple destructuring let:  `let (x, y, z) = expr;`
+         Distinguishable from `let mut ...` / `let name ...` by the
+         immediate `(` after `let`. Inside, we accept lowercase idents
+         and `_` (wildcard) — same shape as a ctor's argument pattern. *)
+      if peek st = TLParen then begin
+        advance st;
+        let rec collect () =
+          let v = match eat st with
+            | TIdent s    -> s
+            | TUnderscore -> "_"
+            | t -> raise (Parse_error
+                (Printf.sprintf "expected identifier or `_` in `let (...)`, got %s"
+                   (Token.show t)))
+          in
+          match peek st with
+          | TComma ->
+              advance st;
+              if peek st = TRParen then [v]
+              else v :: collect ()
+          | TRParen -> [v]
+          | t -> raise (Parse_error
+              (Printf.sprintf "expected `,` or `)` in `let (...)`, got %s"
+                 (Token.show t)))
+        in
+        let names = collect () in
+        expect st TRParen;
+        if List.length names < 2 then
+          raise (Parse_error
+            "`let (x) = ...` needs at least 2 names — use `let x = ...` for one");
+        expect st TEq;
+        let value = parse_expr st in
+        expect st TSemi;
+        let body = parse_block_body st in
+        ELetTuple (names, value, body)
+      end else
       let is_mut =
         if peek st = TMut then begin advance st; true end else false
       in

@@ -53,6 +53,18 @@ let task_wrappers_order : string list ref = ref []
 let stream_wrappers_seen : (string, unit) Hashtbl.t = Hashtbl.create 4
 let stream_wrappers_order : string list ref = ref []
 
+(* Tuple shapes: one C typedef per distinct mono tuple type. Keyed by
+   mangled name; carries the component type list so we can render
+   field declarations. *)
+let tuple_types_seen : (string, unit) Hashtbl.t = Hashtbl.create 4
+let tuple_types_order : (string * ty list) list ref = ref []
+
+let register_tuple (mangled : string) (ts : ty list) =
+  if not (Hashtbl.mem tuple_types_seen mangled) then begin
+    Hashtbl.add tuple_types_seen mangled ();
+    tuple_types_order := (mangled, ts) :: !tuple_types_order
+  end
+
 let register_task_wrapper (inner_mangled : string) =
   if not (Hashtbl.mem task_wrappers_seen inner_mangled) then begin
     Hashtbl.add task_wrappers_seen inner_mangled ();
@@ -186,6 +198,9 @@ let rec collect_ty (t : ty) : unit =
   | TyApp (_, []) -> ()
   | TyApp (n, _) ->
       failwith (Printf.sprintf "emit collect_ty: %S still has args" n)
+  | TyTuple ts ->
+      List.iter collect_ty ts;
+      register_tuple (Mono.mangle_ty t) ts
   | TyFun (args, ret) ->
       List.iter collect_ty args;
       collect_ty ret;
@@ -268,6 +283,15 @@ let rec collect_expr (e : Check.T.expr) : unit =
   | Check.T.TEYield -> ()
   | Check.T.TEForStream (_, et, s, b) ->
       collect_ty et; collect_expr s; collect_expr b
+  | Check.T.TETuple (es, t) ->
+      List.iter collect_expr es; collect_ty t
+  | Check.T.TETupleIdx (e, _, t) ->
+      collect_expr e; collect_ty t
+  | Check.T.TELetTuple (_, vt, v, b, bt, _) ->
+      collect_ty vt; collect_expr v; collect_expr b; collect_ty bt
+  | Check.T.TEAwaitAll (bs, t, ptys) ->
+      List.iter collect_expr bs; collect_ty t;
+      List.iter collect_ty ptys
 
 let collect_program (prog : Check.T.program) : unit =
   Hashtbl.clear fn_types_seen;
@@ -278,6 +302,8 @@ let collect_program (prog : Check.T.program) : unit =
   task_wrappers_order := [];
   Hashtbl.clear stream_wrappers_seen;
   stream_wrappers_order := [];
+  Hashtbl.clear tuple_types_seen;
+  tuple_types_order := [];
   Hashtbl.clear string_pool;
   string_pool_order := [];
   string_pool_size := 0;
@@ -320,6 +346,7 @@ let rec c_type (t : ty) : string =
   | TyApp (n, []) -> n
   | TyFun _ -> Mono.mangle_ty t
   | TyPtr inner -> c_type inner ^ "*"
+  | TyTuple _ -> Mono.mangle_ty t
   | TyApp (n, _) ->
       failwith (Printf.sprintf "emit: %S still has type args" n)
   | TyVar n ->
@@ -367,6 +394,63 @@ let emit_task_forwards () : string list =
       !stream_wrappers_order
   in
   task_fwd @ stream_fwd
+
+(* One typedef per distinct tuple shape. Tuples are anonymous structural
+   products — `(int, bool, byte)` mangles to `Tuple_int_bool_byte` and
+   expands to a C struct with fields f0, f1, f2.  Order matters for C
+   only when one tuple type appears as a field type of another; we emit
+   in reverse-insertion order (deepest child first), same trick as the
+   array typedefs. *)
+let emit_tuple_forwards () : string list =
+  List.rev_map (fun (mangled, ts) ->
+    let fields =
+      String.concat " "
+        (List.mapi (fun i ty ->
+          Printf.sprintf "%s f%d;" (c_type ty) i) ts)
+    in
+    Printf.sprintf "typedef struct { %s } %s;" fields mangled)
+    !tuple_types_order
+
+(* drop_<TupleX> for every tuple shape that contains a linear component.
+   Walks the tuple's components and drops each linear one in turn. *)
+let emit_tuple_drop_forwards () : string list =
+  List.rev_map (fun (mangled, ts) ->
+    if List.exists Check.is_linear_ty ts then
+      Some (Printf.sprintf "static void drop_%s(%s t);" mangled mangled)
+    else None)
+    !tuple_types_order
+  |> List.filter_map (fun x -> x)
+
+let emit_tuple_drop_defs () : string list =
+  List.rev_map (fun (mangled, ts) ->
+    if not (List.exists Check.is_linear_ty ts) then None
+    else
+      let drops =
+        List.mapi (fun i ty ->
+          if Check.is_linear_ty ty then
+            Some (Printf.sprintf "    %s"
+                    (let _ = ty in
+                     let fn_call = match ty with
+                       | TyApp ("Array", [inner]) ->
+                           Printf.sprintf "drop_%s(t.f%d);" (mangle_array_name inner) i
+                       | TyApp ("Task", [inner]) ->
+                           Printf.sprintf "drop_Task_%s(t.f%d);" (Mono.mangle_ty inner) i
+                       | TyApp ("Stream", [inner]) ->
+                           Printf.sprintf "drop_Stream_%s(t.f%d);" (Mono.mangle_ty inner) i
+                       | TyTuple _ ->
+                           Printf.sprintf "drop_%s(t.f%d);" (Mono.mangle_ty ty) i
+                       | TyApp (n, _) ->
+                           Printf.sprintf "%s(t.f%d);" (Check.drop_fn_name_for n) i
+                       | _ -> ""
+                     in fn_call))
+          else None) ts
+        |> List.filter_map (fun x -> x)
+      in
+      Some (Printf.sprintf
+        "static void drop_%s(%s t) {\n%s\n}"
+        mangled mangled (String.concat "\n" drops)))
+    !tuple_types_order
+  |> List.filter_map (fun x -> x)
 
 (* drop_Task_<T> for every Task[T] instantiation. Dropping a held
    Task without an `await` turns the joinable task into a detached
@@ -431,6 +515,9 @@ let drop_call_stmt (var_name : string) (t : ty) : string =
       Printf.sprintf "%s(%s);" fn var_name
   | TyApp (n, _) ->
       let fn = Check.drop_fn_name_for n in
+      Printf.sprintf "%s(%s);" fn var_name
+  | TyTuple _ ->
+      let fn = "drop_" ^ Mono.mangle_ty t in
       Printf.sprintf "%s(%s);" fn var_name
   | _ ->
       failwith
@@ -598,6 +685,21 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
           let x' = fresh x in
           let env' = (x, x') :: env in
           TEForStream (x', et, s', rn env' b)
+    | TETuple (es, t) -> TETuple (List.map (rn env) es, t)
+    | TETupleIdx (e, i, t) -> TETupleIdx (rn env e, i, t)
+    | TELetTuple (names, vt, v, b, bt, ads) ->
+        let v' = rn env v in
+        let renames =
+          List.map (fun n -> if n = "_" then n else fresh n) names
+        in
+        let env' =
+          List.fold_left2 (fun acc orig fresh_name ->
+            if orig = "_" then acc else (orig, fresh_name) :: acc)
+            env names renames
+        in
+        TELetTuple (renames, vt, v', rn env' b, bt, ads)
+    | TEAwaitAll (bs, t, ptys) ->
+        TEAwaitAll (List.map (rn env) bs, t, ptys)
   in
   let initial_env = List.map (fun (p, _) -> (p, p)) f.params in
   { f with body = rn initial_env f.body }
@@ -636,6 +738,8 @@ let topo_sort_structs
     | TyApp _ -> acc
     | TyFun _ -> acc   (* fn pointers don't transmit by-value deps *)
     | TyPtr _ -> acc   (* raw pointers don't transmit by-value deps either *)
+    | TyTuple _ -> acc (* tuples are structural; topo sort treats them
+                          as transparent — they will be typedef'd later. *)
   in
   let deps_of name =
     match Hashtbl.find all_names name with
@@ -749,6 +853,10 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TESpawn (_, t) -> t
   | Check.T.TEYield -> TyInt
   | Check.T.TEForStream _ -> TyInt
+  | Check.T.TETuple (_, t) -> t
+  | Check.T.TETupleIdx (_, _, t) -> t
+  | Check.T.TELetTuple (_, _, _, _, t, _) -> t
+  | Check.T.TEAwaitAll (_, t, _) -> t
 
 (* Release a Region's buffer (if it's heap-allocated), bump the
    generation, and push the slot back onto the free list. Stack
@@ -1545,6 +1653,78 @@ let rec emit_expr
                 compiles inside an async function — it requires the \
                 state-machine lowering."
 
+  | Check.T.TETuple (es, result_ty) ->
+      let elem_codes = List.map (emit_expr ctor_map) es in
+      let stmts = List.concat_map (fun c -> c.stmts) elem_codes in
+      let inits = String.concat ", "
+        (List.mapi (fun i c ->
+          Printf.sprintf ".f%d = %s" i c.value) elem_codes)
+      in
+      let value =
+        Printf.sprintf "((%s){ %s })" (c_type result_ty) inits
+      in
+      { stmts; value }
+
+  | Check.T.TETupleIdx (sub, i, _) ->
+      let cs = emit_expr ctor_map sub in
+      let v = match sub with
+        | Check.T.TEVar _ | Check.T.TEFnRef _ ->
+            Printf.sprintf "%s.f%d" cs.value i
+        | _ ->
+            Printf.sprintf "(%s).f%d" cs.value i
+      in
+      { stmts = cs.stmts; value = v }
+
+  | Check.T.TELetTuple (names, vt, value_e, body, _body_ty, auto_drops) ->
+      let cv = emit_expr ctor_map value_e in
+      let cb = emit_expr ctor_map body in
+      let tmp = fresh "_lt" in
+      let comp_tys = match vt with
+        | TyTuple ts -> ts
+        | _ -> failwith "emit TELetTuple: value not TyTuple"
+      in
+      let tmp_decl =
+        Printf.sprintf "%s %s = %s;" (c_type vt) tmp cv.value
+      in
+      let binder_decls =
+        List.mapi (fun i (n, t) ->
+          if n = "_" then
+            Printf.sprintf "(void)%s.f%d;" tmp i
+          else
+            Printf.sprintf "%s %s = %s.f%d;" (c_type t) n tmp i)
+          (List.combine names comp_tys)
+      in
+      (* If any binder has auto_drop=true, after body finishes we run
+         drops for the linear components. Materialise body result first. *)
+      let needs_drop = List.exists (fun b -> b) auto_drops in
+      if needs_drop then
+        let body_ty = ty_of_expr body in
+        let res = fresh "_lt_res" in
+        let res_decl =
+          Printf.sprintf "%s %s = %s;" (c_type body_ty) res cb.value
+        in
+        let drops =
+          List.filter_map (fun ((n, t), ad) ->
+            if ad && n <> "_" then Some (drop_call_stmt n t)
+            else None)
+            (List.combine (List.combine names comp_tys) auto_drops)
+        in
+        let stmts =
+          cv.stmts @ [tmp_decl] @ binder_decls @ cb.stmts
+          @ [res_decl] @ drops
+        in
+        { stmts; value = res }
+      else
+        let stmts =
+          cv.stmts @ [tmp_decl] @ binder_decls @ cb.stmts
+        in
+        { stmts; value = cb.value }
+
+  | Check.T.TEAwaitAll _ ->
+      failwith "emit TEAwaitAll: `await all { ... }` only compiles \
+                inside an async function — it requires the state-machine \
+                lowering."
+
 (* Shared setup for a[i] and a[i] := v. Returns the array/index codes,
    fresh names, the array's C type, the abort-checks, and the C
    expression for the slot at index. *)
@@ -1706,6 +1886,16 @@ let async_collect_locals (body : Check.T.expr) : (string * ty) list =
     | TEAwait (e, _, _) -> go e
     | TESpawn (e, _) -> go e
     | TEForStream (x, t, s, b) -> add x t; go s; go b
+    | TETuple (es, _) -> List.iter go es
+    | TETupleIdx (e, _, _) -> go e
+    | TELetTuple (ns, vt, v, b, _, _) ->
+        let comp_tys = match vt with
+          | TyTuple ts -> ts
+          | _ -> failwith "async_collect_locals TELetTuple: vt not TyTuple"
+        in
+        List.iter2 add ns comp_tys;
+        go v; go b
+    | TEAwaitAll (bs, _, _) -> List.iter go bs
   in
   go body;
   List.rev !acc
@@ -1768,6 +1958,12 @@ let async_rewrite_to_frame
     | TEAwait (e, t, p) -> TEAwait (go e, t, p)
     | TESpawn (e, t) -> TESpawn (go e, t)
     | TEForStream (x, et, s, b) -> TEForStream (x, et, go s, go b)
+    | TETuple (es, t) -> TETuple (List.map go es, t)
+    | TETupleIdx (e, i, t) -> TETupleIdx (go e, i, t)
+    | TELetTuple (ns, vt, v, b, bt, ads) ->
+        TELetTuple (ns, vt, go v, go b, bt, ads)
+    | TEAwaitAll (bs, t, ptys) ->
+        TEAwaitAll (List.map go bs, t, ptys)
   in go e
 
 (* Does the expression contain a reachable suspension point? Same
@@ -1832,6 +2028,203 @@ let rec emit_has_suspension (e : Check.T.expr) : bool =
   | TEReturn (v, _) -> emit_has_suspension v
   | TETryAt (a, i, _) -> emit_has_suspension a || emit_has_suspension i
   | TEDrop (e, _) -> emit_has_suspension e
+  | TETuple (es, _) -> List.exists emit_has_suspension es
+  | TETupleIdx (e, _, _) -> emit_has_suspension e
+  | TELetTuple (_, _, v, b, _, _) ->
+      emit_has_suspension v || emit_has_suspension b
+  | TEAwaitAll _ -> true
+
+(* Synthetic frame locals required by `await all { ... }` lowerings.
+   Reset per function; the walker reads it to know what `fr->...` to
+   write each kick's slot/gen into, and `async_collect_locals` reads
+   it to add the fields to the frame struct. *)
+let await_all_synth_locals : (string * ty) list ref = ref []
+let await_all_index : int ref = ref 0
+let await_all_walk_index : int ref = ref 0
+let dyn_await_index : int ref = ref 0
+let dyn_await_walk_index : int ref = ref 0
+
+(* Pre-pass: walks the body, replaces TEAwaitAll(bs, t, ptys) with a
+   shape that still carries the same children but is tagged with a
+   unique index used by emit to name its synthetic frame locals.  We
+   reuse TEAwaitAll itself but invent fresh ordered keys via the
+   `await_all_index` counter and add per-branch ints to
+   await_all_synth_locals. *)
+let allocate_await_all_locals_in_body (body : Check.T.expr) : Check.T.expr =
+  let open Check.T in
+  let rec go e =
+    match e with
+    | TEInt _ | TEFloat _ | TEBool _ | TEStringLit _
+    | TEVar _ | TEFnRef _ | TEBreak | TEContinue | TEYield
+    | TENullPtr _ -> e
+    | TECall (f, args, t) -> TECall (go f, List.map go args, t)
+    | TEBinop (op, a, b, t) -> TEBinop (op, go a, go b, t)
+    | TEUnop (op, a, t) -> TEUnop (op, go a, t)
+    | TECtor (c, ts, args, t) -> TECtor (c, ts, List.map go args, t)
+    | TERecord (n, ts, fields, t) ->
+        TERecord (n, ts, List.map (fun (fn, e) -> (fn, go e)) fields, t)
+    | TEField (e, fn, t) -> TEField (go e, fn, t)
+    | TEIf (c, th, el, t) -> TEIf (go c, go th, go el, t)
+    | TELet (x, vt, v, b, bt, ad) -> TELet (x, vt, go v, go b, bt, ad)
+    | TEMatch (s, st, arms, rt) ->
+        TEMatch (go s, st,
+          List.map (fun (p, g, b) -> (p, Option.map go g, go b)) arms, rt)
+    | TEArray (re, n, v, t) -> TEArray (go re, go n, go v, t)
+    | TEArrayLit (re, es, t) -> TEArrayLit (go re, List.map go es, t)
+    | TERegion (n, t) -> TERegion (go n, t)
+    | TEStackRegion (n, t) -> TEStackRegion (go n, t)
+    | TEAlignedRegion (n, a, t) -> TEAlignedRegion (go n, go a, t)
+    | TEIndex (a, i, t) -> TEIndex (go a, go i, t)
+    | TEAssignIdx (a, i, v, t) -> TEAssignIdx (go a, go i, go v, t)
+    | TELen (e, t) -> TELen (go e, t)
+    | TESlice (a, lo, hi, t) -> TESlice (go a, go lo, go hi, t)
+    | TEToInt e -> TEToInt (go e)
+    | TEToByte e -> TEToByte (go e)
+    | TEToFloat e -> TEToFloat (go e)
+    | TEToIntFromFloat e -> TEToIntFromFloat (go e)
+    | TECAlloc (et, n, t) -> TECAlloc (et, go n, t)
+    | TECFree e -> TECFree (go e)
+    | TEIsNull e -> TEIsNull (go e)
+    | TEArrayData (a, t) -> TEArrayData (go a, t)
+    | TEDeref (p, t) -> TEDeref (go p, t)
+    | TEAssign (x, v, t) -> TEAssign (x, go v, t)
+    | TEWhile (c, b) -> TEWhile (go c, go b)
+    | TEReturn (v, t) -> TEReturn (go v, t)
+    | TETryAt (a, i, t) -> TETryAt (go a, go i, t)
+    | TEDrop (e, t) -> TEDrop (go e, t)
+    | TEAwait (e, t, p) ->
+        (* Dynamic await-all: result type is Array[Result[T]] and the
+           inner expression has type Array[Task[T]].  Pre-allocate the
+           loop counters and the result-array handle as frame locals so
+           they survive across CQE-driven suspensions inside the loop. *)
+        (match t with
+         | TyApp ("Array", [_]) ->
+             let k = !dyn_await_index in
+             incr dyn_await_index;
+             (* After mono, p is the mono'd inner T; the coll's type
+                in the frame is `Array_Task_<pty>`. *)
+             let coll_mangled = "Array_Task_" ^ Mono.mangle_ty p in
+             let res_ty = t in
+             await_all_synth_locals :=
+               (Printf.sprintf "_dawn%d_arr" k, TyApp (coll_mangled, [])) ::
+               (Printf.sprintf "_dawn%d_res" k, res_ty) ::
+               (Printf.sprintf "_dawn%d_i"   k, TyInt) ::
+               (Printf.sprintf "_dawn%d_n"   k, TyInt) ::
+               !await_all_synth_locals
+         | _ -> ());
+        TEAwait (go e, t, p)
+    | TESpawn (e, t) -> TESpawn (go e, t)
+    | TEForStream (x, et, s, b) -> TEForStream (x, et, go s, go b)
+    | TETuple (es, t) -> TETuple (List.map go es, t)
+    | TETupleIdx (e, i, t) -> TETupleIdx (go e, i, t)
+    | TELetTuple (ns, vt, v, b, bt, ads) ->
+        TELetTuple (ns, vt, go v, go b, bt, ads)
+    | TEAwaitAll (bs, t, ptys) ->
+        let k = !await_all_index in
+        incr await_all_index;
+        let n = List.length bs in
+        for i = 0 to n - 1 do
+          await_all_synth_locals :=
+            (Printf.sprintf "_aw%d_slot_%d" k i, TyInt) ::
+            (Printf.sprintf "_aw%d_gen_%d"  k i, TyInt) ::
+            !await_all_synth_locals
+        done;
+        (* The Result[T] type is built-in but after mono its name is
+           the mangled `Result_<pty>` with no args.  Synth locals here
+           must match that post-mono shape. *)
+        List.iteri (fun i pty ->
+          let mangled = "Result_" ^ Mono.mangle_ty pty in
+          await_all_synth_locals :=
+            (Printf.sprintf "_aw%d_r_%d" k i, TyApp (mangled, []))
+            :: !await_all_synth_locals)
+          ptys;
+        TEAwaitAll (List.map go bs, t, ptys)
+  in
+  go body
+
+(* Desugar TELetTuple into a chain of TELet bindings.  A fresh tuple-
+   typed temporary holds the value; each binder reads tmp.fN.  This
+   reuses the existing TELet codepath (auto_drop, async-splitting,
+   move-check semantics) so we don't have to duplicate state-machine
+   logic for tuple destructuring. *)
+let letlet_counter = ref 0
+let fresh_letlet () =
+  incr letlet_counter;
+  Printf.sprintf "_lt_tmp_%d" !letlet_counter
+
+let rec desugar_let_tuples (e : Check.T.expr) : Check.T.expr =
+  let open Check.T in
+  let r = desugar_let_tuples in
+  match e with
+  | TEInt _ | TEFloat _ | TEBool _ | TEStringLit _
+  | TEVar _ | TEFnRef _ | TEBreak | TEContinue | TEYield
+  | TENullPtr _ -> e
+  | TECall (f, args, t) -> TECall (r f, List.map r args, t)
+  | TEBinop (op, a, b, t) -> TEBinop (op, r a, r b, t)
+  | TEUnop (op, a, t) -> TEUnop (op, r a, t)
+  | TECtor (c, ts, args, t) -> TECtor (c, ts, List.map r args, t)
+  | TERecord (n, ts, fields, t) ->
+      TERecord (n, ts, List.map (fun (fn, e) -> (fn, r e)) fields, t)
+  | TEField (e, fn, t) -> TEField (r e, fn, t)
+  | TEIf (c, th, el, t) -> TEIf (r c, r th, r el, t)
+  | TELet (x, vt, v, b, bt, ad) -> TELet (x, vt, r v, r b, bt, ad)
+  | TEMatch (s, st, arms, rt) ->
+      TEMatch (r s, st,
+        List.map (fun (p, g, b) -> (p, Option.map r g, r b)) arms, rt)
+  | TEArray (re, n, v, t) -> TEArray (r re, r n, r v, t)
+  | TEArrayLit (re, es, t) -> TEArrayLit (r re, List.map r es, t)
+  | TERegion (n, t) -> TERegion (r n, t)
+  | TEStackRegion (n, t) -> TEStackRegion (r n, t)
+  | TEAlignedRegion (n, a, t) -> TEAlignedRegion (r n, r a, t)
+  | TEIndex (a, i, t) -> TEIndex (r a, r i, t)
+  | TEAssignIdx (a, i, v, t) -> TEAssignIdx (r a, r i, r v, t)
+  | TELen (e, t) -> TELen (r e, t)
+  | TESlice (a, lo, hi, t) -> TESlice (r a, r lo, r hi, t)
+  | TEToInt e -> TEToInt (r e)
+  | TEToByte e -> TEToByte (r e)
+  | TEToFloat e -> TEToFloat (r e)
+  | TEToIntFromFloat e -> TEToIntFromFloat (r e)
+  | TECAlloc (et, n, t) -> TECAlloc (et, r n, t)
+  | TECFree e -> TECFree (r e)
+  | TEIsNull e -> TEIsNull (r e)
+  | TEArrayData (a, t) -> TEArrayData (r a, t)
+  | TEDeref (p, t) -> TEDeref (r p, t)
+  | TEAssign (x, v, t) -> TEAssign (x, r v, t)
+  | TEWhile (c, b) -> TEWhile (r c, r b)
+  | TEReturn (v, t) -> TEReturn (r v, t)
+  | TETryAt (a, i, t) -> TETryAt (r a, r i, t)
+  | TEDrop (e, t) -> TEDrop (r e, t)
+  | TEAwait (e, t, p) -> TEAwait (r e, t, p)
+  | TESpawn (e, t) -> TESpawn (r e, t)
+  | TEForStream (x, et, s, b) -> TEForStream (x, et, r s, r b)
+  | TETuple (es, t) -> TETuple (List.map r es, t)
+  | TETupleIdx (e, i, t) -> TETupleIdx (r e, i, t)
+  | TEAwaitAll (bs, t, ptys) -> TEAwaitAll (List.map r bs, t, ptys)
+  | TELetTuple (names, vt, v, b, bt, ads) ->
+      let v' = r v in
+      let b' = r b in
+      let tmp = fresh_letlet () in
+      let comp_tys = match vt with
+        | TyTuple ts -> ts
+        | _ -> failwith "desugar TELetTuple: vt not TyTuple"
+      in
+      (* Build: let tmp = v; let x = tmp.0; let y = tmp.1; ...; body
+         For each binder, auto_drop carries through to its TELet. *)
+      let inner =
+        List.fold_right (fun ((i, (n, t)), ad) acc ->
+          let idx_e = TETupleIdx (TEVar (tmp, vt), i, t) in
+          TELet (n, t, idx_e, acc, bt, ad))
+          (List.combine
+             (List.mapi (fun i p -> (i, p))
+                (List.combine names comp_tys))
+             ads)
+          b'
+      in
+      (* Underscore binders still need to consume their tuple slot —
+         use auto_drop semantics naturally by binding to a fresh
+         _drop_N name (check.ml already did this when allocating
+         names_actual).  Here `names` already reflects that. *)
+      TELet (tmp, vt, v', inner, bt, false)
 
 (* Walk the function body and split into state segments. Each
    suspension point closes the current segment with a real
@@ -2109,6 +2502,95 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
         start_segment n;
         (* yield's value is 0 — write it to dst, then we're done. *)
         store_at dst "0"
+    | TEAwait (inner, result_ty, pty)
+      when (match result_ty with
+            | TyApp ("Array", [_]) -> true
+            | _ -> false) ->
+        (* Dynamic await-all on Array[Task[T]] -> Array[Result[T]].
+           The pre-pass allocated frame locals named `_dawn{k}_*`; we
+           re-use the same k here via dyn_await_walk_index. *)
+        let k = !dyn_await_walk_index in
+        incr dyn_await_walk_index;
+        let arr_n = Printf.sprintf "_dawn%d_arr" k in
+        let res_n = Printf.sprintf "_dawn%d_res" k in
+        let i_n   = Printf.sprintf "_dawn%d_i"   k in
+        let n_n   = Printf.sprintf "_dawn%d_n"   k in
+        let cv = emit_expr ctor_map inner in
+        emit_into cv.stmts;
+        let result_inner_c = "Result_" ^ Mono.mangle_ty pty in
+        let res_arr_c = c_type result_ty in
+        let task_c = "Task_" ^ Mono.mangle_ty pty in
+        emit_into [
+          Printf.sprintf "fr->%s = %s;" arr_n cv.value;
+          Printf.sprintf "if (ORTO_REGIONS[fr->%s.slot].gen != fr->%s.expected_gen) abort();"
+            arr_n arr_n;
+          Printf.sprintf "fr->%s = fr->%s.len;" n_n arr_n;
+          Printf.sprintf "if (ORTO_REGIONS[fr->%s.slot].used + (size_t)fr->%s * sizeof(%s) > ORTO_REGIONS[fr->%s.slot].buffer_size) abort();"
+            arr_n n_n result_inner_c arr_n;
+          Printf.sprintf "{ int _off = (int)ORTO_REGIONS[fr->%s.slot].used;" arr_n;
+          Printf.sprintf "  ORTO_REGIONS[fr->%s.slot].used += (size_t)fr->%s * sizeof(%s);"
+            arr_n n_n result_inner_c;
+          Printf.sprintf "  fr->%s = ((%s){ .slot = fr->%s.slot, .offset = _off, .len = fr->%s, .expected_gen = fr->%s.expected_gen }); }"
+            res_n res_arr_c arr_n n_n arr_n;
+          Printf.sprintf "fr->%s = 0;" i_n;
+        ];
+        let head_state = alloc_state () in
+        let body_state = alloc_state () in
+        let exit_state = alloc_state () in
+        finish_segment (goto_state head_state);
+        start_segment head_state;
+        (* Loop head: if i >= n, exit. Else fetch task at i and either
+           deliver inline or hook waiter + suspend. *)
+        emit_into [
+          Printf.sprintf "if (fr->%s >= fr->%s) { fr->state = %d; continue; }"
+            i_n n_n exit_state;
+          Printf.sprintf "%s _t = ((%s*)(ORTO_REGIONS[fr->%s.slot].buffer + fr->%s.offset))[fr->%s];"
+            task_c task_c arr_n arr_n i_n;
+          "if (ORTO_SLOTS[_t.slot].gen != _t.gen) abort();";
+          "if (ORTO_SLOTS[_t.slot].status == ORTO_SLOT_DONE_NO_WAITER) {";
+          "    fr->last_res = ORTO_SLOTS[_t.slot].result;";
+          "    orto_slot_free(_t.slot);";
+          Printf.sprintf "    fr->state = %d; continue;" body_state;
+          "}";
+          "ORTO_SLOTS[_t.slot].waiter = (OrtoFrameHeader*)fr;";
+          Printf.sprintf "ORTO_SLOTS[_t.slot].waiter_state = %d;" body_state;
+        ];
+        finish_segment [
+          Printf.sprintf "fr->state = %d;" body_state;
+          "return 1;";
+        ];
+        start_segment body_state;
+        (* Body: wrap last_res into Result[T] and write into res[i],
+           then bump i and loop back to head. *)
+        let tmp = fresh "_dyn" in
+        let ok_inner_stmts, ok_inner_value =
+          if scalar_like pty then
+            ([], Printf.sprintf "(%s)fr->last_res" (c_type pty))
+          else
+            let blob = fresh "_okv" in
+            let c_pty = c_type pty in
+            ([ Printf.sprintf "%s %s; memcpy(&%s, &fr->last_res, sizeof(%s));"
+                 c_pty blob blob c_pty ],
+             blob)
+        in
+        emit_into (
+          [ Printf.sprintf "%s %s;" result_inner_c tmp;
+            "if (fr->last_res >= 0) {" ]
+          @ List.map (fun s -> "    " ^ s) ok_inner_stmts
+          @ [ Printf.sprintf "    %s = ((%s){ .tag = 0, .as = { .Ok = { .f0 = %s } } });"
+                tmp result_inner_c ok_inner_value;
+              "} else {";
+              Printf.sprintf "    %s = ((%s){ .tag = 1, .as = { .Err = { .f0 = (int)(-fr->last_res) } } });"
+                tmp result_inner_c;
+              "}";
+              Printf.sprintf "((%s*)(ORTO_REGIONS[fr->%s.slot].buffer + fr->%s.offset))[fr->%s] = %s;"
+                result_inner_c res_n res_n i_n tmp;
+              Printf.sprintf "fr->%s = fr->%s + 1;" i_n i_n;
+            ]
+        );
+        finish_segment (goto_state head_state);
+        start_segment exit_state;
+        store_at dst (Printf.sprintf "fr->%s" res_n)
     | TEAwait (inner, _, pty)
       when (match match_async_extern_call inner with Some _ -> true | None -> false) ->
         let (name, args) = match match_async_extern_call inner with
@@ -2186,6 +2668,129 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
                 slot pair, but we ignore it — detached state self-frees
                 on completion. *)
              emit_into ["(void)0;"])
+    | TEAwaitAll (branches, result_ty, ptys) ->
+        (* Static await-all.  Phase 1: kick every branch concurrently;
+           store each kick's (slot, gen) into per-branch frame fields
+           so the values survive across the suspensions we'll do in
+           phase 2.  Phase 2: sequentially await each sub-slot, write
+           the wrapped Result[T] into its frame slot.  Phase 3: build
+           the result tuple from the per-branch Result fields. *)
+        let k = !await_all_walk_index in
+        incr await_all_walk_index;
+        let slot_name i = Printf.sprintf "_aw%d_slot_%d" k i in
+        let gen_name  i = Printf.sprintf "_aw%d_gen_%d"  k i in
+        let r_name    i = Printf.sprintf "_aw%d_r_%d"    k i in
+        List.iteri (fun i (br, _pty) ->
+          let slot_v = slot_name i in
+          let gen_v  = gen_name  i in
+          (match br with
+           | TECall (TEFnRef (name, _, _), args, _)
+               when is_async_extern name ->
+               let arg_codes = List.map (emit_expr ctor_map) args in
+               List.iter (fun cv -> emit_into cv.stmts) arg_codes;
+               let arg_values = List.map (fun cv -> cv.value) arg_codes in
+               let sub_fr = Printf.sprintf "_aw%d_sub_%d" k i in
+               emit_into [
+                 Printf.sprintf "fr->%s = orto_slot_alloc();" slot_v;
+                 Printf.sprintf "fr->%s = ORTO_SLOTS[fr->%s].gen;" gen_v slot_v;
+                 Printf.sprintf "OrtoFrameHeader *%s = (OrtoFrameHeader*)&ORTO_SLOTS[fr->%s].frame;"
+                   sub_fr slot_v;
+                 Printf.sprintf "%s->step = orto_passthrough_step;" sub_fr;
+                 Printf.sprintf "%s->state = 0;" sub_fr;
+                 Printf.sprintf "%s->last_res = 0;" sub_fr;
+                 Printf.sprintf "%s->return_value = 0;" sub_fr;
+                 Printf.sprintf "%s->_orto_slot = fr->%s;" sub_fr slot_v;
+                 Printf.sprintf "%s->more = 0;" sub_fr;
+                 Printf.sprintf "ORTO_SLOTS[fr->%s].status = ORTO_SLOT_RUNNING;" slot_v;
+                 Printf.sprintf "ORTO_SLOTS[fr->%s].waiter = NULL;" slot_v;
+                 Printf.sprintf "%s(%s);" name
+                   (String.concat ", " (arg_values @ [sub_fr]));
+                 "ORTO_PENDING++;";
+               ]
+           | TESpawn (TECall (TEFnRef (worker, _, _), args, _), _) ->
+               if is_async_func worker then begin
+                 let (s, g) = emit_spawn_setup worker args false in
+                 emit_into [
+                   Printf.sprintf "fr->%s = %s;" slot_v s;
+                   Printf.sprintf "fr->%s = %s;" gen_v g;
+                 ]
+               end else begin
+                 match emit_spawn_sync worker args false with
+                 | Some (s, g) ->
+                     emit_into [
+                       Printf.sprintf "fr->%s = %s;" slot_v s;
+                       Printf.sprintf "fr->%s = %s;" gen_v g;
+                     ]
+                 | None ->
+                     failwith "await all: sync joinable spawn returned no slot"
+               end
+           | _ ->
+               failwith
+                 "await all: each branch must be an `extern async` call \
+                  or `spawn worker(args)`"))
+          (List.combine branches ptys);
+        (* Single submit after all SQEs are prepared. *)
+        emit_into ["io_uring_submit(&ORTO_RING);"];
+        (* Phase 2: sequentially await each sub-slot. *)
+        List.iteri (fun i pty ->
+          let slot_v = slot_name i in
+          let gen_v  = gen_name  i in
+          let r_v    = r_name    i in
+          let n_state = alloc_state () in
+          emit_into [
+            Printf.sprintf "if (ORTO_SLOTS[fr->%s].gen != fr->%s) abort();"
+              slot_v gen_v;
+            Printf.sprintf
+              "if (ORTO_SLOTS[fr->%s].status == ORTO_SLOT_DONE_NO_WAITER) {"
+              slot_v;
+            Printf.sprintf "    fr->last_res = ORTO_SLOTS[fr->%s].result;" slot_v;
+            Printf.sprintf "    orto_slot_free(fr->%s);" slot_v;
+            Printf.sprintf "    fr->state = %d;" n_state;
+            Printf.sprintf "    continue;";
+            "}";
+            Printf.sprintf
+              "ORTO_SLOTS[fr->%s].waiter = (OrtoFrameHeader*)fr;" slot_v;
+            Printf.sprintf
+              "ORTO_SLOTS[fr->%s].waiter_state = %d;" slot_v n_state;
+          ];
+          finish_segment [
+            Printf.sprintf "fr->state = %d;" n_state;
+            "return 1;";
+          ];
+          start_segment n_state;
+          let result_c = "Result_" ^ Mono.mangle_ty pty in
+          let ok_inner_stmts, ok_inner_value =
+            if scalar_like pty then
+              ([], Printf.sprintf "(%s)fr->last_res" (c_type pty))
+            else
+              let blob = fresh "_okv" in
+              let c_pty = c_type pty in
+              ([ Printf.sprintf "%s %s; memcpy(&%s, &fr->last_res, sizeof(%s));"
+                   c_pty blob blob c_pty ],
+               blob)
+          in
+          let stmts =
+            [ "if (fr->last_res >= 0) {" ]
+            @ List.map (fun s -> "    " ^ s) ok_inner_stmts
+            @ [ Printf.sprintf "    fr->%s = ((%s){ .tag = 0, .as = { .Ok = { .f0 = %s } } });"
+                  r_v result_c ok_inner_value;
+                "} else {";
+                Printf.sprintf "    fr->%s = ((%s){ .tag = 1, .as = { .Err = { .f0 = (int)(-fr->last_res) } } });"
+                  r_v result_c;
+                "}";
+              ]
+          in
+          emit_into stmts
+        ) ptys;
+        (* Phase 3: build tuple from the per-branch Result fields. *)
+        let inits = String.concat ", "
+          (List.mapi (fun i _ ->
+            Printf.sprintf ".f%d = fr->%s" i (r_name i)) ptys)
+        in
+        let tuple_lit =
+          Printf.sprintf "((%s){ %s })" (c_type result_ty) inits
+        in
+        store_at dst tuple_lit
     | TELet (x, ty, v, b, _, _) ->
         (* Bind v, then walk b. v may suspend — walk recursively
            with destination = the binder. *)
@@ -2334,7 +2939,14 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
    if the frame lives on the caller's C stack (the sync wrapper
    path — `main` and the top of a sync->async call). *)
 let emit_async_frame_struct (f : Check.T.func) : string =
-  let locals = async_collect_locals f.body in
+  letlet_counter := 0;
+  await_all_index := 0;
+  dyn_await_index := 0;
+  await_all_synth_locals := [];
+  let desugared0 = desugar_let_tuples f.body in
+  let desugared = allocate_await_all_locals_in_body desugared0 in
+  let synth_locals = List.rev !await_all_synth_locals in
+  let locals = async_collect_locals desugared @ synth_locals in
   let params_lines =
     List.map (fun (p, t) ->
       Printf.sprintf "    %s %s;" (c_type t) p) f.params
@@ -2360,11 +2972,20 @@ let emit_async_frame_struct (f : Check.T.func) : string =
 (* Emit the step function for an async function. *)
 let emit_async_step ctor_map (f : Check.T.func) : string =
   reset_counter ();
-  let locals = async_collect_locals f.body in
+  letlet_counter := 0;
+  await_all_index := 0;
+  dyn_await_index := 0;
+  await_all_synth_locals := [];
+  let desugared0 = desugar_let_tuples f.body in
+  let desugared = allocate_await_all_locals_in_body desugared0 in
+  let synth_locals = List.rev !await_all_synth_locals in
+  let locals = async_collect_locals desugared @ synth_locals in
   let frame_set = Hashtbl.create (List.length locals + List.length f.params) in
   List.iter (fun (x, _) -> Hashtbl.add frame_set x ()) locals;
   List.iter (fun (p, _) -> Hashtbl.add frame_set p ()) f.params;
-  let body' = async_rewrite_to_frame frame_set f.body in
+  let body' = async_rewrite_to_frame frame_set desugared in
+  await_all_walk_index := 0;
+  dyn_await_walk_index := 0;
   let segments = async_split_segments ctor_map f.return_ty body' in
   let case_lines =
     List.concat_map (fun (state, lines) ->
@@ -2489,6 +3110,9 @@ let emit (prog : Check.T.program) : string =
   let rec_forwards = List.map emit_record_forward prog.records in
   let array_forwards = emit_array_forwards () in
   let task_forwards = emit_task_forwards () in
+  let tuple_forwards = emit_tuple_forwards () in
+  let tuple_drop_forwards = emit_tuple_drop_forwards () in
+  let tuple_drop_defs = emit_tuple_drop_defs () in
   let array_drop_forwards = emit_array_drop_forwards () in
   let task_drop_forwards = emit_task_drop_forwards () in
   let task_drop_defs = emit_task_drop_defs () in
@@ -2673,6 +3297,17 @@ let emit (prog : Check.T.program) : string =
            \    return 0;\n\
            }\n\
            \n\
+           /* Passthrough step for sub-slots in `await all { ... }`.\n\
+            * The dispatcher writes the CQE result into fr->last_res\n\
+            * (long long) and then calls step(fr).  We just copy it to\n\
+            * return_value and return 0 — orto_complete then delivers\n\
+            * to whoever is waiting on this slot. */\n\
+           static int orto_passthrough_step(void *frp) {\n\
+           \    OrtoFrameHeader *fr = (OrtoFrameHeader*)frp;\n\
+           \    fr->return_value = fr->last_res;\n\
+           \    return 0;\n\
+           }\n\
+           \n\
            static void orto_init_slots(void) __attribute__((constructor));\n\
            static void orto_init_slots(void) {\n\
            \    for (int i = 0; i < ORTO_SLOT_COUNT; i++) {\n\
@@ -2773,6 +3408,7 @@ let emit (prog : Check.T.program) : string =
      @ task_forwards
      @ fn_typedefs
      @ struct_defs
+     @ tuple_forwards
      @ async_prelude
      @ async_decls
      @ (if async_runtime = "" then [] else [async_runtime])
@@ -2780,10 +3416,12 @@ let emit (prog : Check.T.program) : string =
      @ decls
      @ async_decls_sync
      @ array_drop_forwards
-     @ array_drop_defs
      @ task_drop_forwards
-     @ task_drop_defs
      @ stream_drop_forwards
+     @ tuple_drop_forwards
+     @ array_drop_defs
+     @ tuple_drop_defs
+     @ task_drop_defs
      @ stream_drop_defs
      @ defs
      @ async_defs)

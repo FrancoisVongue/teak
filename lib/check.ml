@@ -109,6 +109,21 @@ module T = struct
                   (* for x in <stream> { body } — multishot drain.
                      Fields: binder, element type T (peeled off
                      Stream[T]), the stream source expression, body. *)
+    | TETuple    of expr list * ty
+                  (* (e1, e2, ...) — second field is the tuple type *)
+    | TETupleIdx of expr * int * ty
+                  (* t.i — third field is the resulting component type *)
+    | TELetTuple of string list * ty * expr * expr * ty * bool list
+                  (* let (x, y, z) = v; body — fields: binder names,
+                     tuple ty of v, value, body, body ty, per-binder
+                     auto_drop flags. *)
+    | TEAwaitAll of expr list * ty * ty list
+                  (* await all { e1, ..., en } — second field is the
+                     visible tuple type (Tuple of Result-wrapped per-branch
+                     types after Phase 7), third field is the per-branch
+                     payload types (the T inside the Task[T] each branch
+                     would have produced).  Lowered to "kick all, then
+                     sequentially await each" in emit. *)
 
   type func = {
     name        : string;
@@ -262,6 +277,10 @@ let rec is_linear_ty (t : ty) : bool =
          explicitly via `linear struct`). *)
       is_linear_ty inner
   | TyApp (n, _) -> is_linear_name n
+  | TyTuple ts ->
+      (* Induced linearity: a tuple containing any linear component is
+         itself linear — destructuring moves every component out. *)
+      List.exists is_linear_ty ts
   | _ -> false
 
 let rec zonk (t : ty) : ty =
@@ -272,6 +291,7 @@ let rec zonk (t : ty) : ty =
   | TyApp (n, args) -> TyApp (n, List.map zonk args)
   | TyFun (args, ret) -> TyFun (List.map zonk args, zonk ret)
   | TyPtr inner -> TyPtr (zonk inner)
+  | TyTuple ts -> TyTuple (List.map zonk ts)
   | TyMeta _ as t -> t
 
 let rec occurs (m : meta) (t : ty) : bool =
@@ -281,6 +301,7 @@ let rec occurs (m : meta) (t : ty) : bool =
   | TyFun (args, ret) ->
       List.exists (occurs m) args || occurs m ret
   | TyPtr inner -> occurs m inner
+  | TyTuple ts -> List.exists (occurs m) ts
   | TyMeta m' -> m.id = m'.id
 
 let rec unify (t1 : ty) (t2 : ty) : unit =
@@ -297,6 +318,8 @@ let rec unify (t1 : ty) (t2 : ty) : unit =
       List.iter2 unify a1 a2;
       unify r1 r2
   | TyPtr a, TyPtr b -> unify a b
+  | TyTuple ts1, TyTuple ts2 when List.length ts1 = List.length ts2 ->
+      List.iter2 unify ts1 ts2
   | TyMeta m1, TyMeta m2 when m1.id = m2.id -> ()
   | TyMeta m, t | t, TyMeta m ->
       if occurs m t then
@@ -321,6 +344,7 @@ let rec subst_ty (subst : (string * ty) list) (t : ty) : ty =
   | TyFun (args, ret) ->
       TyFun (List.map (subst_ty subst) args, subst_ty subst ret)
   | TyPtr inner -> TyPtr (subst_ty subst inner)
+  | TyTuple ts -> TyTuple (List.map (subst_ty subst) ts)
   | TyMeta _ -> t
 
 let make_instantiation (tparams : string list) : (string * ty) list * ty list =
@@ -373,6 +397,7 @@ let rec ty_contains_linear (t : ty) : bool =
   | TyApp (_, args) -> List.exists ty_contains_linear args
   | TyFun _ -> false
   | TyPtr _ -> false
+  | TyTuple ts -> List.exists ty_contains_linear ts
   | TyInt | TyBool | TyVar _ | TyMeta _ -> false
 
 (* When a generic is instantiated (function call, ctor application,
@@ -513,6 +538,12 @@ let rec validate_ty
              validate_ty type_env record_env in_scope ret)
   | TyPtr inner ->
       TyPtr (validate_ty type_env record_env in_scope inner)
+  | TyTuple ts ->
+      if List.length ts < 2 then
+        raise (Type_error
+          (Printf.sprintf
+             "tuple type needs at least 2 components, got %d" (List.length ts)));
+      TyTuple (List.map (validate_ty type_env record_env in_scope) ts)
 
 (* ---------- building environment ---------- *)
 
@@ -739,6 +770,7 @@ let check_no_recursive_types
         let acc = List.fold_left deps_in_ty acc args in
         deps_in_ty acc ret
     | TyPtr _ -> acc   (* pointers break by-value cycles *)
+    | TyTuple ts -> List.fold_left deps_in_ty acc ts
   in
   let direct_deps name : string list =
     match List.assoc_opt name type_env with
@@ -1799,10 +1831,116 @@ let rec infer (env : env) (tparams : string list)
   | EYield ->
       (T.TEYield, TyInt)
 
-  | EAwaitAll _ ->
-      raise (Type_error
-        "`await all { ... }` (static form) is not yet implemented — \
-         needs tuple support. See STAGE3_ASYNC.md §13.")
+  | EAwaitAll branches ->
+      (* Static await-all: every branch must be a call expression that
+         names an awaitable operation (either an `extern async fn` or
+         `spawn worker(args)` or a call to an async function). The
+         visible result is a tuple of per-branch Result[T_i]. *)
+      if List.length branches < 2 then
+        raise (Type_error
+          "`await all { ... }` requires at least 2 branches");
+      let typed_branches_and_tys =
+        List.mapi (fun i b ->
+          let is_call = match b with
+            | ECall _ -> true
+            | ESpawn (ECall _) -> true
+            | _ -> false
+          in
+          if not is_call then
+            raise (Type_error
+              (Printf.sprintf
+                 "`await all { ... }` branch #%d: each branch must be a \
+                  function call (either `f(args)`, `spawn f(args)`, or \
+                  an async-extern call)"
+                 (i + 1)));
+          let (tb, tb_ty) = infer env tparams vars b in
+          (* Each branch should produce a Task[T_i]. spawn already
+             types as Task; extern async calls type as Task; a plain
+             call to an async orto function also types as its return
+             type (int, etc.) — we wrap that case ourselves. *)
+          let elem = TyMeta (fresh_meta ()) in
+          (try unify tb_ty (TyApp ("Task", [elem]))
+           with Type_error _ ->
+             raise (Type_error
+               (Printf.sprintf
+                  "`await all { ... }` branch #%d: expected a Task-producing \
+                   call, got %s"
+                  (i + 1) (show_ty (zonk tb_ty)))));
+          (tb, elem))
+          branches
+      in
+      let typed_branches = List.map fst typed_branches_and_tys in
+      let elem_tys = List.map snd typed_branches_and_tys in
+      let result_tys = List.map (fun t -> TyApp ("Result", [t])) elem_tys in
+      let result_ty = TyTuple result_tys in
+      (T.TEAwaitAll (typed_branches, result_ty, elem_tys), result_ty)
+
+  | ETuple es ->
+      if List.length es < 2 then
+        raise (Type_error
+          "tuple literal needs at least 2 elements");
+      let typed = List.map (fun e -> infer env tparams vars e) es in
+      let result_ty = TyTuple (List.map snd typed) in
+      (T.TETuple (List.map fst typed, result_ty), result_ty)
+
+  | ETupleIdx (e, i) ->
+      let (te, te_ty) = infer env tparams vars e in
+      (match prune te_ty with
+       | TyTuple ts ->
+           if i < 0 || i >= List.length ts then
+             raise (Type_error
+               (Printf.sprintf
+                  "tuple index %d out of range for %s"
+                  i (show_ty (zonk te_ty))));
+           let comp_ty = List.nth ts i in
+           (T.TETupleIdx (te, i, comp_ty), comp_ty)
+       | _ ->
+           raise (Type_error
+             (Printf.sprintf
+                "`.%d` requires a tuple, got %s"
+                i (show_ty (zonk te_ty)))))
+
+  | ELetTuple (names, value, body) ->
+      List.iter (fun n ->
+        if n <> "_" then check_not_c_reserved "let-binding" n) names;
+      let (tv, tv_ty) = infer env tparams vars value in
+      let elem_metas =
+        List.map (fun _ -> TyMeta (fresh_meta ())) names
+      in
+      let expected = TyTuple elem_metas in
+      (try unify tv_ty expected
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "`let (...) = e`: expected a %d-tuple, got %s"
+              (List.length names) (show_ty (zonk tv_ty)))));
+      (* Each named (non-underscore) binder enters the body scope. *)
+      let binders = List.combine names elem_metas in
+      let body_vars =
+        List.fold_left (fun acc (n, t) ->
+          if n = "_" then acc else (n, (t, false)) :: acc)
+          vars binders
+      in
+      let (tb, tb_ty) = infer env tparams body_vars body in
+      (* Per-binder auto_drop: a linear component takes ownership of its
+         slot, so when the let scope ends we drop each that's still
+         live.  Underscore components are dropped immediately (well —
+         a linear component bound to `_` would silently leak; the move
+         check below allocates a fresh `_drop_N` name for it). *)
+      let auto_drops =
+        List.map (fun (n, t) ->
+          if n = "_" then false else is_linear_ty t)
+          binders
+      in
+      let names_actual =
+        List.map (fun (n, t) ->
+          if n = "_" && is_linear_ty t then begin
+            incr drop_name_counter;
+            Printf.sprintf "_tuple_drop_%d" !drop_name_counter
+          end else n)
+          binders
+      in
+      (T.TELetTuple (names_actual, tv_ty, tv, tb, tb_ty, auto_drops), tb_ty)
 
   | EForStream (x, src_e, body_e) ->
       if x <> "_" then check_not_c_reserved "for-binder" x;
@@ -1829,8 +1967,9 @@ let rec infer (env : env) (tparams : string list)
 
   | EAwaitAllDyn coll_e ->
       (* `await all coll` requires coll : Array[Task[T]], returns
-         Array[T]. Each Task in the array is consumed by the join;
-         the resulting Array[T] holds the per-task results. *)
+         Array[Result[T]] — each Task is awaited, each result wrapped
+         in Result the same way `await Task[T]` would. The original
+         array is consumed (linear) by the join. *)
       let (tc, tc_ty) = infer env tparams vars coll_e in
       let elem = TyMeta (fresh_meta ()) in
       (try unify tc_ty (TyApp ("Array", [TyApp ("Task", [elem])]))
@@ -1839,7 +1978,8 @@ let rec infer (env : env) (tparams : string list)
            (Printf.sprintf
               "`await all <coll>` expects coll : Array[Task[T]], got %s"
               (show_ty (zonk tc_ty)))));
-      let result_ty = TyApp ("Array", [elem]) in
+      let wrapped = TyApp ("Result", [elem]) in
+      let result_ty = TyApp ("Array", [wrapped]) in
       (T.TEAwait (tc, result_ty, elem), result_ty)
 
 and check_args env tparams vars callee_name param_tys args : T.expr list =
@@ -1942,6 +2082,16 @@ let rec zonk_expr (e : T.expr) : T.expr =
   | T.TEYield -> T.TEYield
   | T.TEForStream (x, et, s, b) ->
       T.TEForStream (x, zonk_expect et, zonk_expr s, zonk_expr b)
+  | T.TETuple (es, t) ->
+      T.TETuple (List.map zonk_expr es, zonk_expect t)
+  | T.TETupleIdx (e, i, t) ->
+      T.TETupleIdx (zonk_expr e, i, zonk_expect t)
+  | T.TELetTuple (ns, vt, v, b, bt, ads) ->
+      T.TELetTuple (ns, zonk_expect vt, zonk_expr v,
+                    zonk_expr b, zonk_expect bt, ads)
+  | T.TEAwaitAll (bs, t, ptys) ->
+      T.TEAwaitAll (List.map zonk_expr bs, zonk_expect t,
+                    List.map zonk_expect ptys)
 
 and zonk_expect (t : ty) : ty =
   let t = zonk t in
@@ -1951,6 +2101,7 @@ and zonk_expect (t : ty) : ty =
     | TyFun (args, ret) ->
         List.exists has_unresolved args || has_unresolved ret
     | TyPtr inner -> has_unresolved inner
+    | TyTuple ts -> List.exists has_unresolved ts
     | TyMeta _ -> true
   in
   if has_unresolved t then
@@ -2300,6 +2451,52 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       in
       (T.TEForStream (x, et, src', body'), live_after)
 
+  | T.TETuple (es, ty) ->
+      let (es_rev, live) = List.fold_left (fun (acc, l) e ->
+        let (e', l) = check_moves_expr env l false e in
+        (e' :: acc, l)) ([], live) es
+      in
+      (T.TETuple (List.rev es_rev, ty), live)
+
+  | T.TETupleIdx (sub, i, ty) ->
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TETupleIdx (sub', i, ty), live)
+
+  | T.TELetTuple (names, vt, v, b, bt, ads) ->
+      let (v', live) = check_moves_expr env live false v in
+      (* Each named binder enters scope; track outer-shadow so we
+         restore on scope exit. Underscores aren't tracked. *)
+      let outer_had =
+        List.map (fun n -> (n, SM.find_opt n live)) names
+      in
+      let comp_tys = match prune vt with
+        | TyTuple ts -> ts
+        | _ -> failwith "check_moves_expr TELetTuple: value not TyTuple"
+      in
+      let live_inner =
+        List.fold_left2 (fun acc n t ->
+          if n = "_" then acc else SM.add n t acc) live names comp_tys
+      in
+      let (b', live_after) = check_moves_expr env live_inner in_tail b in
+      let ads' =
+        List.map2 (fun (n, ad) _ ->
+          if ad && n <> "_" && not (SM.mem n live_after) then false else ad)
+          (List.combine names ads) comp_tys
+      in
+      let live_final = List.fold_left (fun acc (n, prev) ->
+        match prev with
+        | Some t -> SM.add n t acc
+        | None -> SM.remove n acc) live_after outer_had
+      in
+      (T.TELetTuple (names, vt, v', b', bt, ads'), live_final)
+
+  | T.TEAwaitAll (branches, t, ptys) ->
+      let (bs_rev, live) = List.fold_left (fun (acc, l) e ->
+        let (e', l) = check_moves_expr env l false e in
+        (e' :: acc, l)) ([], live) branches
+      in
+      (T.TEAwaitAll (List.rev bs_rev, t, ptys), live)
+
 (* ---------- check a function ---------- *)
 
 (* True if the typed body contains an `await` or `yield` reachable
@@ -2369,6 +2566,11 @@ let rec body_has_suspension (e : T.expr) : bool =
   | TETryAt (a, i, _) ->
       body_has_suspension a || body_has_suspension i
   | TEDrop (e, _) -> body_has_suspension e
+  | TETuple (es, _) -> List.exists body_has_suspension es
+  | TETupleIdx (e, _, _) -> body_has_suspension e
+  | TELetTuple (_, _, v, b, _, _) ->
+      body_has_suspension v || body_has_suspension b
+  | TEAwaitAll _ -> true
 
 let check_func (env : env) (f : func) : T.func =
   let (_, (param_tys, ret_ty)) = List.assoc f.name env.fns in

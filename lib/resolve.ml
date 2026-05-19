@@ -171,6 +171,7 @@ let rec resolve_ty
       TyFun (List.map (resolve_ty map locals) args,
              resolve_ty map locals ret)
   | TyPtr inner -> TyPtr (resolve_ty map locals inner)
+  | TyTuple ts -> TyTuple (List.map (resolve_ty map locals) ts)
   | TyMeta _ -> t
 
 let rec resolve_expr
@@ -256,6 +257,16 @@ let rec resolve_expr
       let new_locals = x :: locals in
       let body' = resolve_expr map new_locals body in
       EForStream (x, src', body')
+  | ETuple es -> ETuple (List.map r es)
+  | ETupleIdx (e, i) -> ETupleIdx (r e, i)
+  | ELetTuple (vs, v, body) ->
+      let v' = r v in
+      let new_locals =
+        List.fold_left (fun acc n -> if n = "_" then acc else n :: acc)
+          locals vs
+      in
+      let body' = resolve_expr map new_locals body in
+      ELetTuple (vs, v', body')
 
 let resolve_decl
     (map : (string * string) list) (mod_name : string) (decl : top_decl)
@@ -345,6 +356,7 @@ let rec expand_alias_ty
       TyFun (List.map (expand_alias_ty aliases visited) args,
              expand_alias_ty aliases visited ret)
   | TyPtr inner -> TyPtr (expand_alias_ty aliases visited inner)
+  | TyTuple ts -> TyTuple (List.map (expand_alias_ty aliases visited) ts)
 
 let expand_in_expr (aliases : (string * ty) list) (e : expr) : expr =
   let xt t = expand_alias_ty aliases [] t in
@@ -395,6 +407,9 @@ let expand_in_expr (aliases : (string * ty) list) (e : expr) : expr =
     | ESpawn e -> ESpawn (ex e)
     | EYield -> EYield
     | EForStream (x, s, b) -> EForStream (x, ex s, ex b)
+    | ETuple es -> ETuple (List.map ex es)
+    | ETupleIdx (e, i) -> ETupleIdx (ex e, i)
+    | ELetTuple (vs, v, b) -> ELetTuple (vs, ex v, ex b)
   in
   ex e
 

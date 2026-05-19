@@ -28,6 +28,8 @@ let rec mangle_ty (t : ty) : string =
       in
       String.concat "_" parts
   | TyPtr inner -> "ptr_" ^ mangle_ty inner
+  | TyTuple ts ->
+      "Tuple_" ^ String.concat "_" (List.map mangle_ty ts)
   | TyMeta _ -> failwith "mono: TyMeta after check"
 
 let mangle_name (name : string) (ts : ty list) : string =
@@ -153,6 +155,7 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
     | TyFun (args, ret) ->
         TyFun (List.map (rewrite_ty subst) args, rewrite_ty subst ret)
     | TyPtr inner -> TyPtr (rewrite_ty subst inner)
+    | TyTuple ts -> TyTuple (List.map (rewrite_ty subst) ts)
     | TyMeta _ ->
         failwith "mono rewrite_ty: TyMeta after checking"
   in
@@ -287,6 +290,17 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         Check.T.TEForStream (x, rt et,
                              rewrite_expr subst s,
                              rewrite_expr subst b)
+    | Check.T.TETuple (es, t) ->
+        Check.T.TETuple (List.map (rewrite_expr subst) es, rt t)
+    | Check.T.TETupleIdx (e, i, t) ->
+        Check.T.TETupleIdx (rewrite_expr subst e, i, rt t)
+    | Check.T.TELetTuple (ns, vt, v, b, bt, ads) ->
+        Check.T.TELetTuple (ns, rt vt,
+                            rewrite_expr subst v,
+                            rewrite_expr subst b, rt bt, ads)
+    | Check.T.TEAwaitAll (bs, t, ptys) ->
+        Check.T.TEAwaitAll (List.map (rewrite_expr subst) bs,
+                            rt t, List.map rt ptys)
   in
 
   request_fn "main" [];
