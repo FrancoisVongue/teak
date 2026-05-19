@@ -997,9 +997,18 @@ let rec emit_expr
   | Check.T.TELet (x, vt, value_e, body, body_ty, auto_drop) ->
       let cv = emit_expr ctor_map value_e in
       let cb = emit_expr ctor_map body in
+      (* Bindings whose name starts with `fr->` come from
+         async_rewrite_to_frame — the variable lives in the
+         function's frame, so the let stores into the frame field
+         rather than declaring a new C local. *)
+      let is_frame_binder =
+        String.length x > 4 && String.sub x 0 4 = "fr->"
+      in
       let decl =
         if x = "_" then
           Printf.sprintf "(void)(%s);" cv.value
+        else if is_frame_binder then
+          Printf.sprintf "%s = %s;" x cv.value
         else
           Printf.sprintf "%s %s = %s;" (c_type vt) x cv.value
       in
@@ -1923,10 +1932,20 @@ let async_rewrite_to_frame
     | TEField (e, fn, t) -> TEField (go e, fn, t)
     | TEIf (c, th, el, t) -> TEIf (go c, go th, go el, t)
     | TELet (x, vt, v, b, bt, ad) ->
-        (* Don't rename the binder itself — the let still introduces
-           a name; the rewrite makes its uses go through fr->.
-           Storing into fr->x is handled below in the segment walker. *)
-        TELet (x, vt, go v, go b, bt, ad)
+        (* Frame-resident binders rewrite to the frame-field name so
+           every emission path (inline emit_expr OR the segment
+           walker) ends up writing the same fr->x slot. emit_expr's
+           TELet case detects the `fr->` prefix and emits an
+           assignment instead of a local declaration; the walker's
+           store_at avoids double-prefixing the same way. *)
+        let x' = if Hashtbl.mem frame_set x then "fr->" ^ x else x in
+        TELet (x', vt, go v, go b, bt, ad)
+    | TELetTuple (ns, vt, v, b, bt, ads) ->
+        let ns' =
+          List.map (fun n ->
+            if Hashtbl.mem frame_set n then "fr->" ^ n else n) ns
+        in
+        TELetTuple (ns', vt, go v, go b, bt, ads)
     | TEMatch (s, st, arms, rt) ->
         let arms' =
           List.map (fun (p, g, b) -> (p, Option.map go g, go b)) arms
@@ -1957,11 +1976,11 @@ let async_rewrite_to_frame
     | TEDrop (e, t) -> TEDrop (go e, t)
     | TEAwait (e, t, p) -> TEAwait (go e, t, p)
     | TESpawn (e, t) -> TESpawn (go e, t)
-    | TEForStream (x, et, s, b) -> TEForStream (x, et, go s, go b)
+    | TEForStream (x, et, s, b) ->
+        let x' = if Hashtbl.mem frame_set x then "fr->" ^ x else x in
+        TEForStream (x', et, go s, go b)
     | TETuple (es, t) -> TETuple (List.map go es, t)
     | TETupleIdx (e, i, t) -> TETupleIdx (go e, i, t)
-    | TELetTuple (ns, vt, v, b, bt, ads) ->
-        TELetTuple (ns, vt, go v, go b, bt, ads)
     | TEAwaitAll (bs, t, ptys) ->
         TEAwaitAll (List.map go bs, t, ptys)
   in go e
@@ -2440,10 +2459,17 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
         Printf.sprintf "  %s = %s; }" target_lvalue temp;
       ]
   in
+  (* async_rewrite_to_frame renames frame-resident binders to "fr->x".
+     If that prefix is already there, don't double it; otherwise add
+     it (the value lives in the frame either way). *)
+  let frame_lvalue name =
+    if String.length name > 4 && String.sub name 0 4 = "fr->" then name
+    else "fr->" ^ name
+  in
   let store_at (d : D.t) value =
     match d with
     | D.Local (x, _) ->
-        emit_into [Printf.sprintf "fr->%s = %s;" x value]
+        emit_into [Printf.sprintf "%s = %s;" (frame_lvalue x) value]
     | D.Return ty ->
         finish_segment
           (assign_to_blob "fr->return_value" value ty
@@ -2874,7 +2900,7 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
            shape `for x in accept_stream(...) { if x < 0 { break } ... }`
            without giving anything that the inline check doesn't. *)
         if x <> "_" then
-          emit_into (read_from_blob (Printf.sprintf "fr->%s" x) "fr->last_res" et);
+          emit_into (read_from_blob (frame_lvalue x) "fr->last_res" et);
         with_loop head_s exit_s (fun () ->
           walk D.Discard body_e);
         (* After body: if no more CQEs are coming, leave; else wait
