@@ -263,7 +263,7 @@ let rec collect_expr (e : Check.T.expr) : unit =
   | Check.T.TEReturn (v, t) -> collect_expr v; collect_ty t
   | Check.T.TETryAt (a, i, t) -> collect_expr a; collect_expr i; collect_ty t
   | Check.T.TEDrop (e, t) -> collect_expr e; collect_ty t
-  | Check.T.TEAwait (e, t) -> collect_expr e; collect_ty t
+  | Check.T.TEAwait (e, t, p) -> collect_expr e; collect_ty t; collect_ty p
   | Check.T.TESpawn (e, t) -> collect_expr e; collect_ty t
   | Check.T.TEYield -> ()
   | Check.T.TEForStream (_, et, s, b) ->
@@ -587,7 +587,7 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
     | TEReturn (v, t) -> TEReturn (rn env v, t)
     | TETryAt (a, i, t) -> TETryAt (rn env a, rn env i, t)
     | TEDrop (e, t) -> TEDrop (rn env e, t)
-    | TEAwait (e, t) -> TEAwait (rn env e, t)
+    | TEAwait (e, t, p) -> TEAwait (rn env e, t, p)
     | TESpawn (e, t) -> TESpawn (rn env e, t)
     | TEYield -> e
     | TEForStream (x, et, s, b) ->
@@ -745,7 +745,7 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TEReturn (_, _) -> TyInt
   | Check.T.TETryAt (_, _, t) -> t
   | Check.T.TEDrop (_, _) -> TyInt
-  | Check.T.TEAwait (_, t) -> t
+  | Check.T.TEAwait (_, t, _) -> t
   | Check.T.TESpawn (_, t) -> t
   | Check.T.TEYield -> TyInt
   | Check.T.TEForStream _ -> TyInt
@@ -1703,7 +1703,7 @@ let async_collect_locals (body : Check.T.expr) : (string * ty) list =
     | TEReturn (v, _) -> go v
     | TETryAt (a, i, _) -> go a; go i
     | TEDrop (e, _) -> go e
-    | TEAwait (e, _) -> go e
+    | TEAwait (e, _, _) -> go e
     | TESpawn (e, _) -> go e
     | TEForStream (x, t, s, b) -> add x t; go s; go b
   in
@@ -1765,7 +1765,7 @@ let async_rewrite_to_frame
     | TEReturn (v, t) -> TEReturn (go v, t)
     | TETryAt (a, i, t) -> TETryAt (go a, go i, t)
     | TEDrop (e, t) -> TEDrop (go e, t)
-    | TEAwait (e, t) -> TEAwait (go e, t)
+    | TEAwait (e, t, p) -> TEAwait (go e, t, p)
     | TESpawn (e, t) -> TESpawn (go e, t)
     | TEForStream (x, et, s, b) -> TEForStream (x, et, go s, go b)
   in go e
@@ -2058,28 +2058,45 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
     | D.Discard ->
         emit_into [Printf.sprintf "(void)(%s);" value]
   in
-  (* Store a value that lives in a long long header slot (typed
-     long long expr like `fr->last_res` or `ORTO_SLOTS[s].result`)
-     into the destination, converting through T. *)
-  let store_blob_at (d : D.t) blob_lvalue =
-    match d with
-    | D.Local (x, ty) ->
-        emit_into (read_from_blob (Printf.sprintf "fr->%s" x) blob_lvalue ty)
-    | D.Return ty ->
-        let temp = fresh "_ret" in
-        let c_ty = c_type ty in
-        let block =
-          if scalar_like ty then
-            [ Printf.sprintf "fr->return_value = %s;" blob_lvalue;
-              "return 0;" ]
-          else
-            [ Printf.sprintf "{ %s %s;" c_ty temp;
-              Printf.sprintf "  memcpy(&%s, &%s, sizeof(%s));" temp blob_lvalue temp;
-              Printf.sprintf "  memcpy(&fr->return_value, &%s, sizeof(%s)); }" temp temp;
-              "return 0;" ]
-        in
-        finish_segment block
-    | D.Discard -> ()
+  (* Phase 7: wrap the long long in `fr->last_res` into a Result[T]
+     value of the dst type. Positive res → Ok((T)res); negative →
+     Err((int)(-res)). The constructed wrapper is stored into `dst`.
+     `pty` is the payload T (already mono-rewritten). Scalar payloads
+     cast directly; non-scalar memcpy through a temp the same way
+     read_from_blob does. *)
+  let store_await_result (d : D.t) (pty : ty) =
+    let result_c = match d with
+      | D.Local (_, t) | D.Return t -> c_type t
+      | D.Discard ->
+          (* No dst, but mono still registered the type — synthesize the
+             mangled name from the payload so the wrapper type exists
+             even if the value is dropped. *)
+          "Result_" ^ Mono.mangle_ty pty
+    in
+    let tmp = fresh "_res" in
+    let ok_inner_stmts, ok_inner_value =
+      if scalar_like pty then
+        ([], Printf.sprintf "(%s)fr->last_res" (c_type pty))
+      else
+        let blob = fresh "_okv" in
+        let c_pty = c_type pty in
+        ([ Printf.sprintf "%s %s; memcpy(&%s, &fr->last_res, sizeof(%s));"
+             c_pty blob blob c_pty ],
+         blob)
+    in
+    let stmts =
+      [ Printf.sprintf "%s %s;" result_c tmp;
+        "if (fr->last_res >= 0) {" ]
+      @ List.map (fun s -> "    " ^ s) ok_inner_stmts
+      @ [ Printf.sprintf "    %s = ((%s){ .tag = 0, .as = { .Ok = { .f0 = %s } } });"
+            tmp result_c ok_inner_value;
+          "} else {";
+          Printf.sprintf "    %s = ((%s){ .tag = 1, .as = { .Err = { .f0 = (int)(-fr->last_res) } } });"
+            tmp result_c;
+          "}" ]
+    in
+    emit_into stmts;
+    store_at d tmp
   in
   (* Walk an expression, storing its value into `dst`. If the value
      is produced by a suspension point or branches with suspension,
@@ -2092,17 +2109,17 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
         start_segment n;
         (* yield's value is 0 — write it to dst, then we're done. *)
         store_at dst "0"
-    | TEAwait (inner, _)
+    | TEAwait (inner, _, pty)
       when (match match_async_extern_call inner with Some _ -> true | None -> false) ->
         let (name, args) = match match_async_extern_call inner with
           | Some r -> r | None -> assert false in
         let n = alloc_state () in
         async_call_then_state name args n;
         start_segment n;
-        (* async extern result lives in fr->last_res as a CQE-shaped
-           int — known scalar shape. *)
-        store_blob_at dst "fr->last_res"
-    | TEAwait (inner, _)
+        (* Phase 7: wrap CQE result in Result[T] — Ok(res) if res >= 0,
+           else Err(-res) as errno. *)
+        store_await_result dst pty
+    | TEAwait (inner, _, pty)
       when (match match_await_task inner with Some _ -> true | None -> false) ->
         (* await on a Task[T] variable: check the slot's state. If the
            child already finished synchronously, deliver inline; else
@@ -2133,7 +2150,11 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
           "return 1;";
         ];
         start_segment n;
-        store_blob_at dst "fr->last_res"
+        (* Phase 7: same Result wrap. Workers don't currently signal
+           failure (they just `return` an int), so awaited Task results
+           are Ok in practice; the Err path is reserved for the same
+           CQE-error shape (negative long long) for shape consistency. *)
+        store_await_result dst pty
     | TESpawn (inner, spawn_ty)
       when (match match_spawn_inner inner with Some _ -> true | None -> false) ->
         let (name, args, is_async) = match match_spawn_inner inner with
@@ -2241,7 +2262,12 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
            the last accepted fd before the source closed). Decode
            last_res into the binder and run the body unconditionally;
            the user can `break` on a negative payload if they want
-           per-event error handling. *)
+           per-event error handling.
+           Phase 7 asymmetry: `await Task[T]` wraps in Result[T], but
+           stream events stay raw. Wrapping every multishot event would
+           cost an allocation per CQE and would change the established
+           shape `for x in accept_stream(...) { if x < 0 { break } ... }`
+           without giving anything that the inline check doesn't. *)
         if x <> "_" then
           emit_into (read_from_blob (Printf.sprintf "fr->%s" x) "fr->last_res" et);
         with_loop head_s exit_s (fun () ->

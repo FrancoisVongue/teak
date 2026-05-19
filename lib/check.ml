@@ -93,9 +93,13 @@ module T = struct
     | TEContinue
     | TEReturn of expr * ty
                   (* return v — second field is the enclosing fn's return ty *)
-    | TEAwait  of expr * ty
-                  (* await op — second field is the result type T (one
-                     level peeled off Task[T] or Stream[T]) *)
+    | TEAwait  of expr * ty * ty
+                  (* await op — second field is the outer (visible) value
+                     type, third field is the unwrapped payload T. For
+                     `await Task[T]` outer is `Result[T]`, payload is T.
+                     For `await Stream[T]` outer is T, payload is T (no
+                     Result wrap on stream events — see STAGE3_ASYNC §10
+                     and emit.ml comment on TEForStream). *)
     | TESpawn  of expr * ty
                   (* spawn f(args) — second field is the wrapped result
                      type Task[T] *)
@@ -1766,10 +1770,18 @@ let rec infer (env : env) (tparams : string list)
              (Printf.sprintf
                 "`await e` expects e : Task[T] or Stream[T], got %s"
                 (show_ty (zonk ti_ty)))));
+        (* Stream-side await: leave raw, no Result wrap. The for-in form
+           is the real consumer; per-event Result allocation would be
+           pure cost. See STAGE3_ASYNC §10. *)
         let result_ty = stream_elem in
-        (T.TEAwait (ti, result_ty), result_ty)
+        (T.TEAwait (ti, result_ty, stream_elem), result_ty)
       end else
-        (T.TEAwait (ti, elem), elem)
+        (* Phase 7: wrap the awaited Task result in Result[T]. CQE-style
+           failures (negative res from io_uring) surface as Err(errno);
+           successful completions yield Ok(value). Callers must `match`
+           the result — e.g. `match r { Ok(n) => ..., Err(e) => ... }`. *)
+        let wrapped = TyApp ("Result", [elem]) in
+        (T.TEAwait (ti, wrapped, elem), wrapped)
 
   | ESpawn inner ->
       (* The body of `spawn` should be a function call — it's what
@@ -1828,7 +1840,7 @@ let rec infer (env : env) (tparams : string list)
               "`await all <coll>` expects coll : Array[Task[T]], got %s"
               (show_ty (zonk tc_ty)))));
       let result_ty = TyApp ("Array", [elem]) in
-      (T.TEAwait (tc, result_ty), result_ty)
+      (T.TEAwait (tc, result_ty, elem), result_ty)
 
 and check_args env tparams vars callee_name param_tys args : T.expr list =
   let n_expected = List.length param_tys in
@@ -1923,8 +1935,8 @@ let rec zonk_expr (e : T.expr) : T.expr =
       T.TETryAt (zonk_expr a, zonk_expr i, zonk_expect t)
   | T.TEDrop (e, t) ->
       T.TEDrop (zonk_expr e, zonk_expect t)
-  | T.TEAwait (e, t) ->
-      T.TEAwait (zonk_expr e, zonk_expect t)
+  | T.TEAwait (e, t, p) ->
+      T.TEAwait (zonk_expr e, zonk_expect t, zonk_expect p)
   | T.TESpawn (e, t) ->
       T.TESpawn (zonk_expr e, zonk_expect t)
   | T.TEYield -> T.TEYield
@@ -2240,7 +2252,7 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       in
       (T.TEDrop (sub', t), live)
 
-  | T.TEAwait (sub, t) ->
+  | T.TEAwait (sub, t, p) ->
       (* await consumes the Task/Stream-shaped operand: if the inner
          expression is a bare linear name, retire it (await-after-await
          on the same handle is a compile error). For Stream the inner
@@ -2252,7 +2264,7 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
         | T.TEVar (x, vt) when is_linear_ty vt -> SM.remove x live
         | _ -> live
       in
-      (T.TEAwait (sub', t), live)
+      (T.TEAwait (sub', t, p), live)
 
   | T.TESpawn (sub, t) ->
       (* spawn evaluates its inner call — any owned values flowing in
@@ -2412,19 +2424,35 @@ let builtin_option_decl : type_decl = {
   is_linear = false;
 }
 
+(* Built-in Result[T] — privileged. Phase 7 of Stage 3 wraps every
+   `await Task[T]` in this so CQE errors surface as Err(errno) rather
+   than a magic negative payload. Users can declare neither `Result`
+   nor `Ok`/`Err`. Err carries int (errno); Ok carries T. *)
+let builtin_result_decl : type_decl = {
+  type_name   = "Result";
+  type_params = ["T"];
+  variants = [
+    { ctor_name = "Ok";  arg_tys = [TyVar "T"] };
+    { ctor_name = "Err"; arg_tys = [TyInt] };
+  ];
+  is_linear = false;
+}
+
 let check (prog : program) : T.program =
   meta_counter := 0;
   drop_name_counter := 0;
   let (types, records, funcs, externs) = split_program prog in
   (* Reject any user attempt to redeclare reserved built-in names. *)
   List.iter (fun (td : type_decl) ->
-    if td.type_name = "Option" || td.type_name = "Ref" then
+    if td.type_name = "Option" || td.type_name = "Ref"
+       || td.type_name = "Result" then
       raise (Type_error
         (Printf.sprintf
            "%S is a reserved built-in type and cannot be redeclared"
            td.type_name))) types;
   List.iter (fun (rd : record_decl) ->
-    if rd.rec_name = "Option" || rd.rec_name = "Ref" then
+    if rd.rec_name = "Option" || rd.rec_name = "Ref"
+       || rd.rec_name = "Result" then
       raise (Type_error
         (Printf.sprintf
            "%S is a reserved built-in type and cannot be redeclared"
@@ -2435,8 +2463,13 @@ let check (prog : program) : T.program =
         raise (Type_error
           (Printf.sprintf
              "%S is a built-in Option constructor and cannot be redeclared"
+             v.ctor_name));
+      if v.ctor_name = "Ok" || v.ctor_name = "Err" then
+        raise (Type_error
+          (Printf.sprintf
+             "%S is a built-in Result constructor and cannot be redeclared"
              v.ctor_name))) td.variants) types;
-  let types = builtin_option_decl :: types in
+  let types = builtin_option_decl :: builtin_result_decl :: types in
   let env = build_env types records funcs externs in
   check_no_recursive_types env.types env.records;
   let typed_funcs = List.map (check_func env) funcs in

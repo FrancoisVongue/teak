@@ -7,7 +7,7 @@
    Mangling: a top-level decl named `foo` in module `bar` becomes
    `bar__foo`. Externs are NOT mangled — their name is the C linker
    symbol and must round-trip unchanged. Builtins (Array, Region,
-   Option, byte, Some, None) are never mangled.
+   Option, byte, Some, None, Result, Ok, Err) are never mangled.
 
    Within a module, references resolve in this order:
      1. Local scope (let bindings, parameters, pattern vars, type
@@ -25,6 +25,7 @@ exception Resolve_error of string
 let builtin_names = [
   "Array"; "Region"; "Option"; "byte";
   "Some"; "None";
+  "Result"; "Ok"; "Err";
 ]
 
 let is_builtin name = List.mem name builtin_names

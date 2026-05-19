@@ -278,8 +278,8 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         Check.T.TETryAt (rewrite_expr subst a, rewrite_expr subst i, rt t)
     | Check.T.TEDrop (e, t) ->
         Check.T.TEDrop (rewrite_expr subst e, rt t)
-    | Check.T.TEAwait (e, t) ->
-        Check.T.TEAwait (rewrite_expr subst e, rt t)
+    | Check.T.TEAwait (e, t, p) ->
+        Check.T.TEAwait (rewrite_expr subst e, rt t, rt p)
     | Check.T.TESpawn (e, t) ->
         Check.T.TESpawn (rewrite_expr subst e, rt t)
     | Check.T.TEYield -> Check.T.TEYield

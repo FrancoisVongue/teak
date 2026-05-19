@@ -53,7 +53,7 @@ static void orto_init_regions(void) {
     ORTO_REGION_FREE_HEAD = 1;
 }
 
-typedef struct records__Result_records__Pair_int_int records__Result_records__Pair_int_int;
+typedef struct records__Either_records__Pair_int_int records__Either_records__Pair_int_int;
 
 typedef struct records__Pair_int_int records__Pair_int_int;
 
@@ -69,7 +69,7 @@ typedef int (*fn_records__Point_to_int)(records__Point);
 
 typedef records__Pair_bool_int (*fn_records__Pair_int_bool_to_records__Pair_bool_int)(records__Pair_int_bool);
 
-typedef int (*fn_records__Result_records__Pair_int_int_to_int)(records__Result_records__Pair_int_int);
+typedef int (*fn_records__Either_records__Pair_int_int_to_int)(records__Either_records__Pair_int_int);
 
 struct records__Point {
     int x;
@@ -81,11 +81,11 @@ struct records__Pair_int_int {
     int snd;
 };
 
-struct records__Result_records__Pair_int_int {
+struct records__Either_records__Pair_int_int {
     int tag;
     union {
-        struct { records__Pair_int_int f0; } records__Ok;
-        struct { records__Point f0; } records__Err;
+        struct { records__Pair_int_int f0; } records__This;
+        struct { records__Point f0; } records__That;
     } as;
 };
 
@@ -110,7 +110,7 @@ records__Pair_bool_int records__swap_int_bool(records__Pair_int_bool p);
 
 int main(void);
 
-int records__pick(records__Result_records__Pair_int_int r);
+int records__pick(records__Either_records__Pair_int_int r);
 
 int records__dist_sq(records__Point p) {
     return ((p.x * p.x) + (p.y * p.y));
@@ -132,8 +132,8 @@ int main(void) {
         tmp_1 = 0;
     }
     int a_5 = tmp_1;
-    records__Result_records__Pair_int_int r1_6 = ((records__Result_records__Pair_int_int){ .tag = 0, .as = { .records__Ok = { .f0 = ((records__Pair_int_int){ .fst = 10, .snd = 20 }) } } });
-    records__Result_records__Pair_int_int r2_7 = ((records__Result_records__Pair_int_int){ .tag = 1, .as = { .records__Err = { .f0 = ((records__Point){ .x = 1, .y = 2 }) } } });
+    records__Either_records__Pair_int_int r1_6 = ((records__Either_records__Pair_int_int){ .tag = 0, .as = { .records__This = { .f0 = ((records__Pair_int_int){ .fst = 10, .snd = 20 }) } } });
+    records__Either_records__Pair_int_int r2_7 = ((records__Either_records__Pair_int_int){ .tag = 1, .as = { .records__That = { .f0 = ((records__Point){ .x = 1, .y = 2 }) } } });
     int b_8 = records__pick(r1_6);
     int c_9 = records__pick(r2_7);
     records__Bag bag_10 = ((records__Bag){ .count = 8, .flag = 0 });
@@ -147,17 +147,17 @@ int main(void) {
     return ((((d_2 + a_5) + b_8) + c_9) + e_11);
 }
 
-int records__pick(records__Result_records__Pair_int_int r) {
-    records__Result_records__Pair_int_int scrut_1 = r;
+int records__pick(records__Either_records__Pair_int_int r) {
+    records__Either_records__Pair_int_int scrut_1 = r;
     int match_result_2;
     switch (scrut_1.tag) {
-        case 0: { /* records__Ok */
-            records__Pair_int_int p_1 = scrut_1.as.records__Ok.f0;
+        case 0: { /* records__This */
+            records__Pair_int_int p_1 = scrut_1.as.records__This.f0;
             match_result_2 = (p_1.fst + p_1.snd);
             break;
         }
-        case 1: { /* records__Err */
-            records__Point q_2 = scrut_1.as.records__Err.f0;
+        case 1: { /* records__That */
+            records__Point q_2 = scrut_1.as.records__That.f0;
             match_result_2 = (q_2.x + q_2.y);
             break;
         }

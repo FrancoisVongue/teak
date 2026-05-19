@@ -55,9 +55,9 @@ static void orto_init_regions(void) {
 
 typedef struct Option_int Option_int;
 
-typedef struct option_result__ResultInt option_result__ResultInt;
+typedef struct option_result__DivOutcome option_result__DivOutcome;
 
-typedef option_result__ResultInt (*fn_int_int_to_option_result__ResultInt)(int, int);
+typedef option_result__DivOutcome (*fn_int_int_to_option_result__DivOutcome)(int, int);
 
 typedef Option_int (*fn_int_int_to_Option_int)(int, int);
 
@@ -70,17 +70,17 @@ struct Option_int {
     } as;
 };
 
-struct option_result__ResultInt {
+struct option_result__DivOutcome {
     int tag;
     union {
-        struct { int f0; } option_result__Ok;
-        struct { int f0; } option_result__Err;
+        struct { int f0; } option_result__Good;
+        struct { int f0; } option_result__Bad;
     } as;
 };
 
 Option_int option_result__first_positive(int a, int b);
 
-option_result__ResultInt option_result__safe_div(int a, int b);
+option_result__DivOutcome option_result__safe_div(int a, int b);
 
 int option_result__or_zero(Option_int o);
 
@@ -102,12 +102,12 @@ Option_int option_result__first_positive(int a, int b) {
     return tmp_2;
 }
 
-option_result__ResultInt option_result__safe_div(int a, int b) {
-    option_result__ResultInt tmp_1;
+option_result__DivOutcome option_result__safe_div(int a, int b) {
+    option_result__DivOutcome tmp_1;
     if ((b == 0)) {
-        tmp_1 = ((option_result__ResultInt){ .tag = 1, .as = { .option_result__Err = { .f0 = 1 } } });
+        tmp_1 = ((option_result__DivOutcome){ .tag = 1, .as = { .option_result__Bad = { .f0 = 1 } } });
     } else {
-        tmp_1 = ((option_result__ResultInt){ .tag = 0, .as = { .option_result__Ok = { .f0 = (a / b) } } });
+        tmp_1 = ((option_result__DivOutcome){ .tag = 0, .as = { .option_result__Good = { .f0 = (a / b) } } });
     }
     return tmp_1;
 }
@@ -131,16 +131,16 @@ int option_result__or_zero(Option_int o) {
 }
 
 int main(void) {
-    option_result__ResultInt r_1 = option_result__safe_div(10, 2);
-    option_result__ResultInt scrut_1 = r_1;
+    option_result__DivOutcome r_1 = option_result__safe_div(10, 2);
+    option_result__DivOutcome scrut_1 = r_1;
     int match_result_2;
     switch (scrut_1.tag) {
-        case 0: { /* option_result__Ok */
-            int q_2 = scrut_1.as.option_result__Ok.f0;
+        case 0: { /* option_result__Good */
+            int q_2 = scrut_1.as.option_result__Good.f0;
             match_result_2 = q_2;
             break;
         }
-        case 1: { /* option_result__Err */
+        case 1: { /* option_result__Bad */
             match_result_2 = 0;
             break;
         }
