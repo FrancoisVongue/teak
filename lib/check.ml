@@ -62,7 +62,13 @@ module T = struct
     | TEToInt  of expr
                   (* to_int(b) — widen byte to int *)
     | TEToByte of expr
-                  (* to_byte(n) — truncate int to byte *)
+                  (* to_byte(n) — truncate int to byte (u8) *)
+    | TEToU16 of expr
+                  (* to_u16(n)  — truncate int to u16 *)
+    | TEToU32 of expr
+                  (* to_u32(n)  — truncate int to u32 *)
+    | TEToU64 of expr
+                  (* to_u64(n)  — int to u64 (signed→unsigned reinterpret) *)
     | TEToFloat of expr
                   (* to_float(n) — int → float *)
     | TEFloat  of float
@@ -491,14 +497,16 @@ let rec validate_ty
                "Stream expects exactly 1 type argument, got %d"
                (List.length args)));
         TyApp ("Stream", args)
-      end else if n = "byte" then begin
-        (* byte is a built-in nullary primitive — 1 byte, unsigned. *)
+      end else if n = "byte" || n = "u16" || n = "u32" || n = "u64" then begin
+        (* Unsigned int primitives, fixed width. byte = u8.
+           No arithmetic in orto; go through `to_int` for math, then
+           `to_<width>` to truncate back. Same idiom as byte. *)
         if List.length args <> 0 then
           raise (Type_error
             (Printf.sprintf
-               "byte takes no type arguments, got %d"
+               "%s takes no type arguments, got %d" n
                (List.length args)));
-        TyApp ("byte", [])
+        TyApp (n, [])
       end else if n = "float" then begin
         (* float — IEEE 754 double, 8 bytes. NaN / Infinity behave per
            IEEE: NaN != NaN, comparisons with NaN are false. *)
@@ -1642,15 +1650,17 @@ let rec infer (env : env) (tparams : string list)
       let (ts, ts_ty) = infer env tparams vars sub_e in
       (match prune ts_ty with
        | TyApp ("byte", []) -> (T.TEToInt ts, TyInt)
+       | TyApp ("u16",  []) -> (T.TEToInt ts, TyInt)
+       | TyApp ("u32",  []) -> (T.TEToInt ts, TyInt)
+       | TyApp ("u64",  []) -> (T.TEToInt ts, TyInt)
        | TyApp ("float", []) -> (T.TEToIntFromFloat ts, TyInt)
        | TyMeta _ ->
-           (* default to byte for backward compatibility *)
            unify ts_ty (TyApp ("byte", []));
            (T.TEToInt ts, TyInt)
        | t ->
            raise (Type_error
              (Printf.sprintf
-                "to_int expects byte or float, got %s"
+                "to_int expects byte/u16/u32/u64/float, got %s"
                 (show_ty (zonk t)))))
 
   | EToByte sub_e ->
@@ -1662,6 +1672,33 @@ let rec infer (env : env) (tparams : string list)
               "to_byte expects int, got %s"
               (show_ty (zonk ts_ty)))));
       (T.TEToByte ts, TyApp ("byte", []))
+
+  | EToU16 sub_e ->
+      let (ts, ts_ty) = infer env tparams vars sub_e in
+      (try unify ts_ty TyInt
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "to_u16 expects int, got %s" (show_ty (zonk ts_ty)))));
+      (T.TEToU16 ts, TyApp ("u16", []))
+
+  | EToU32 sub_e ->
+      let (ts, ts_ty) = infer env tparams vars sub_e in
+      (try unify ts_ty TyInt
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "to_u32 expects int, got %s" (show_ty (zonk ts_ty)))));
+      (T.TEToU32 ts, TyApp ("u32", []))
+
+  | EToU64 sub_e ->
+      let (ts, ts_ty) = infer env tparams vars sub_e in
+      (try unify ts_ty TyInt
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "to_u64 expects int, got %s" (show_ty (zonk ts_ty)))));
+      (T.TEToU64 ts, TyApp ("u64", []))
 
   | EToFloat sub_e ->
       let (ts, ts_ty) = infer env tparams vars sub_e in
@@ -2048,6 +2085,9 @@ let rec zonk_expr (e : T.expr) : T.expr =
       T.TESlice (zonk_expr a, zonk_expr lo, zonk_expr hi, zonk_expect t)
   | T.TEToInt e  -> T.TEToInt (zonk_expr e)
   | T.TEToByte e -> T.TEToByte (zonk_expr e)
+  | T.TEToU16 e  -> T.TEToU16 (zonk_expr e)
+  | T.TEToU32 e  -> T.TEToU32 (zonk_expr e)
+  | T.TEToU64 e  -> T.TEToU64 (zonk_expr e)
   | T.TEToFloat e -> T.TEToFloat (zonk_expr e)
   | T.TEToIntFromFloat e -> T.TEToIntFromFloat (zonk_expr e)
   | T.TECAlloc (et, n, rt) ->
@@ -2332,6 +2372,18 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       let (sub', live) = check_moves_expr env live false sub in
       (T.TEToByte sub', live)
 
+  | T.TEToU16 sub ->
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TEToU16 sub', live)
+
+  | T.TEToU32 sub ->
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TEToU32 sub', live)
+
+  | T.TEToU64 sub ->
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TEToU64 sub', live)
+
   | T.TEToFloat sub ->
       let (sub', live) = check_moves_expr env live false sub in
       (T.TEToFloat sub', live)
@@ -2539,7 +2591,8 @@ let rec body_has_suspension (e : T.expr) : bool =
   | TESlice (a, lo, hi, _) ->
       body_has_suspension a
       || body_has_suspension lo || body_has_suspension hi
-  | TEToInt e | TEToByte e | TEToFloat e | TEToIntFromFloat e ->
+  | TEToInt e | TEToByte e | TEToFloat e | TEToIntFromFloat e
+  | TEToU16 e | TEToU32 e | TEToU64 e ->
       body_has_suspension e
   | TECAlloc (_, n, _) -> body_has_suspension n
   | TECFree e -> body_has_suspension e

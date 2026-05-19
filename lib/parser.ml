@@ -42,6 +42,9 @@ let rec parse_ty st =
   | TIntTy        -> TyInt
   | TBoolTy       -> TyBool
   | TByteTy       -> TyApp ("byte", [])
+  | TU16Ty        -> TyApp ("u16", [])
+  | TU32Ty        -> TyApp ("u32", [])
+  | TU64Ty        -> TyApp ("u64", [])
   | TFloatTy      -> TyApp ("float", [])
   | TLParen       ->
       (* Tuple type: (T1, T2, ..., Tn) for n >= 2.  A single `(T)` is
@@ -382,7 +385,7 @@ and parse_atom st =
   | TStringLit _
   | TIf | TMatch | TWhile | TBreak | TContinue | TFor | TReturn
   | TArray | TLen | TSlice
-  | TToInt | TToByte | TToFloat
+  | TToInt | TToByte | TToFloat | TToU16 | TToU32 | TToU64
   | TCAlloc | TCFree | TNullPtr | TIsNull | TArrayData | TTryAt | TDrop
   | TRegion | TStackRegion | TAlignedRegion -> parse_atom_consume st
   | t -> raise (Parse_error
@@ -556,6 +559,21 @@ and parse_atom_consume st =
       let e = parse_expr st in
       expect st TRParen;
       EToByte e
+  | TToU16 ->
+      expect st TLParen;
+      let e = parse_expr st in
+      expect st TRParen;
+      EToU16 e
+  | TToU32 ->
+      expect st TLParen;
+      let e = parse_expr st in
+      expect st TRParen;
+      EToU32 e
+  | TToU64 ->
+      expect st TLParen;
+      let e = parse_expr st in
+      expect st TRParen;
+      EToU64 e
   | TToFloat ->
       expect st TLParen;
       let e = parse_expr st in

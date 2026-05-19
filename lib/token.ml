@@ -24,6 +24,9 @@ type token =
   | TIntTy
   | TBoolTy
   | TByteTy       (* byte — 1-byte unsigned primitive *)
+  | TU16Ty        (* u16 — 2-byte unsigned, for binary protocols *)
+  | TU32Ty        (* u32 — 4-byte unsigned *)
+  | TU64Ty        (* u64 — 8-byte unsigned *)
   | TFloatTy      (* float — IEEE 754 double-precision *)
   | TToFloat      (* to_float(n) — int → float *)
   | TType
@@ -39,6 +42,9 @@ type token =
   | TSlice        (* slice(a, lo, hi) — sub-handle into the same region *)
   | TToInt        (* to_int(b) — widen byte to int *)
   | TToByte       (* to_byte(n) — truncate int to byte *)
+  | TToU16        (* to_u16(n) — truncate int to u16 *)
+  | TToU32        (* to_u32(n) — truncate int to u32 *)
+  | TToU64        (* to_u64(n) — truncate int to u64 *)
   | TCAlloc       (* c_alloc[T](n) — malloc n*sizeof(T), returns *T *)
   | TCFree        (* c_free(p) — free a raw pointer *)
   | TNullPtr      (* null_ptr[T]() — typed NULL *)
@@ -114,6 +120,9 @@ let show = function
   | TIntTy        -> "INT_TY"
   | TBoolTy       -> "BOOL_TY"
   | TByteTy       -> "BYTE_TY"
+  | TU16Ty        -> "U16_TY"
+  | TU32Ty        -> "U32_TY"
+  | TU64Ty        -> "U64_TY"
   | TFloatTy      -> "FLOAT_TY"
   | TToFloat      -> "TO_FLOAT"
   | TType         -> "TYPE"
@@ -129,6 +138,9 @@ let show = function
   | TSlice        -> "SLICE"
   | TToInt        -> "TO_INT"
   | TToByte       -> "TO_BYTE"
+  | TToU16        -> "TO_U16"
+  | TToU32        -> "TO_U32"
+  | TToU64        -> "TO_U64"
   | TCAlloc       -> "C_ALLOC"
   | TCFree        -> "C_FREE"
   | TNullPtr      -> "NULL_PTR"

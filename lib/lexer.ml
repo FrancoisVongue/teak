@@ -33,6 +33,9 @@ let lower_ident_or_keyword s =
   | "int"   -> TIntTy
   | "bool"  -> TBoolTy
   | "byte"  -> TByteTy
+  | "u16"   -> TU16Ty
+  | "u32"   -> TU32Ty
+  | "u64"   -> TU64Ty
   | "float" -> TFloatTy
   | "to_float" -> TToFloat
   | "type"  -> TType
@@ -48,6 +51,9 @@ let lower_ident_or_keyword s =
   | "slice" -> TSlice
   | "to_int" -> TToInt
   | "to_byte" -> TToByte
+  | "to_u16" -> TToU16
+  | "to_u32" -> TToU32
+  | "to_u64" -> TToU64
   | "c_alloc" -> TCAlloc
   | "c_free"  -> TCFree
   | "null_ptr" -> TNullPtr

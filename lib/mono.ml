@@ -134,8 +134,8 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         TyApp ("Stream", [rewrite_ty subst inner])
     | TyApp ("Stream", _) ->
         failwith "mono rewrite_ty: Stream with wrong arity (should be unary)"
-    | TyApp ("byte", []) ->
-        TyApp ("byte", [])
+    | TyApp ("byte", []) | TyApp ("u16", []) | TyApp ("u32", []) | TyApp ("u64", []) ->
+        t
     | TyApp ("byte", _) ->
         failwith "mono rewrite_ty: byte takes no type arguments"
     | TyApp ("float", []) ->
@@ -254,6 +254,12 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         Check.T.TEToInt (rewrite_expr subst e)
     | Check.T.TEToByte e ->
         Check.T.TEToByte (rewrite_expr subst e)
+    | Check.T.TEToU16 e ->
+        Check.T.TEToU16 (rewrite_expr subst e)
+    | Check.T.TEToU32 e ->
+        Check.T.TEToU32 (rewrite_expr subst e)
+    | Check.T.TEToU64 e ->
+        Check.T.TEToU64 (rewrite_expr subst e)
     | Check.T.TEToFloat e ->
         Check.T.TEToFloat (rewrite_expr subst e)
     | Check.T.TEToIntFromFloat e ->
