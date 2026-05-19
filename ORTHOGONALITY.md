@@ -50,12 +50,22 @@
 | Move analysis (~200 строк) | Удалено при унификации Region/linear |
 | `match` только на ADT | Расширено — scrutinee_kind dispatch покрывает int/byte/bool/bytes |
 
+## Конфигурация рантайма (CLI флаги, не часть языка)
+
+| Флаг | Что | Default |
+|---|---|---|
+| `--slots N` | размер slot pool на поток | 1024 |
+| `--cores N` | количество pthread-воркеров (shared-nothing) | 1 |
+
+`orto main.orto --cores 4 --slots 8192` — 4 потока, по 8192 слота на каждый. Glue компилируется с тем же `-DORTO_CORES=N`.
+
 ## Что осталось как debt v2
 
 1. **Bound Stream form** — `let s = stream(); for x in s {}`. Требует CQE-буфер или deferred prep.
 2. **`ASYNC_CANCEL` в `drop_Stream`** — пока DETACHED-fallback.
 3. **Match по tuple-паттернам** — есть destructuring let, но не match.
-4. **Многоядерность** shared-nothing.
-5. **Windows / IOCP backend**.
+4. **Dynamic slot pool** — slab list для роста без бэлк-аллокации.
+5. **Cross-core communication** через `IORING_OP_MSG_RING`.
+6. **Windows / IOCP backend**.
 
 Открытых дизайн-вопросов из ядра — нет.
