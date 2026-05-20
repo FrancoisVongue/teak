@@ -158,9 +158,13 @@ module T = struct
     return_ty   : ty;
     body        : expr;
     (* Non-empty only for lifted closure bodies: the values captured
-       from the creating scope, unpacked from the environment at entry.
-       The code pointer takes the environment as a leading void*. *)
+       from the creating scope, unpacked from the environment at entry. *)
     captures    : (string * ty) list;
+    (* True for lifted closure bodies: they are invoked through the
+       closure code-pointer convention, so they take the environment as
+       a leading `void *env` — ALWAYS, even with zero captures (the call
+       site always passes an env). Plain top-level functions are false. *)
+    takes_env   : bool;
     (* Stage 3: true iff this function body contains a suspension
        point reachable directly (await or yield not inside a nested
        spawn). Such functions are lowered into a stackless state
@@ -3045,6 +3049,7 @@ let check_func (env : env) (f : func) : T.func =
       T.return_ty = ret;
       T.body = lbody';
       T.captures = caps;
+      T.takes_env = true;
       T.is_async = false;
     } :: !lifted_funcs)
     my_lambdas;
@@ -3055,6 +3060,7 @@ let check_func (env : env) (f : func) : T.func =
     T.return_ty = ret_ty;
     T.body = body_with_moves;
     T.captures = [];
+    T.takes_env = false;
     T.is_async = body_has_suspension body_with_moves }
 
 (* ---------- top-level entry ---------- *)

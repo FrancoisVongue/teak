@@ -2185,7 +2185,7 @@ let func_params_c (f : Check.T.func) : string =
   let typed =
     List.map (fun (x, t) -> Printf.sprintf "%s %s" (c_type t) x) f.params
   in
-  let all = if f.captures = [] then typed else "void *env" :: typed in
+  let all = if f.takes_env then "void *env" :: typed else typed in
   match all with [] -> "void" | _ -> String.concat ", " all
 
 let emit_func_decl (f : Check.T.func) : string =
