@@ -34,7 +34,7 @@ fn classify(x: float) -> int {
 }
 
 // Mixing int and float requires explicit conversion.
-fn average(xs: Array[int]) -> float {
+fn average(xs: Ref[int]) -> float {
     let mut sum = 0;
     for i in 0..len(xs) {
         sum := sum + xs[i];
@@ -51,7 +51,7 @@ fn main() -> int {
     putchar(10);                    // newline
 
     // Mean of [1, 2, 3, 4, 5] = 3.0
-    let xs = array(r, [1, 2, 3, 4, 5]);
+    let xs = ref(r, [1, 2, 3, 4, 5]);
     let m = average(xs);
     print_int(to_int(m));           // 3
     putchar(10);

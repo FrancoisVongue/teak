@@ -1,12 +1,12 @@
 // Advanced string mechanics:
 //   - duplicate literals are deduped (both "hi" share storage)
-//   - slice over an Array[byte] living in a heap region
+//   - slice over an Ref[byte] living in a heap region
 //   - byte arithmetic via to_int / to_byte round-trip
 //   - escape sequences in literal
 
 extern fn putchar(c: int) -> int
 
-fn print_loop(s: Array[byte], i: int) -> int {
+fn print_loop(s: Ref[byte], i: int) -> int {
     if i >= len(s) {
         0
     } else {
@@ -16,7 +16,7 @@ fn print_loop(s: Array[byte], i: int) -> int {
 }
 
 // Build "ABCDE" byte-by-byte into a freshly allocated array.
-fn write_alphabet(a: Array[byte], i: int, n: int) -> int {
+fn write_alphabet(a: Ref[byte], i: int, n: int) -> int {
     if i >= n {
         0
     } else {
@@ -32,9 +32,9 @@ fn main() -> int {
     print_loop(g1, 0);
     print_loop(g2, 0);
 
-    // Allocate Array[byte] in a heap region, fill, slice, print.
+    // Allocate Ref[byte] in a heap region, fill, slice, print.
     arena r   = region(64);
-    let buf = array(r, 5, to_byte(0));
+    let buf = ref(r, 5, to_byte(0));
     write_alphabet(buf, 0, 5);
     print_loop(buf, 0);             // ABCDE
     putchar(10);

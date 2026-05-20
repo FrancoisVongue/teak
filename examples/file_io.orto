@@ -15,7 +15,7 @@ use sys::{Fd, fd_wrap, fd_read, fd_write,
 use str::c_str;
 // print is an intrinsic
 
-fn do_write(path: Array[byte]) -> int {
+fn do_write(path: Ref[byte]) -> int {
     let raw = sys_open(path, o_wronly() + o_creat() + o_trunc(), 420);
     if raw < 0 { return 1 }
     let f = fd_wrap(raw);
@@ -24,11 +24,11 @@ fn do_write(path: Array[byte]) -> int {
     // f drops here — close(raw) is called
 }
 
-fn do_read(r: Region, path: Array[byte]) -> int {
+fn do_read(r: Region, path: Ref[byte]) -> int {
     let raw = sys_open(path, o_rdonly(), 0);
     if raw < 0 { return 2 }
     let f = fd_wrap(raw);
-    let buf = array(r, 256, to_byte(0));
+    let buf = ref(r, 256, to_byte(0));
     let n = fd_read(f, buf);
     if n <= 0 { return 3 }
     print(slice(buf, 0, n));

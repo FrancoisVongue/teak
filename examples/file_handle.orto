@@ -27,7 +27,7 @@ fn open_stdout() -> File {
 
 // Writing to a file consumes the handle? No — File is passed by value
 // (borrow-like), the function does not drop. Caller still owns.
-fn write_str(f: File, s: Array[byte]) -> int {
+fn write_str(f: File, s: Ref[byte]) -> int {
     write(f.fd, array_data(s), len(s));
     0
 }

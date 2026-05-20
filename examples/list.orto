@@ -1,14 +1,13 @@
-// A linked list using Ref[T] — a one-element region handle. Ref makes
-// the reference nature obvious in the type: a node holds a Ref to the
-// rest, which lives in the same region. Ref[T] is sugar for a one-slot
-// Array[T]; ref/get build and read it.
+// A linked list. A node holds a Ref to the rest of the list, which
+// lives in the same region. ref(r, v) allocates one cell; rest[0] reads
+// it. The fixed-size handle is what makes the recursive type finite.
 
 enum List { Nil, Cons(int, Ref[List]) }
 
 fn sum(l: List) -> int {
     match l {
         Nil => 0,
-        Cons(v, rest) => v + sum(get(rest))
+        Cons(v, rest) => v + sum(rest[0])
     }
 }
 

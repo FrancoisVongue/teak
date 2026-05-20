@@ -46,7 +46,6 @@ let lower_ident_or_keyword s =
   | "match" -> TMatch
   | "extern" -> TExtern
   | "use"   -> TUse
-  | "array" -> TArray
   | "len"   -> TLen
   | "slice" -> TSlice
   | "to_int" -> TToInt
@@ -74,8 +73,6 @@ let lower_ident_or_keyword s =
   | "arena"   -> TArena
   | "closure" -> TClosure
   | "ref"     -> TRef
-  | "get"     -> TGet
-  | "set"     -> TSet
   | "_"     -> TUnderscore
   | _       -> TIdent s
 

@@ -11,7 +11,7 @@
 |---|---|
 | Данные | `int`/`bool`/`byte`/`float` литералы, `struct`, `enum`, `fn` type, generics `[T]` |
 | Вычисление | `let` / `if` / `match` / `while` / call / binop / unop |
-| Память | `Region` (через `arena`), `Array[T]`, `linear struct/enum`, `drop_<T>`, `*T` (FFI escape) |
+| Память | `Region` (через `arena`), `Ref[T]`, `linear struct/enum`, `drop_<T>`, `*T` (FFI escape) |
 | Конкурентность | `await`, `spawn`, `Task[T]`, `Stream[T]`, `Result[T]` |
 | FFI | `extern fn` |
 | Модули | `use a::b::{c};` — вложенные namespace, манглинг в `resolve.ml` |
@@ -25,7 +25,7 @@
 | `for i in lo..hi { … }` | `let _hi=hi; let mut i=lo; while i<_hi { …; i := i+1 }` |
 | `x \|> f(a)` | `f(x, a)` |
 | `let (a, b) = t` | `let _t = t; let a = _t.0; let b = _t.1` |
-| `"abc"` | `Array[byte]` handle в slot 0 |
+| `"abc"` | `Ref[byte]` handle в slot 0 |
 | `0xFF` / `0b1010` | `EInt` |
 | trailing `;` перед `}` | `let _ = body; 0` |
 | pattern guards `pat if c => body` | match arm + проверка |
@@ -50,7 +50,7 @@
 | `spawn` только на ECall | Оставлено — семантическая необходимость |
 | `Region` спец-правила в `let mut` | Оставлено — обобщено через `is_linear_ty(t)`, не hardcoded имя |
 | `arena r = region(N)` вместо `let` | ✅ Region — scope-якорь, не значение. `let` отвергает Region, `arena` отвергает не-Region. Bijective. `arena` lower'ится в linear TELet — mono/emit не знают о нём |
-| `[T; N]` fixed-size array как отдельный тип | ❌ Не нужен — stack-массив = `Array[T]` в `stack_region(N)`. Один механизм (Region × Array), gen-counter ловит use-after-scope как у heap |
+| `[T; N]` fixed-size array как отдельный тип | ❌ Не нужен — stack-массив = `Ref[T]` в `stack_region(N)`. Один механизм (Region × Ref), gen-counter ловит use-after-scope как у heap |
 | Возврат `Region` из функции | ❌ Запрещён — регион создаётся в scope который его освобождает. Иначе Region стал бы movable linear с tracking'ом владения |
 | Closures | ✅ Сделано — `closure(r, fn...)`, env захватывается **по копии в регион** (gen-checked), не by-reference. Толстый указатель, единый тип `fn(A)->B`. Вписались ортогонально (см. ниже) |
 | `print`/`println` как intrinsic | ✅ tuple/scalar → один `writev`, ноль аллокаций, без региона. Не variadic (tuple раскрывается на compile-time), не typeclass |
@@ -85,7 +85,7 @@
 |---|---|---|
 | Use-after-free | ✅ | Region drop при выходе scope; gen counter (64-bit) на handle'ах |
 | Double-free | ✅ | Linear `drop` в типе; повторный drop = compile error |
-| Buffer overflow на Array | ✅ | bounds check на каждое `a[i]` (abort при выходе) |
+| Buffer overflow на Ref | ✅ | bounds check на каждое `a[i]` (abort при выходе) |
 | Buffer overflow на `*T` | ⚠️ | FFI escape, ответственность пользователя |
 | Null deref | ✅ | нет null в языке; `Option[T]` явный |
 | Uninit read | ✅ | компилятор требует init |

@@ -28,7 +28,7 @@ fn query(c: Connection, q: int) -> int {
 
 fn allocate_some(r: Region) -> int {
     // Borrows r — doesn't consume. Caller still owns.
-    let a = array(r, [10, 20, 30]);
+    let a = ref(r, [10, 20, 30]);
     a[0] + a[1] + a[2]
 }
 

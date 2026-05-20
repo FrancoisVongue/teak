@@ -14,7 +14,7 @@
 **Память:**
 - Один линейный примитив — `Region`.
 - Три способа создать: `region(N)` (heap), `stack_region(N)` (стек, N литерал), `aligned_region(N, A)` (posix_memalign, A литерал power-of-2).
-- `Array[T]` — копируемая ручка в Region. Gen-check + bounds-check на доступ.
+- `Ref[T]` — копируемая ручка в Region. Gen-check + bounds-check на доступ.
 - `slice(a, lo, hi)` — sub-handle в тот же Region, без копирования.
 - Slab allocator под капотом — никаких leak'ов, slots переиспользуются.
 
@@ -23,14 +23,14 @@
 - Обязательная `fn drop_<TypeName>(x: TypeName) -> int` в том же модуле. Компилятор требует.
 - `let y = x` где x линейный — compile error. Aliasing запрещён.
 - `let mut x = ...` линейного — compile error.
-- Линейные нельзя класть в data position (поле обычной struct, generic param, элемент Array).
+- Линейные нельзя класть в data position (поле обычной struct, generic param, элемент Ref).
 - `drop(x)` — explicit consume, запускает destructor.
 - Auto-drop в конце scope если не consumed.
 - Branch divergence — нельзя забыть drop в ветке.
 - Region — частный случай linear типа: автогенерируемый `drop_Region`.
 
 **Pattern matching:**
-- Match по int, bool, byte, Array[byte], ADT.
+- Match по int, bool, byte, Ref[byte], ADT.
 - Literal patterns: `42`, `-3`, `true`, `"hello"`.
 - Bind pattern: `x => body` биндит scrutinee к x (lowercase ident).
 - Or-patterns: `1 | 2 | 3 =>`, `Red | Green | Blue =>`.
@@ -52,7 +52,7 @@
 - `match` на float запрещён (NaN/zero edge cases); используй `if` или bind+guard.
 
 **Строки:**
-- `Array[byte]` — единственный тип строки. Никаких String/&str/CString/Cow.
+- `Ref[byte]` — единственный тип строки. Никаких String/&str/CString/Cow.
 - Литералы `"hello"` живут в статическом регионе (slot 0, never freed). Дедуплицируются.
 - Escape sequences: `\n \t \r \0 \\ \" \'`.
 - `to_int(b: byte) -> int`, `to_byte(n: int) -> byte` — явная конверсия.
@@ -64,7 +64,7 @@
 - `c_free(p)` — free; программист сам решает когда.
 - `*p` deref, `p[i]` индекс, `p[i] := v` запись.
 - `null_ptr[T]() -> *T`, `is_null(p) -> bool` — для NULL-returning C-API.
-- `array_data(a: Array[T]) -> *T` — отдать байты Array в libc/C-функцию.
+- `array_data(a: Ref[T]) -> *T` — отдать байты Ref в libc/C-функцию.
 
 **I/O — через io_uring:**
 - Целевые ядра: Linux 5.6+. Не Windows, не macOS, не старые ядра.
@@ -75,7 +75,7 @@
 - Stage 3 (в работе): ring-native completion-based concurrency. `await`, `await all { }`, `spawn`, `yield`, `Stream[T]`. Без `async`-раскраски, без `Future`/`Pin`. См. `STAGE3_ASYNC.md`.
   - Фаза 1 (есть): синтаксис — `await` / `await all` / `spawn` / `yield`. `async` модификатор для `extern fn`.
   - Фаза 2 (есть): типизация `Task[T]` и `Stream[T]` как builtin linear; induced linearity (Task[Region] валиден).
-  - Фаза 3 (есть): `Array[T]` где T линейный → линейный массив; cascade drop (drop_Array_T).
+  - Фаза 3 (есть): `Ref[T]` где T линейный → линейный массив; cascade drop (drop_Array_T).
   - Фаза 4a (есть): async-детектор по AST.
   - Фаза 4b/5 MVP (есть): `yield`-only async `main` через io_uring nop. State-machine lowering, диспетчер, frame на стеке.
   - Фаза 4c (есть): `await` на `extern async fn` — реальный I/O через ring.
@@ -106,7 +106,7 @@
 - `use foo::bar;` или `use foo::{a, b, c};` — selective import.
 - Driver автоматически подгружает referenced модули из той же директории. Циклы — compile error.
 - Mangling: `concat` в `str.orto` становится `str__concat`. References в `use'й`-щем модуле резолвятся прозрачно.
-- Builtin names (`Array`, `Region`, `Option`, `Some`, `None`, `byte`) и `main` не мангляются.
+- Builtin names (`Ref`, `Region`, `Option`, `Some`, `None`, `byte`) и `main` не мангляются.
 - Externs не мангляются (имя в C = имя в orto), дедуплицируются по имени.
 
 ---
@@ -120,13 +120,13 @@ orto-код, не compiler) и крупные архитектурные шаг�
 ### 1. Stdlib *(в работе)*
 
 Сейчас в `examples/` есть прото-stdlib:
-- `str.orto` — операции над `Array[byte]`: eq, find, parse_int, concat, concat_all, split_byte, bytes_join, trim, to_lower/upper, c_str, etc.
+- `str.orto` — операции над `Ref[byte]`: eq, find, parse_int, concat, concat_all, split_byte, bytes_join, trim, to_lower/upper, c_str, etc.
 - `io.orto` — print, println, putchar.
 - `sys.orto` — `linear Fd` + syscall wrappers (open, read, write, close, socket, bind, sendto, recvfrom, etc.).
 - `bin.orto` — binary read/write helpers (u16/u32 LE/BE) для netlink/network protocols.
 
 Что нужно добавить (по приоритету из netlink анализа в `NETLINK_ANALYSIS.md`):
-- **Hashmap** — линейный scan `Array[(K, V)]` болезнен at scale. Hand-written without generics, или через monomorphization. Большая stdlib работа.
+- **Hashmap** — линейный scan `Ref[(K, V)]` болезнен at scale. Hand-written without generics, или через monomorphization. Большая stdlib работа.
 - `std::gen_arena` — generational arena для resource pools, evicting caches.
 - `std::slab` — slab pool для homogeneous-size объектов.
 - `std::ring` — ring buffer.
@@ -140,7 +140,7 @@ orto-код, не compiler) и крупные архитектурные шаг�
 
 - ~~**Closures / lambdas.**~~ **Сделано** (`examples/lambda.orto`, `closures.orto`, `closures_generic.orto`). Все function-значения — толстый указатель `{env_slot, env_offset, env_gen, code}`. Анонимные `fn(p: T) -> R { body }` без захвата → lambda-lifting в обычную функцию; с захватом — `closure(r, fn...)`, env в регионе, gen-checked. Полиморфные замыкания работают. Capture-by-reference и escape-анализ мы НЕ делали — env живёт в явном регионе, протухание ловит gen-проверка. Фича вписалась ортогонально, без магии, которой боялись.
 
-- ~~**Рекурсивные данные (деревья/списки).**~~ **Сделано** (`examples/tree.orto`, `list.orto`). `enum Tree { Node(int, Array[Tree]) }` или `enum List { Cons(int, Ref[List]) }` — поле за хендлом (`Array`/`Ref`/`*T`) разрывает цикл по размеру, узлы живут в регионе. `Ref[T]` — одноклеточная ссылка (сахар над `Array[T]` из одного), `ref/get/set`.
+- ~~**Рекурсивные данные (деревья/списки).**~~ **Сделано** (`examples/tree.orto`, `list.orto`). `enum Tree { Node(int, Ref[Tree]) }` или `enum List { Cons(int, Ref[List]) }` — поле за хендлом (`Ref`/`*T`) фиксированного размера разрывает цикл, узлы живут в регионе. Доступ к одной ячейке: `r[0]`.
 
 - **Threading.** Уже expressible через linear типы — `linear struct Thread { id: int } drop_Thread = pthread_join`. Channels — `linear Sender`, `linear Receiver` с send/recv. Atomic primitives через `extern fn` (memory barriers от C). Не требует новой концепции — большая работа в stdlib + extern wrappers. См. `NETLINK_ANALYSIS.md`.
 
@@ -148,7 +148,7 @@ orto-код, не compiler) и крупные архитектурные шаг�
 
 - **Generic Option/Result для linear types** — сейчас `Option[Fd]` запрещён (Fd linear, Option не linear). Workaround: возвращать raw int + wrap manually (`fd_wrap`). Чище — разрешить linear-aware generic instantiation: если T linear, container становится linear.
 
-- **`format(r, "...", a, b, c)` variadic.** Текущее `concat_all(r, array(r, [...]))` многословно. Variadic + типизированные args существенно улучшат, но variadic — серьёзная фича.
+- **`format(r, "...", a, b, c)` variadic.** Текущее `concat_all(r, ref(r, [...]))` многословно. Variadic + типизированные args существенно улучшат, но variadic — серьёзная фича.
 
 - **Nested patterns в match.** `Some(0) =>`, `Some(_) =>`. Сейчас `Some(x)` биндит x, литерал на месте не работает. Закроется guards (есть!) на 80%; nested cleaner но big refactor.
 

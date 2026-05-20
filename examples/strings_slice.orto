@@ -4,7 +4,7 @@
 
 extern fn putchar(c: int) -> int
 
-fn print_loop(s: Array[byte], i: int) -> int {
+fn print_loop(s: Ref[byte], i: int) -> int {
     if i >= len(s) {
         0
     } else {

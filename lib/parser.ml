@@ -96,9 +96,12 @@ let rec parse_ty st =
       let ret = parse_ty st in
       TyFun (args, ret)
   | TCtorIdent s  ->
-      (* `Ref[T]` is surface sugar for a one-element region handle:
-         it is exactly `Array[T]` underneath. The name communicates
-         "a gen-checked reference to a single T living in a region". *)
+      (* `Ref[T]` is the surface name for a gen-checked reference to
+         cell(s) in a region; it is tagged "Array" internally. The bare
+         old name `Array` is no longer a valid surface type. *)
+      if s = "Array" then
+        raise (Parse_error
+          "the reference type is `Ref[T]` now (it replaced `Array[T]`)");
       let s = if s = "Ref" then "Array" else s in
       if peek st = TLBracket then begin
         advance st;
@@ -411,9 +414,9 @@ and parse_atom st =
   | TInt _ | TFloat _ | TTrue | TFalse | TLParen | TLBrace
   | TIdent _ | TCtorIdent _
   | TStringLit _
-  | TFn | TClosure | TRef | TGet | TSet
+  | TFn | TClosure | TRef
   | TIf | TMatch | TWhile | TBreak | TContinue | TFor | TReturn
-  | TArray | TLen | TSlice
+  | TLen | TSlice
   | TToInt | TToByte | TToFloat | TToU16 | TToU32 | TToU64
   | TCAlloc | TCFree | TNullPtr | TIsNull | TArrayData | TTryAt | TDrop
   | TRegion | TStackRegion | TAlignedRegion
@@ -541,27 +544,43 @@ and parse_atom_consume st =
       expect st TRParen;
       EClosure (region, ps, ret, body)
   | TRef ->
-      (* ref(r, v) — one-element region handle. Sugar for array(r, 1, v). *)
+      (* The one allocator into a region. Three forms:
+           ref(r, v)         — one cell holding v        (a "box")
+           ref(r, n, init)   — n cells, each init        (a buffer)
+           ref(r, [a, b, c]) — cells from a value list
+         All produce Ref[T] (a gen-checked handle to cell(s) in r). *)
       expect st TLParen;
       let r = parse_expr st in
       expect st TComma;
-      let v = parse_expr st in
-      expect st TRParen;
-      EArray (r, EInt 1, v)
-  | TGet ->
-      (* get(rf) — read the pointed-at value. Sugar for rf[0]. *)
-      expect st TLParen;
-      let rf = parse_expr st in
-      expect st TRParen;
-      EIndex (rf, EInt 0)
-  | TSet ->
-      (* set(rf, v) — write through the reference. Sugar for rf[0] := v. *)
-      expect st TLParen;
-      let rf = parse_expr st in
-      expect st TComma;
-      let v = parse_expr st in
-      expect st TRParen;
-      EAssignIdx (rf, EInt 0, v)
+      (match peek st with
+       | TLBracket ->
+           advance st;
+           let elems =
+             if peek st = TRBracket then []
+             else
+               let rec collect () =
+                 let e = parse_expr st in
+                 if peek st = TComma then begin
+                   advance st;
+                   if peek st = TRBracket then [e] else e :: collect ()
+                 end else [e]
+               in
+               collect ()
+           in
+           expect st TRBracket;
+           expect st TRParen;
+           EArrayLit (r, elems)
+       | _ ->
+           let first = parse_expr st in
+           (match peek st with
+            | TComma ->
+                advance st;
+                let init = parse_expr st in
+                expect st TRParen;
+                EArray (r, first, init)        (* ref(r, n, init) *)
+            | _ ->
+                expect st TRParen;
+                EArray (r, EInt 1, first)))    (* ref(r, v) — one cell *)
   | TIf -> parse_if_after_kw st
   | TMatch -> parse_match_after_kw st
   | TWhile ->
@@ -610,35 +629,6 @@ and parse_atom_consume st =
   | TReturn ->
       let v = parse_expr st in
       EReturn v
-  | TArray ->
-      expect st TLParen;
-      let r = parse_expr st in
-      expect st TComma;
-      (match peek st with
-       | TLBracket ->
-           (* array(r, [v0, v1, ..., vN]) — initialize from literal. *)
-           advance st;
-           let elems =
-             if peek st = TRBracket then []
-             else
-               let rec collect () =
-                 let e = parse_expr st in
-                 if peek st = TComma then begin
-                   advance st;
-                   if peek st = TRBracket then [e] else e :: collect ()
-                 end else [e]
-               in
-               collect ()
-           in
-           expect st TRBracket;
-           expect st TRParen;
-           EArrayLit (r, elems)
-       | _ ->
-           let n = parse_expr st in
-           expect st TComma;
-           let v = parse_expr st in
-           expect st TRParen;
-           EArray (r, n, v))
   | TRegion ->
       expect st TLParen;
       let n = parse_expr st in

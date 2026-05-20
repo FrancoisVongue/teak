@@ -220,6 +220,9 @@ let rec show_ty = function
   | TyVar n        -> n
   | TyApp (n, [])  -> n
   | TyApp (n, args) ->
+      (* The reference type is internally tagged "Array"; the surface
+         name is Ref[T]. *)
+      let n = if n = "Array" then "Ref" else n in
       Printf.sprintf "%s[%s]" n
         (String.concat ", " (List.map show_ty args))
   | TyFun (args, ret) ->
