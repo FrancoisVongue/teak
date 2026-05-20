@@ -29,6 +29,112 @@ let fresh prefix =
   Printf.sprintf "%s_%d" prefix !counter
 let reset_counter () = counter := 0
 
+(* ---------- gen-check elision (local provenance) ----------
+   A Ref access needs no generation check when the Ref provably points
+   into a region that is alive at the access. The trivial, structural
+   case: in straight-line synchronous code, the Ref was derived
+   (ref/slice) from a region that is alive for the whole call — a Region
+   *parameter* (borrowed; the owner is up the stack and cannot free it
+   before we return) or a local arena still in scope. We track this per
+   function; when we can't prove it, the gen-check stays (safe fallback).
+   Only the synchronous emitter turns this on — async frames can outlive
+   the owning scope, so they always keep the check. *)
+let elide_enabled    = ref false
+(* Escape hatch for A/B benchmarking: ORTO_NO_ELIDE=1 keeps every check. *)
+let elide_off_env = (try Sys.getenv "ORTO_NO_ELIDE" <> "" with Not_found -> false)
+let live_regions  : (string, unit) Hashtbl.t = Hashtbl.create 16
+let safe_refs     : (string, unit) Hashtbl.t = Hashtbl.create 16
+let assigned_vars : (string, unit) Hashtbl.t = Hashtbl.create 16
+let func_unsafe   = ref false   (* a region is explicitly dropped → bail out *)
+let elided_count  = ref 0
+
+let reset_provenance () =
+  Hashtbl.clear live_regions;
+  Hashtbl.clear safe_refs;
+  Hashtbl.clear assigned_vars;
+  func_unsafe := false
+
+(* Names ever reassigned (`x := ...`); an explicit region drop disables
+   elision for the whole function. Exhaustive on purpose: missing a node
+   that hides an assignment / drop could let us elide a check we must
+   keep. *)
+let rec collect_unsafe (e : Check.T.expr) : unit =
+  let open Check.T in
+  let go = collect_unsafe in
+  match e with
+  | TEAssign (x, v, _) -> Hashtbl.replace assigned_vars x (); go v
+  | TEDrop (sub, ty) ->
+      (match ty with TyApp ("Region", []) -> func_unsafe := true | _ -> ());
+      go sub
+  | TEInt _ | TEBool _ | TEVar _ | TEStringLit _ | TEFnRef _
+  | TEFloat _ | TENullPtr _ | TEBreak | TEContinue -> ()
+  | TECall (c, args, _) -> go c; List.iter go args
+  | TEBinop (_, a, b, _) -> go a; go b
+  | TEUnop (_, a, _) -> go a
+  | TECtor (_, _, args, _) -> List.iter go args
+  | TERecord (_, _, fs, _) -> List.iter (fun (_, e) -> go e) fs
+  | TEField (a, _, _) -> go a
+  | TEIf (c, t, el, _) -> go c; go t; go el
+  | TELet (_, _, v, b, _, _) -> go v; go b
+  | TEMatch (s, _, arms, _) ->
+      go s; List.iter (fun (_, g, b) -> Option.iter go g; go b) arms
+  | TEArray (a, b, c, _) -> go a; go b; go c
+  | TEArrayLit (a, es, _) -> go a; List.iter go es
+  | TERegion (a, _) | TEStackRegion (a, _) -> go a
+  | TEAlignedRegion (a, b, _) -> go a; go b
+  | TEIndex (a, i, _) -> go a; go i
+  | TEAssignIdx (a, i, v, _) -> go a; go i; go v
+  | TELen (a, _) -> go a
+  | TESlice (a, lo, hi, _) -> go a; go lo; go hi
+  | TEToInt a | TEToByte a | TEToU16 a | TEToU32 a | TEToU64 a
+  | TEToFloat a | TEToIntFromFloat a -> go a
+  | TECAlloc (_, n, _) -> go n
+  | TECFree a | TEIsNull a -> go a
+  | TEArrayData (a, _) -> go a
+  | TETryAt (a, b, _) -> go a; go b
+  | TEDeref (a, _) -> go a
+  | TEAssignField (p, _, v) -> go p; go v
+  | TEWhile (c, b) -> go c; go b
+  | TEReturn (a, _) -> go a
+  | TEAwait (a, _, _) -> go a
+  | TESpawn (a, _) -> go a
+  | TEForStream (_, _, a, b) -> go a; go b
+  | TETuple (es, _) -> List.iter go es
+  | TETupleIdx (a, _, _) -> go a
+  | TELetTuple (_, _, v, b, _, _) -> go v; go b
+  | TEAwaitAll (es, _, _) -> List.iter go es
+  | TEPrint (_, es, _) -> List.iter go es
+  | TEMakeClosure (_, _, _, region, _) -> go region
+
+(* Provenance of a let-bound value: does it name a live region, a Ref
+   safely derived from one, or neither? *)
+let provenance_of (v : Check.T.expr) : [ `Region | `SafeRef | `Other ] =
+  let open Check.T in
+  let live_region = function
+    | TEVar (r, _) -> Hashtbl.mem live_regions r | _ -> false in
+  let safe_ref = function
+    | TEVar (x, _) -> Hashtbl.mem safe_refs x | _ -> false in
+  match v with
+  | TERegion _ | TEStackRegion _ | TEAlignedRegion _ -> `Region
+  | TEArray (r, _, _, _)  when live_region r -> `SafeRef
+  | TEArrayLit (r, _, _)  when live_region r -> `SafeRef
+  | TESlice (a, _, _, _)  when safe_ref a    -> `SafeRef
+  | TEVar (x, _) when Hashtbl.mem safe_refs x    -> `SafeRef
+  | TEVar (x, _) when Hashtbl.mem live_regions x -> `Region
+  | _ -> `Other
+
+(* The gen-check on indexing `arr_e` can be dropped iff elision is on,
+   the function has no explicit region drop, and arr_e is a Ref variable
+   proven to come from a live region. *)
+let gen_check_needed (arr_e : Check.T.expr) : bool =
+  if !elide_enabled && not !func_unsafe && not elide_off_env then
+    match arr_e with
+    | Check.T.TEVar (v, _) when Hashtbl.mem safe_refs v ->
+        incr elided_count; false
+    | _ -> true
+  else true
+
+
 (* ---------- collect distinct TyFun types ---------- *)
 
 (* Mangled name -> the structural TyFun. Used to emit a typedef per
@@ -1197,6 +1303,13 @@ let rec emit_expr
 
   | Check.T.TELet (x, vt, value_e, body, body_ty, auto_drop) ->
       let cv = emit_expr ctor_map value_e in
+      (* Record region/Ref provenance before emitting the body, so
+         accesses inside the body can have their gen-check elided. *)
+      if !elide_enabled && x <> "_" && not (Hashtbl.mem assigned_vars x) then
+        (match provenance_of value_e with
+         | `Region  -> Hashtbl.replace live_regions x ()
+         | `SafeRef -> Hashtbl.replace safe_refs x ()
+         | `Other   -> ());
       let cb = emit_expr ctor_map body in
       (* Bindings whose name starts with `fr->` come from
          async_rewrite_to_frame — the variable lives in the
@@ -2127,10 +2240,14 @@ and index_setup ctor_map arr_e idx_e elem_c =
   let arr_c = c_type (ty_of_expr arr_e) in
   match ty_of_expr arr_e with
   | TyApp ("Ref", _) ->
-      let checks = [
-        Printf.sprintf
-          "if (ORTO_REGIONS[%s.slot].gen != %s.expected_gen) abort();"
-          a_var a_var;
+      let gen_check =
+        if gen_check_needed arr_e then
+          [ Printf.sprintf
+              "if (ORTO_REGIONS[%s.slot].gen != %s.expected_gen) abort();"
+              a_var a_var ]
+        else []
+      in
+      let checks = gen_check @ [
         Printf.sprintf "if (%s < 0 || %s >= %s.len) abort();"
           i_var i_var a_var;
       ] in
@@ -2264,6 +2381,15 @@ let emit_env_structs (funcs : Check.T.func list) : string list =
 
 let emit_func_def ctor_map (f : Check.T.func) : string =
   reset_counter ();
+  reset_provenance ();
+  collect_unsafe f.body;
+  (* A Region parameter is borrowed: the owner is up the stack and
+     cannot free it before this synchronous call returns, so it is alive
+     for the whole body. Seed it as a live region. *)
+  List.iter (fun (p, t) ->
+    match t with TyApp ("Region", []) -> Hashtbl.replace live_regions p () | _ -> ())
+    f.params;
+  elide_enabled := true;
   let params_s = func_params_c f in
   (* Lifted closure: unpack each captured value from the environment
      struct into a local of the same name the body expects. *)
@@ -2276,6 +2402,7 @@ let emit_func_def ctor_map (f : Check.T.func) : string =
            Printf.sprintf "%s %s = __e->f%d;" (c_type t) n i) f.captures
   in
   let cb = emit_expr ctor_map f.body in
+  elide_enabled := false;
   let body_lines =
     env_preamble @ cb.stmts @ [Printf.sprintf "return %s;" cb.value]
   in
