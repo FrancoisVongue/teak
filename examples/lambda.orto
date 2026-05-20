@@ -1,0 +1,21 @@
+// Anonymous function literals (capture-free).
+// Each `fn(...) -> ... { ... }` is lifted to a top-level function.
+
+fn twice(f: fn(int) -> int, x: int) -> int { f(f(x)) }
+
+fn apply[T, U](f: fn(T) -> U, x: T) -> U { f(x) }
+
+fn main() -> int {
+    // Inline lambda passed straight to a higher-order function.
+    let a = twice(fn(x: int) -> int { x + 3 }, 10);   // 10 -> 13 -> 16
+
+    // Bind a lambda to a local, then call it indirectly.
+    let g = fn(n: int) -> int { n * n };
+    let b = g(5);                                      // 25
+
+    // Lambda through a polymorphic higher-order function.
+    let c = apply(fn(x: int) -> bool { x > 0 }, 7);    // true
+    let cc = if c { 1 } else { 0 };
+
+    a + b + cc                                         // 16 + 25 + 1 = 42
+}

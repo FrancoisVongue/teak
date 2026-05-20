@@ -54,6 +54,12 @@ type expr =
   | EBinop  of binop * expr * expr
   | EUnop   of unop  * expr
   | ECall   of expr * expr list
+  | EFun    of (string * ty) list * ty * expr
+                                          (* fn(params) -> ret { body } —
+                                             anonymous function literal. Removed
+                                             by the lambda-lifting pass (lift.ml)
+                                             before the checker; only the lifter
+                                             and resolver ever see it. *)
   | ECtor   of string * expr list
   | ERecord of string * record_init_elem list
   | EField  of expr * string
@@ -263,6 +269,12 @@ let rec show_expr = function
       Printf.sprintf "(%s)(%s)"
         (show_expr f)
         (String.concat ", " (List.map show_expr args))
+  | EFun (params, ret, body) ->
+      Printf.sprintf "fn(%s) -> %s { %s }"
+        (String.concat ", "
+           (List.map (fun (n, t) ->
+              Printf.sprintf "%s: %s" n (show_ty t)) params))
+        (show_ty ret) (show_expr body)
   | ECtor (c, []) -> c
   | ECtor (c, args) ->
       Printf.sprintf "%s(%s)" c

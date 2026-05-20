@@ -997,6 +997,9 @@ let rec infer (env : env) (tparams : string list)
   (vars : (string * (ty * bool)) list) (e : expr)
   : T.expr * ty =
   match e with
+  | EFun _ ->
+      raise (Type_error
+        "internal: lambda not lifted before type-checking (compiler bug)")
   | EInt n  -> (T.TEInt n,  TyInt)
   | EFloat f -> (T.TEFloat f, TyApp ("float", []))
   | EBool b -> (T.TEBool b, TyBool)

@@ -7,6 +7,30 @@
 
 ## Открытые
 
+### 0. Closures — итерация 1 сделана, захват впереди
+**Файлы:** lib/ast.ml (`EFun`), lib/parser.ml (лямбда-атом), lib/resolve.ml
+(обход + alias-expand), lib/lift.ml (новый пасс), bin/main.ml (вызов
+после resolve), examples/lambda.orto.
+**Сделано:** анонимные `fn(p: T, ...) -> R { body }` БЕЗ захвата.
+Lambda-lifting в top-level функцию `__lambda_N`, переиспользует всю
+машинерию fn-указателей (TEFnRef / TyFun typedef). Захват локали даёт
+честную ошибку "closure environments not implemented yet". Типы
+параметров и возврата пока обязательны (lifted-функции их требуют).
+**Дальше по плану (двухрежимная модель, согласована с Francois):**
+1. Захват: env-struct + fat pointer {code_ptr, env_ptr}.
+2. Режим non-escaping (`fn(x){...}`) — env на стеке, нулевая аллокация,
+   запрет escape (return/store) через taint-анализ. Красивый общий случай
+   (map/filter/fold).
+3. Режим escaping (`closure(r, fn(x){...})`) — env в регионе `r`, linear,
+   освобождается через существующий drop_Region. First-class + основа для
+   Lazy[T].
+4. Вывод типов параметров/возврата лямбды (убрать обязательные аннотации).
+5. async-стык: замыкание, пересекающее `await`, обязано быть region-env
+   (стек-env не переживёт frame hoisting в state machine — phase 4 ещё
+   не дописан, см. STAGE3_ASYNC).
+6. Полиморфные лямбды (сейчас lifted с type_params=[]; ссылка на
+   type-var окружения не поддержана).
+
 ### 1. Неиспользуемые spread temp-биндинги
 **Файл:** lib/check.ml (генерация TELet для spread base'ов)
 **Суть:** когда после `..base` все поля переопределяются явно, временная

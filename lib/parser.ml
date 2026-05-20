@@ -407,6 +407,7 @@ and parse_atom st =
   | TInt _ | TFloat _ | TTrue | TFalse | TLParen | TLBrace
   | TIdent _ | TCtorIdent _
   | TStringLit _
+  | TFn
   | TIf | TMatch | TWhile | TBreak | TContinue | TFor | TReturn
   | TArray | TLen | TSlice
   | TToInt | TToByte | TToFloat | TToU16 | TToU32 | TToU64
@@ -478,6 +479,33 @@ and parse_atom_consume st =
            expect st TRBrace;
            ERecord (name, elems)
        | _ -> ECtor (name, []))
+  | TFn ->
+      (* Anonymous function literal: fn(p: T, ...) -> R { body }.
+         Param and return types are required in this iteration — the
+         lifter turns the lambda into a top-level function, which needs
+         declared types. Inference of these comes later. *)
+      expect st TLParen;
+      let rec params () =
+        if peek st = TRParen then []
+        else begin
+          let name = match eat st with
+            | TIdent s -> s
+            | t -> raise (Parse_error
+                (Printf.sprintf "expected lambda parameter name, got %s"
+                   (Token.show t)))
+          in
+          expect st TColon;
+          let ty = parse_ty st in
+          if peek st = TComma then (advance st; (name, ty) :: params ())
+          else [(name, ty)]
+        end
+      in
+      let ps = params () in
+      expect st TRParen;
+      expect st TArrow;
+      let ret = parse_ty st in
+      let body = parse_block st in
+      EFun (ps, ret, body)
   | TIf -> parse_if_after_kw st
   | TMatch -> parse_match_after_kw st
   | TWhile ->
