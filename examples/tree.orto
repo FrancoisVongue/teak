@@ -1,0 +1,35 @@
+// Recursive data: a tree whose nodes live in a region, referenced by
+// region handles. A node's children are an Array[Tree] — a fixed-size
+// handle, so the type is finite even though it mentions itself.
+
+enum Tree { Leaf, Node(int, Array[Tree]) }
+
+fn total(t: Tree) -> int {
+    match t {
+        Leaf => 0,
+        Node(v, kids) => {
+            let mut acc = v;
+            let mut i = 0;
+            while i < len(kids) {
+                acc := acc + total(kids[i]);
+                i := i + 1;
+            }
+            acc
+        }
+    }
+}
+
+fn leaf2(r: Region) -> Array[Tree] { array(r, 2, Leaf) }
+
+fn main() -> int {
+    arena r = region(8192);
+    //          100
+    //         /   \
+    //        20    3
+    let left  = Node(20, leaf2(r));
+    let right = Node(3,  leaf2(r));
+    let kids  = array(r, 2, left);
+    kids[1] := right;
+    let root = Node(100, kids);
+    total(root)   // 100 + 20 + 3 = 123
+}

@@ -41,3 +41,4 @@ strings_print RUN 0
 strings_real RUN 29
 strings_slice RUN 119
 sys NOMAIN_OR_ERR
+tree RUN 123

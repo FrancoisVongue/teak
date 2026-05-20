@@ -812,9 +812,11 @@ let check_no_recursive_types
   in
   let rec deps_in_ty acc = function
     | TyInt | TyBool | TyVar _ | TyMeta _ -> acc
-    | TyApp ("Ref", _) | TyApp ("Own", _) ->
-        (* Ref and Own both break by-value cycles — they're pointer-sized
-           regardless of what's inside. *)
+    | TyApp ("Ref", _) | TyApp ("Own", _) | TyApp ("Array", _) ->
+        (* Ref, Own and Array are all fixed-size handles into a region —
+           pointer-sized regardless of what they point at, so they break
+           by-value size cycles (the pointed-at values live in the
+           region, not inline). *)
         acc
     | TyApp (n, args) ->
         let acc = if is_known n then n :: acc else acc in
@@ -843,7 +845,8 @@ let check_no_recursive_types
       if dep = root then
         raise (Type_error
           (Printf.sprintf
-             "recursive type %S (cycle: %s) — use Own[...] or Ref[...] for indirection"
+             "recursive type %S (cycle: %s) — put the recursive field behind \
+              a region handle (Array[...] or Ref[...]) for indirection"
              root
              (String.concat " -> " (List.rev (dep :: path)))))
       else if not (List.mem dep path) then
