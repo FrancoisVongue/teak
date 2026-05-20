@@ -1663,11 +1663,12 @@ let rec emit_expr
         Printf.sprintf "int %s = ORTO_REGION_FREE_HEAD;" slot_var;
         Printf.sprintf
           "ORTO_REGION_FREE_HEAD = ORTO_REGIONS[%s].next_free;" slot_var;
+        (* Reuse the slot's pooled buffer if it's big enough (drop keeps
+           it). Avoids a fresh malloc + page faults when arenas are
+           created and destroyed in a loop. free(NULL) is a no-op. *)
         Printf.sprintf
-          "ORTO_REGIONS[%s].buffer = malloc((size_t)%s);" slot_var n_var;
-        Printf.sprintf "if (!ORTO_REGIONS[%s].buffer) abort();" slot_var;
-        Printf.sprintf "ORTO_REGIONS[%s].buffer_size = (size_t)%s;"
-          slot_var n_var;
+          "if (ORTO_REGIONS[%s].buffer == NULL || ORTO_REGIONS[%s].buffer_size < (size_t)%s) { free(ORTO_REGIONS[%s].buffer); ORTO_REGIONS[%s].buffer = malloc((size_t)%s); if (!ORTO_REGIONS[%s].buffer) abort(); ORTO_REGIONS[%s].buffer_size = (size_t)%s; }"
+          slot_var slot_var n_var slot_var slot_var n_var slot_var slot_var n_var;
         Printf.sprintf "ORTO_REGIONS[%s].used = 0;" slot_var;
         Printf.sprintf "ORTO_REGIONS[%s].next_free = -1;" slot_var;
         Printf.sprintf "ORTO_REGIONS[%s].is_stack = 0;" slot_var;
@@ -1695,6 +1696,7 @@ let rec emit_expr
         Printf.sprintf "int %s = ORTO_REGION_FREE_HEAD;" slot_var;
         Printf.sprintf
           "ORTO_REGION_FREE_HEAD = ORTO_REGIONS[%s].next_free;" slot_var;
+        Printf.sprintf "free(ORTO_REGIONS[%s].buffer);" slot_var;  (* drop a pooled heap buffer if any *)
         Printf.sprintf "ORTO_REGIONS[%s].buffer = %s;" slot_var stor_var;
         Printf.sprintf "ORTO_REGIONS[%s].buffer_size = (size_t)%s;"
           slot_var n_var;
@@ -1728,6 +1730,7 @@ let rec emit_expr
         Printf.sprintf
           "if (posix_memalign(&%s, (size_t)%s, (size_t)%s) != 0) abort();"
           buf_var a_var n_var;
+        Printf.sprintf "free(ORTO_REGIONS[%s].buffer);" slot_var;  (* drop a pooled heap buffer if any *)
         Printf.sprintf "ORTO_REGIONS[%s].buffer = (char*)%s;"
           slot_var buf_var;
         Printf.sprintf "ORTO_REGIONS[%s].buffer_size = (size_t)%s;"
@@ -4191,10 +4194,14 @@ let emit ?(slots=1024) ?(cores=1) ?(ring_entries=64) ?(test_mode=false) (prog : 
      \n\
      static void drop_Region(Region r) {\n\
      \    if (ORTO_REGIONS[r.slot].gen != r.expected_gen) return;\n\
-     \    if (!ORTO_REGIONS[r.slot].is_stack)\n\
-     \        free(ORTO_REGIONS[r.slot].buffer);\n\
-     \    ORTO_REGIONS[r.slot].buffer = NULL;\n\
-     \    ORTO_REGIONS[r.slot].buffer_size = 0;\n\
+     \    /* A heap buffer is KEPT on the slot so the next region() that\n\
+     \     * reuses this slot can reuse the buffer (no malloc / re-fault).\n\
+     \     * Stack buffers die with the C frame, so they can't be pooled. */\n\
+     \    if (ORTO_REGIONS[r.slot].is_stack) {\n\
+     \        ORTO_REGIONS[r.slot].buffer = NULL;\n\
+     \        ORTO_REGIONS[r.slot].buffer_size = 0;\n\
+     \        ORTO_REGIONS[r.slot].is_stack = 0;\n\
+     \    }\n\
      \    ORTO_REGIONS[r.slot].used = 0;\n\
      \    ORTO_REGIONS[r.slot].gen++;\n\
      \    ORTO_REGIONS[r.slot].next_free = ORTO_REGION_FREE_HEAD;\n\
