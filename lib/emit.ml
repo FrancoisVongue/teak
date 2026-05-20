@@ -41,6 +41,18 @@ let reset_counter () = counter := 0
 let fn_types_seen : (string, unit) Hashtbl.t = Hashtbl.create 16
 let fn_types_order : (string * ty) list ref = ref []
 
+(* Top-level functions used as a value (not a direct callee) need a
+   wrapper that adapts their plain signature to the closure code-pointer
+   convention. We collect (name, fn-type) per such function; one wrapper
+   is emitted for each. *)
+let fnval_seen : (string, unit) Hashtbl.t = Hashtbl.create 16
+let fnval_order : (string * ty) list ref = ref []
+let register_fnval (name : string) (t : ty) : unit =
+  if not (Hashtbl.mem fnval_seen name) then begin
+    Hashtbl.add fnval_seen name ();
+    fnval_order := (name, t) :: !fnval_order
+  end
+
 (* Array[T] instantiations: emit one typedef per distinct element type. *)
 let array_types_seen : (string, unit) Hashtbl.t = Hashtbl.create 8
 let array_types_order : (string * ty) list ref = ref []
@@ -301,9 +313,61 @@ let rec collect_expr (e : Check.T.expr) : unit =
   | Check.T.TEPrint (_, es, ts) ->
       List.iter collect_expr es; List.iter collect_ty ts
 
+(* Find every function reference in *value* position (i.e. not the
+   direct callee of a call). Those need a closure-convention wrapper.
+   A TEFnRef that is the immediate callee of a TECall is emitted as a
+   plain direct call and needs no wrapper. *)
+let rec scan_fnvals (e : Check.T.expr) : unit =
+  let open Check.T in
+  match e with
+  | TEFnRef (name, _, t) -> register_fnval name t
+  | TECall (TEFnRef _, args, _) -> List.iter scan_fnvals args
+  | TECall (callee, args, _) -> scan_fnvals callee; List.iter scan_fnvals args
+  | TEInt _ | TEFloat _ | TEBool _ | TEStringLit _ | TEVar _
+  | TEBreak | TEContinue | TENullPtr _ -> ()
+  | TEBinop (_, a, b, _) -> scan_fnvals a; scan_fnvals b
+  | TEUnop (_, e, _) -> scan_fnvals e
+  | TECtor (_, _, args, _) -> List.iter scan_fnvals args
+  | TERecord (_, _, fields, _) -> List.iter (fun (_, e) -> scan_fnvals e) fields
+  | TEField (e, _, _) -> scan_fnvals e
+  | TEIf (c, t, el, _) -> scan_fnvals c; scan_fnvals t; scan_fnvals el
+  | TELet (_, _, v, b, _, _) -> scan_fnvals v; scan_fnvals b
+  | TEMatch (s, _, arms, _) ->
+      scan_fnvals s;
+      List.iter (fun (_, g, body) -> Option.iter scan_fnvals g; scan_fnvals body) arms
+  | TEArray (r, n, v, _) -> scan_fnvals r; scan_fnvals n; scan_fnvals v
+  | TEArrayLit (r, elems, _) -> scan_fnvals r; List.iter scan_fnvals elems
+  | TERegion (n, _) | TEStackRegion (n, _) -> scan_fnvals n
+  | TEAlignedRegion (n, a, _) -> scan_fnvals n; scan_fnvals a
+  | TEIndex (a, i, _) -> scan_fnvals a; scan_fnvals i
+  | TEAssignIdx (a, i, v, _) -> scan_fnvals a; scan_fnvals i; scan_fnvals v
+  | TELen (e, _) -> scan_fnvals e
+  | TESlice (a, lo, hi, _) -> scan_fnvals a; scan_fnvals lo; scan_fnvals hi
+  | TEToInt e | TEToByte e | TEToU16 e | TEToU32 e | TEToU64 e
+  | TEToFloat e | TEToIntFromFloat e -> scan_fnvals e
+  | TECAlloc (_, n, _) -> scan_fnvals n
+  | TECFree p | TEIsNull p -> scan_fnvals p
+  | TEArrayData (a, _) -> scan_fnvals a
+  | TEDeref (p, _) -> scan_fnvals p
+  | TEAssign (_, v, _) -> scan_fnvals v
+  | TEWhile (c, b) -> scan_fnvals c; scan_fnvals b
+  | TEReturn (v, _) -> scan_fnvals v
+  | TETryAt (a, i, _) -> scan_fnvals a; scan_fnvals i
+  | TEDrop (e, _) -> scan_fnvals e
+  | TEAwait (e, _, _) -> scan_fnvals e
+  | TESpawn (e, _) -> scan_fnvals e
+  | TEForStream (_, _, s, b) -> scan_fnvals s; scan_fnvals b
+  | TETuple (es, _) -> List.iter scan_fnvals es
+  | TETupleIdx (e, _, _) -> scan_fnvals e
+  | TELetTuple (_, _, v, b, _, _) -> scan_fnvals v; scan_fnvals b
+  | TEAwaitAll (bs, _, _) -> List.iter scan_fnvals bs
+  | TEPrint (_, es, _) -> List.iter scan_fnvals es
+
 let collect_program (prog : Check.T.program) : unit =
   Hashtbl.clear fn_types_seen;
   fn_types_order := [];
+  Hashtbl.clear fnval_seen;
+  fnval_order := [];
   Hashtbl.clear array_types_seen;
   array_types_order := [];
   Hashtbl.clear task_wrappers_seen;
@@ -332,8 +396,10 @@ let collect_program (prog : Check.T.program) : unit =
     List.iter (fun (_, t) -> collect_ty t) f.params;
     collect_ty f.return_ty;
     collect_expr f.body;
+    scan_fnvals f.body;
     if f.is_async then register_async_func f.name f.params f.return_ty) prog.funcs;
-  List.iter (fun (t : Check.T.test) -> collect_expr t.body) prog.tests
+  List.iter (fun (t : Check.T.test) ->
+    collect_expr t.body; scan_fnvals t.body) prog.tests
 
 (* ---------- rendering C types ---------- *)
 
@@ -370,16 +436,26 @@ let rec c_type (t : ty) : string =
   | TyMeta _ -> failwith "emit: TyMeta after mono"
 
 let emit_fn_typedefs () : string list =
-  (* Emit in reverse-insertion order = oldest first = deepest child first. *)
+  (* A function value is a fat pointer: a code pointer plus a reference
+     to its captured environment. The environment, when present, lives
+     in a region exactly like an Array's elements do — so the env
+     reference is the same {slot, offset, expected_gen} handle, and
+     calling a closure whose region has been dropped is caught by the
+     same generation check that guards array access. env_slot = -1
+     means "no environment" — a plain top-level function. The code
+     pointer always takes the environment as a leading `void*`. *)
   List.rev_map (fun (mangled, t) ->
     match t with
     | TyFun (args, ret) ->
         let ret_c = c_type ret in
-        if args = [] then
-          Printf.sprintf "typedef %s (*%s)(void);" ret_c mangled
-        else
-          Printf.sprintf "typedef %s (*%s)(%s);" ret_c mangled
-            (String.concat ", " (List.map c_type args))
+        let code_params =
+          if args = [] then "void *env"
+          else "void *env, " ^ String.concat ", " (List.map c_type args)
+        in
+        Printf.sprintf
+          "typedef struct { int env_slot; int env_offset; long long env_gen; \
+           %s (*code)(%s); } %s;"
+          ret_c code_params mangled
     | _ -> failwith "emit_fn_typedefs: non-fn type in list")
     !fn_types_order
 
@@ -831,12 +907,22 @@ let emit_record_definition (rd : record_decl) : string =
   Printf.sprintf "struct %s {\n%s\n};" rd.rec_name
     (String.concat "\n" field_lines)
 
+(* Field types of a variant, keyed by (mangled owner type, ctor name).
+   ctor_map alone is keyed by ctor name and so collides across
+   instantiations (Handler_int vs Handler_bool both have `Compute`);
+   this table disambiguates by the owner type, which the match arm
+   knows from the scrutinee. *)
+let variant_fields : (string * string, ty list) Hashtbl.t = Hashtbl.create 32
+
 let build_ctor_map (types : type_decl list)
   : (string, type_decl * variant * int) Hashtbl.t =
+  Hashtbl.clear variant_fields;
   let h = Hashtbl.create 32 in
   List.iter (fun td ->
     List.iteri (fun i v ->
-      Hashtbl.add h v.ctor_name (td, v, i)) td.variants) types;
+      Hashtbl.add h v.ctor_name (td, v, i);
+      Hashtbl.replace variant_fields (td.type_name, v.ctor_name) v.arg_tys)
+      td.variants) types;
   h
 
 (* ---------- expression emission ---------- *)
@@ -934,24 +1020,48 @@ let rec emit_expr
       { stmts = []; value }
   | Check.T.TEVar (x, _) -> { stmts = []; value = x }
 
-  | Check.T.TEFnRef (name, _, _) ->
-      { stmts = []; value = name }
+  | Check.T.TEFnRef (name, _, t) ->
+      (* Function used as a value: a fat pointer with no environment
+         (env_slot = -1), code pointing at the closure-convention
+         wrapper that forwards to the plain function. *)
+      { stmts = [];
+        value = Printf.sprintf
+          "((%s){ .env_slot = -1, .env_offset = 0, .env_gen = 0, .code = __fnval_%s })"
+          (c_type t) name }
+
+  | Check.T.TECall (Check.T.TEFnRef (name, _, _), args, _) ->
+      (* Direct call to a named function — fast path, no indirection. *)
+      let arg_codes = List.map (emit_expr ctor_map) args in
+      let stmts = List.concat_map (fun c -> c.stmts) arg_codes in
+      let vals = List.map (fun c -> c.value) arg_codes in
+      { stmts;
+        value = Printf.sprintf "%s(%s)" name (String.concat ", " vals) }
 
   | Check.T.TECall (callee, args, _) ->
+      (* Indirect call through a function value (fat pointer). Resolve
+         the environment from its region handle, validating the
+         generation exactly like an array access — a call through a
+         closure whose region was dropped aborts. *)
       let cc = emit_expr ctor_map callee in
       let arg_codes = List.map (emit_expr ctor_map) args in
+      let ct = c_type (ty_of_expr callee) in
+      let cv = fresh "_clos" in
+      let ev = fresh "_env" in
+      let setup = [
+        Printf.sprintf "%s %s = %s;" ct cv cc.value;
+        Printf.sprintf "void *%s = (void*)0;" ev;
+        Printf.sprintf
+          "if (%s.env_slot >= 0) { if (ORTO_REGIONS[%s.env_slot].gen != \
+           %s.env_gen) abort(); %s = (char*)ORTO_REGIONS[%s.env_slot].buffer \
+           + %s.env_offset; }"
+          cv cv cv ev cv cv;
+      ] in
       let stmts =
-        cc.stmts @ List.concat_map (fun c -> c.stmts) arg_codes
+        cc.stmts @ List.concat_map (fun c -> c.stmts) arg_codes @ setup
       in
-      let vals = List.map (fun c -> c.value) arg_codes in
-      let callee_s = match callee with
-        | Check.T.TEVar _ | Check.T.TEFnRef _ -> cc.value
-        | _ -> Printf.sprintf "(%s)" cc.value
-      in
-      let value = Printf.sprintf "%s(%s)" callee_s
-        (String.concat ", " vals)
-      in
-      { stmts; value }
+      let vals = ev :: List.map (fun c -> c.value) arg_codes in
+      { stmts;
+        value = Printf.sprintf "%s.code(%s)" cv (String.concat ", " vals) }
 
   | Check.T.TEBinop (op, a, b, _) ->
       let ca = emit_expr ctor_map a in
@@ -1111,7 +1221,18 @@ let rec emit_expr
             | PBind x ->
                 [Printf.sprintf "    %s %s = %s;" (c_type scrut_ty) x scrut_var]
             | PCtor (c, vs) ->
-                let (_, v, _) = Hashtbl.find ctor_map c in
+                (* Field types must come from THIS scrutinee's
+                   instantiation, not the ctor-name-keyed ctor_map which
+                   collides across instantiations. *)
+                let arg_tys =
+                  match scrut_ty with
+                  | TyApp (owner, _) when
+                      Hashtbl.mem variant_fields (owner, c) ->
+                      Hashtbl.find variant_fields (owner, c)
+                  | _ ->
+                      let (_, v, _) = Hashtbl.find ctor_map c in
+                      v.arg_tys
+                in
                 List.filter_map (fun ((var, t), i) ->
                   if var = "_" then None
                   else
@@ -1119,7 +1240,7 @@ let rec emit_expr
                       "    %s %s = %s.as.%s.f%d;"
                       (c_type t) var scrut_var c i))
                 (List.mapi (fun i x -> (x, i))
-                  (List.combine vs v.arg_tys))
+                  (List.combine vs arg_tys))
             | _ -> []
           in
           let cb = emit_expr ctor_map body in
@@ -1972,6 +2093,26 @@ let emit_func_decl (f : Check.T.func) : string =
           Printf.sprintf "%s %s" (c_type t) x) f.params)
   in
   Printf.sprintf "%s %s(%s);" (c_type f.return_ty) f.name params_s
+
+(* One wrapper per top-level function used as a value: adapts the
+   plain C signature to the closure code-pointer convention, where the
+   code pointer takes the environment as a leading void* argument. *)
+let emit_fnval_wrappers () : string list =
+  List.rev_map (fun (name, t) ->
+    match t with
+    | TyFun (args, ret) ->
+        let typed_params =
+          List.mapi (fun i a -> Printf.sprintf "%s a%d" (c_type a) i) args
+        in
+        let params = String.concat ", " ("void *env" :: typed_params) in
+        let call_args =
+          String.concat ", " (List.mapi (fun i _ -> Printf.sprintf "a%d" i) args)
+        in
+        Printf.sprintf
+          "static %s __fnval_%s(%s) { (void)env; return %s(%s); }"
+          (c_type ret) name params name call_args
+    | _ -> failwith "emit_fnval_wrappers: non-fn type")
+    !fnval_order
 
 let emit_func_def ctor_map (f : Check.T.func) : string =
   reset_counter ();
@@ -3417,6 +3558,7 @@ let emit ?(slots=1024) ?(cores=1) ?(ring_entries=64) ?(test_mode=false) (prog : 
   let stream_drop_forwards = if has_async then emit_stream_drop_forwards () else [] in
   let stream_drop_defs     = if has_async then emit_stream_drop_defs ()     else [] in
   let fn_typedefs  = emit_fn_typedefs () in
+  let fnval_wrappers = emit_fnval_wrappers () in
   let ordered_structs = topo_sort_structs prog.types prog.records in
   let struct_defs = List.map (function
     | DAdt td -> emit_adt_definition td
@@ -3782,6 +3924,7 @@ let emit ?(slots=1024) ?(cores=1) ?(ring_entries=64) ?(test_mode=false) (prog : 
      @ extern_decls
      @ decls
      @ async_decls_sync
+     @ fnval_wrappers
      @ array_drop_forwards
      @ task_drop_forwards
      @ stream_drop_forwards
