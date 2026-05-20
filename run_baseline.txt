@@ -2,6 +2,7 @@ address_book RUN 0
 array_basic RUN 14
 bin NOMAIN_OR_ERR
 builtin_values RUN 100
+closures RUN 147
 db NOMAIN_OR_ERR
 db_driver NOMAIN_OR_ERR
 fact RUN 176

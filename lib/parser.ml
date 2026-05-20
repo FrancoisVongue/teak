@@ -407,7 +407,7 @@ and parse_atom st =
   | TInt _ | TFloat _ | TTrue | TFalse | TLParen | TLBrace
   | TIdent _ | TCtorIdent _
   | TStringLit _
-  | TFn
+  | TFn | TClosure
   | TIf | TMatch | TWhile | TBreak | TContinue | TFor | TReturn
   | TArray | TLen | TSlice
   | TToInt | TToByte | TToFloat | TToU16 | TToU32 | TToU64
@@ -506,6 +506,36 @@ and parse_atom_consume st =
       let ret = parse_ty st in
       let body = parse_block st in
       EFun (ps, ret, body)
+  | TClosure ->
+      (* closure(<region>, fn(p: T, ...) -> R { body }) — a capturing
+         lambda whose environment is allocated in <region>. *)
+      expect st TLParen;
+      let region = parse_expr st in
+      expect st TComma;
+      expect st TFn;
+      expect st TLParen;
+      let rec params () =
+        if peek st = TRParen then []
+        else begin
+          let name = match eat st with
+            | TIdent s -> s
+            | t -> raise (Parse_error
+                (Printf.sprintf "expected lambda parameter name, got %s"
+                   (Token.show t)))
+          in
+          expect st TColon;
+          let ty = parse_ty st in
+          if peek st = TComma then (advance st; (name, ty) :: params ())
+          else [(name, ty)]
+        end
+      in
+      let ps = params () in
+      expect st TRParen;
+      expect st TArrow;
+      let ret = parse_ty st in
+      let body = parse_block st in
+      expect st TRParen;
+      EClosure (region, ps, ret, body)
   | TIf -> parse_if_after_kw st
   | TMatch -> parse_match_after_kw st
   | TWhile ->

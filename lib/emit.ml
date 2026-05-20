@@ -312,6 +312,10 @@ let rec collect_expr (e : Check.T.expr) : unit =
       List.iter collect_ty ptys
   | Check.T.TEPrint (_, es, ts) ->
       List.iter collect_expr es; List.iter collect_ty ts
+  | Check.T.TEMakeClosure (_, caps, region, fn_ty) ->
+      collect_expr region;
+      List.iter (fun (_, t) -> collect_ty t) caps;
+      collect_ty fn_ty
 
 (* Find every function reference in *value* position (i.e. not the
    direct callee of a call). Those need a closure-convention wrapper.
@@ -362,6 +366,7 @@ let rec scan_fnvals (e : Check.T.expr) : unit =
   | TELetTuple (_, _, v, b, _, _) -> scan_fnvals v; scan_fnvals b
   | TEAwaitAll (bs, _, _) -> List.iter scan_fnvals bs
   | TEPrint (_, es, _) -> List.iter scan_fnvals es
+  | TEMakeClosure (_, _, region, _) -> scan_fnvals region
 
 let collect_program (prog : Check.T.program) : unit =
   Hashtbl.clear fn_types_seen;
@@ -811,6 +816,12 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
         TEAwaitAll (List.map (rn env) bs, t, ptys)
     | TEPrint (nl, es, ts) ->
         TEPrint (nl, List.map (rn env) es, ts)
+    | TEMakeClosure (name, caps, region, fn_ty) ->
+        let caps' =
+          List.map (fun (n, t) ->
+            ((try List.assoc n env with Not_found -> n), t)) caps
+        in
+        TEMakeClosure (name, caps', rn env region, fn_ty)
   in
   let initial_env = List.map (fun (p, _) -> (p, p)) f.params in
   { f with body = rn initial_env f.body }
@@ -981,6 +992,10 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TELetTuple (_, _, _, _, t, _) -> t
   | Check.T.TEAwaitAll (_, t, _) -> t
   | Check.T.TEPrint _ -> TyInt
+  | Check.T.TEMakeClosure (_, _, _, fn_ty) -> fn_ty
+
+(* C name of a lifted closure's environment struct. *)
+let env_struct_name (fn_name : string) : string = "__env_" ^ fn_name
 
 (* Release a Region's buffer (if it's heap-allocated), bump the
    generation, and push the slot back onto the free list. Stack
@@ -2008,6 +2023,47 @@ let rec emit_expr
         rc iov n_iov rc);
       { stmts = List.rev !stmts; value = "0" }
 
+  | Check.T.TEMakeClosure (lname, caps, region, fn_ty) ->
+      let fn_c = c_type fn_ty in
+      let rc = emit_expr ctor_map region in
+      if caps = [] then
+        (* No captures: a plain function value, no environment to
+           allocate. The region is still evaluated for its effects. *)
+        { stmts = rc.stmts;
+          value = Printf.sprintf
+            "((%s){ .env_slot = -1, .env_offset = 0, .env_gen = 0, .code = %s })"
+            fn_c lname }
+      else begin
+        let es = env_struct_name lname in
+        let rv  = fresh "_clreg" in
+        let off = fresh "_cloff" in
+        let cap_inits =
+          String.concat ", "
+            (List.mapi (fun i (n, _) -> Printf.sprintf ".f%d = %s" i n) caps)
+        in
+        let stmts = rc.stmts @ [
+          Printf.sprintf "Region %s = %s;" rv rc.value;
+          Printf.sprintf
+            "if (ORTO_REGIONS[%s.slot].gen != %s.expected_gen) abort();" rv rv;
+          Printf.sprintf
+            "size_t %s = (ORTO_REGIONS[%s.slot].used + 7u) & ~(size_t)7u;"
+            off rv;
+          Printf.sprintf
+            "if (%s + sizeof(%s) > ORTO_REGIONS[%s.slot].buffer_size) abort();"
+            off es rv;
+          Printf.sprintf
+            "*(%s *)(ORTO_REGIONS[%s.slot].buffer + %s) = (%s){ %s };"
+            es rv off es cap_inits;
+          Printf.sprintf
+            "ORTO_REGIONS[%s.slot].used = %s + sizeof(%s);" rv off es;
+        ] in
+        { stmts;
+          value = Printf.sprintf
+            "((%s){ .env_slot = %s.slot, .env_offset = (int)%s, \
+             .env_gen = %s.expected_gen, .code = %s })"
+            fn_c rv off rv lname }
+      end
+
 (* Shared setup for a[i] and a[i] := v. Returns the array/index codes,
    fresh names, the array's C type, the abort-checks, and the C
    expression for the slot at index. *)
@@ -2084,15 +2140,17 @@ let emit_extern_decl (e : Check.T.extern) : string =
     in
     Printf.sprintf "extern %s %s(%s);" (c_type e.return_ty) e.name params_s
 
-let emit_func_decl (f : Check.T.func) : string =
-  let params_s =
-    if f.params = [] then "void"
-    else
-      String.concat ", "
-        (List.map (fun (x, t) ->
-          Printf.sprintf "%s %s" (c_type t) x) f.params)
+(* Parameter list of a function as it appears in C. A lifted closure
+   (captures <> []) takes its environment as a leading `void *env`. *)
+let func_params_c (f : Check.T.func) : string =
+  let typed =
+    List.map (fun (x, t) -> Printf.sprintf "%s %s" (c_type t) x) f.params
   in
-  Printf.sprintf "%s %s(%s);" (c_type f.return_ty) f.name params_s
+  let all = if f.captures = [] then typed else "void *env" :: typed in
+  match all with [] -> "void" | _ -> String.concat ", " all
+
+let emit_func_decl (f : Check.T.func) : string =
+  Printf.sprintf "%s %s(%s);" (c_type f.return_ty) f.name (func_params_c f)
 
 (* One wrapper per top-level function used as a value: adapts the
    plain C signature to the closure code-pointer convention, where the
@@ -2114,18 +2172,36 @@ let emit_fnval_wrappers () : string list =
     | _ -> failwith "emit_fnval_wrappers: non-fn type")
     !fnval_order
 
+(* One environment struct per lifted closure that captures something. *)
+let emit_env_structs (funcs : Check.T.func list) : string list =
+  List.filter_map (fun (f : Check.T.func) ->
+    if f.captures = [] then None
+    else
+      let fields =
+        String.concat " "
+          (List.mapi (fun i (_, t) ->
+            Printf.sprintf "%s f%d;" (c_type t) i) f.captures)
+      in
+      Some (Printf.sprintf "typedef struct { %s } %s;"
+        fields (env_struct_name f.name)))
+    funcs
+
 let emit_func_def ctor_map (f : Check.T.func) : string =
   reset_counter ();
-  let params_s =
-    if f.params = [] then "void"
+  let params_s = func_params_c f in
+  (* Lifted closure: unpack each captured value from the environment
+     struct into a local of the same name the body expects. *)
+  let env_preamble =
+    if f.captures = [] then []
     else
-      String.concat ", "
-        (List.map (fun (x, t) ->
-          Printf.sprintf "%s %s" (c_type t) x) f.params)
+      let es = env_struct_name f.name in
+      (Printf.sprintf "%s *__e = (%s *)env;" es es)
+      :: List.mapi (fun i (n, t) ->
+           Printf.sprintf "%s %s = __e->f%d;" (c_type t) n i) f.captures
   in
   let cb = emit_expr ctor_map f.body in
   let body_lines =
-    cb.stmts @ [Printf.sprintf "return %s;" cb.value]
+    env_preamble @ cb.stmts @ [Printf.sprintf "return %s;" cb.value]
   in
   let indented = List.map (fun s -> "    " ^ s) body_lines in
   Printf.sprintf "%s %s(%s) {\n%s\n}"
@@ -2259,6 +2335,7 @@ let async_collect_locals (body : Check.T.expr) : (string * ty) list =
         go v; go b
     | TEAwaitAll (bs, _, _) -> List.iter go bs
     | TEPrint (_, es, _) -> List.iter go es
+    | TEMakeClosure (_, _, region, _) -> go region
   in
   go body;
   List.rev !acc
@@ -2341,6 +2418,9 @@ let async_rewrite_to_frame
     | TEAwaitAll (bs, t, ptys) ->
         TEAwaitAll (List.map go bs, t, ptys)
     | TEPrint (nl, es, ts) -> TEPrint (nl, List.map go es, ts)
+    | TEMakeClosure (name, caps, region, fn_ty) ->
+        TEMakeClosure (name,
+          List.map (fun (n, t) -> (rename n, t)) caps, go region, fn_ty)
   in go e
 
 (* Does the expression contain a reachable suspension point? Same
@@ -2412,6 +2492,7 @@ let rec emit_has_suspension (e : Check.T.expr) : bool =
       emit_has_suspension v || emit_has_suspension b
   | TEAwaitAll _ -> true
   | TEPrint (_, es, _) -> List.exists emit_has_suspension es
+  | TEMakeClosure (_, _, region, _) -> emit_has_suspension region
 
 (* Synthetic frame locals required by `await all { ... }` lowerings.
    Reset per function; the walker reads it to know what `fr->...` to
@@ -2525,6 +2606,8 @@ let allocate_await_all_locals_in_body (body : Check.T.expr) : Check.T.expr =
           ptys;
         TEAwaitAll (List.map go bs, t, ptys)
     | TEPrint (nl, es, ts) -> TEPrint (nl, List.map go es, ts)
+    | TEMakeClosure (name, caps, region, fn_ty) ->
+        TEMakeClosure (name, caps, go region, fn_ty)
   in
   go body
 
@@ -2590,6 +2673,8 @@ let rec desugar_let_tuples (e : Check.T.expr) : Check.T.expr =
   | TETupleIdx (e, i, t) -> TETupleIdx (r e, i, t)
   | TEAwaitAll (bs, t, ptys) -> TEAwaitAll (List.map r bs, t, ptys)
   | TEPrint (nl, es, ts) -> TEPrint (nl, List.map r es, ts)
+  | TEMakeClosure (name, caps, region, fn_ty) ->
+      TEMakeClosure (name, caps, r region, fn_ty)
   | TELetTuple (names, vt, v, b, bt, ads) ->
       let v' = r v in
       let b' = r b in
@@ -3559,6 +3644,7 @@ let emit ?(slots=1024) ?(cores=1) ?(ring_entries=64) ?(test_mode=false) (prog : 
   let stream_drop_defs     = if has_async then emit_stream_drop_defs ()     else [] in
   let fn_typedefs  = emit_fn_typedefs () in
   let fnval_wrappers = emit_fnval_wrappers () in
+  let env_structs  = emit_env_structs prog.funcs in
   let ordered_structs = topo_sort_structs prog.types prog.records in
   let struct_defs = List.map (function
     | DAdt td -> emit_adt_definition td
@@ -3917,6 +4003,7 @@ let emit ?(slots=1024) ?(cores=1) ?(ring_entries=64) ?(test_mode=false) (prog : 
      @ task_forwards
      @ fn_typedefs
      @ struct_defs
+     @ env_structs
      @ tuple_forwards
      @ async_prelude
      @ async_decls

@@ -39,6 +39,9 @@ let rec free_vars (e : expr) : SS.t =
   | ECall (callee, args) -> u (free_vars callee :: List.map free_vars args)
   | EFun (params, _, body) ->
       SS.diff (free_vars body) (SS.of_list (List.map fst params))
+  | EClosure (r, params, _, body) ->
+      SS.union (free_vars r)
+        (SS.diff (free_vars body) (SS.of_list (List.map fst params)))
   | ECtor (_, args) -> u (List.map free_vars args)
   | ERecord (_, elems) ->
       u (List.map (function
@@ -113,9 +116,9 @@ let lift (prog : program) : program =
         in
         if not (SS.is_empty captures) then
           raise (Lift_error (Printf.sprintf
-            "lambda captures local variable(s) %s — closure environments \
-             are not implemented yet; for now a lambda may only use its \
-             parameters and global functions"
+            "lambda captures local variable(s) %s — a bare `fn(...)` cannot \
+             capture; wrap it as `closure(r, fn(...))` to store the captured \
+             environment in region r"
             (String.concat ", " (SS.elements captures))));
         let name = Printf.sprintf "__lambda_%d" !counter in
         incr counter;
@@ -124,6 +127,11 @@ let lift (prog : program) : program =
           { name; type_params = []; params; return_ty = ret; body = body' }
           :: !lifted;
         EVar name
+    | EClosure (r, params, ret, body) ->
+        (* Leave the closure for the checker (it needs types to build
+           the environment); just lift any nested capture-free lambdas
+           inside the region expr and the body. *)
+        EClosure (xform r, params, ret, xform body)
     | EInt _ | EFloat _ | EBool _ | EStringLit _ | EVar _
     | EBreak | EContinue | ENullPtr _ -> e
     | EBinop (op, a, b) -> EBinop (op, xform a, xform b)

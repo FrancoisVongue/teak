@@ -1,0 +1,25 @@
+// Capturing closures: closure(r, fn...) stores the captured environment
+// in region r. The result has type fn(int)->int and works anywhere an
+// ordinary function value does — including existing higher-order fns.
+
+fn twice(f: fn(int) -> int, x: int) -> int { f(f(x)) }
+
+fn main() -> int {
+    arena r = region(4096);
+
+    // Capture one value by copy.
+    let k = 10;
+    let add_k = closure(r, fn(x: int) -> int { x + k });
+    let a = add_k(5);             // 15
+
+    // A capturing closure flows into a plain higher-order function.
+    let b = twice(add_k, 0);      // 0 -> 10 -> 20
+
+    // Capture two values.
+    let base = 100;
+    let step = 3;
+    let f = closure(r, fn(n: int) -> int { base + n * step });
+    let c = f(4);                 // 100 + 12 = 112
+
+    a + b + c                     // 15 + 20 + 112 = 147
+}

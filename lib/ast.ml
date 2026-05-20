@@ -60,6 +60,13 @@ type expr =
                                              by the lambda-lifting pass (lift.ml)
                                              before the checker; only the lifter
                                              and resolver ever see it. *)
+  | EClosure of expr * (string * ty) list * ty * expr
+                                          (* closure(r, fn(params) -> ret { body })
+                                             — a capturing lambda. The environment
+                                             of captured locals is allocated in
+                                             region r. The checker converts it to
+                                             a lifted function + TEMakeClosure;
+                                             the lifter leaves it intact. *)
   | ECtor   of string * expr list
   | ERecord of string * record_init_elem list
   | EField  of expr * string
@@ -271,6 +278,13 @@ let rec show_expr = function
         (String.concat ", " (List.map show_expr args))
   | EFun (params, ret, body) ->
       Printf.sprintf "fn(%s) -> %s { %s }"
+        (String.concat ", "
+           (List.map (fun (n, t) ->
+              Printf.sprintf "%s: %s" n (show_ty t)) params))
+        (show_ty ret) (show_expr body)
+  | EClosure (r, params, ret, body) ->
+      Printf.sprintf "closure(%s, fn(%s) -> %s { %s })"
+        (show_expr r)
         (String.concat ", "
            (List.map (fun (n, t) ->
               Printf.sprintf "%s: %s" n (show_ty t)) params))

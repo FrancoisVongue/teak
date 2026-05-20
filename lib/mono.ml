@@ -309,6 +309,14 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
     | Check.T.TEPrint (nl, es, ts) ->
         Check.T.TEPrint (nl, List.map (rewrite_expr subst) es,
                          List.map rt ts)
+    | Check.T.TEMakeClosure (name, caps, region, fn_ty) ->
+        (* The lifted lambda is monomorphic (closures over type vars are
+           rejected in check), so the name needs no mangling — just pull
+           it into the output. *)
+        request_fn name [];
+        Check.T.TEMakeClosure (name,
+          List.map (fun (n, t) -> (n, rt t)) caps,
+          rewrite_expr subst region, rt fn_ty)
   in
 
   (* Start mono from main when present; if the program has tests
@@ -358,12 +366,16 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         in
         let new_ret  = rewrite_ty subst orig.return_ty in
         let new_body = rewrite_expr subst orig.body in
+        let new_caps =
+          List.map (fun (n, t) -> (n, rewrite_ty subst t)) orig.captures
+        in
         let mono : Check.T.func = {
           name        = mangle_name name ts;
           type_params = [];
           params      = new_params;
           return_ty   = new_ret;
           body        = new_body;
+          captures    = new_caps;
           is_async    = orig.is_async;
         } in
         Hashtbl.replace mono_fns mono.name mono
