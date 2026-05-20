@@ -46,6 +46,7 @@ let lower_ident_or_keyword s =
   | "match" -> TMatch
   | "extern" -> TExtern
   | "use"   -> TUse
+  | "const" -> TConst
   | "len"   -> TLen
   | "slice" -> TSlice
   | "to_int" -> TToInt

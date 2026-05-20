@@ -190,6 +190,17 @@ type alias_decl = {
   alias_ty   : ty;
 }
 
+(* `const NAME: T = expr;` — a named compile-time value. Resolved away by
+   the resolver into a 0-argument function `fn NAME() -> T { expr }`, and
+   every use of NAME is rewritten to a call NAME(). The value lives at the
+   top level (no region/locals in scope), so it can only be a literal,
+   arithmetic, or another const — never an allocation. *)
+type const_decl = {
+  const_name  : string;
+  const_ty    : ty;
+  const_value : expr;
+}
+
 (* `test "human description" { body }` — top-level test block.
    In normal compile mode (no --test) test blocks are silently
    ignored. In --test mode the driver generates a `main` that
@@ -206,6 +217,7 @@ type top_decl =
   | TopExtern of extern_decl
   | TopUse    of use_decl
   | TopAlias  of alias_decl
+  | TopConst  of const_decl
   | TopTest   of test_decl
   | TopNamespace of string list * top_decl list
                                           (* `namespace a::b::c { ... }` —

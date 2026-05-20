@@ -37,6 +37,11 @@ let builtin_names = [
 
 let is_builtin name = List.mem name builtin_names
 
+(* Mangled names of all `const` declarations across modules. A const is
+   lowered to a 0-argument function; a *use* of a const name must become
+   a call. Populated in `summarize`, read in `resolve_expr`. *)
+let const_set : (string, unit) Hashtbl.t = Hashtbl.create 16
+
 (* `main` is the C entry point — every program has exactly one and it
    keeps its bare name. Any module can declare it, but only one in the
    whole compilation may. *)
@@ -121,6 +126,11 @@ let summarize (module_path : string list) (prog : top_decl list) : module_summar
         externs := e.ext_name :: !externs
     | TopAlias a ->
         aliases := (a.alias_name, m a.alias_name) :: !aliases
+    | TopConst c ->
+        (* A const resolves like a (0-arg) function name, and its mangled
+           name is recorded so uses get rewritten to calls. *)
+        fns := (c.const_name, m c.const_name) :: !fns;
+        Hashtbl.replace const_set (m c.const_name) ()
     | TopTest _ -> ()  (* test blocks don't introduce namespace-level names *)
     | TopUse _ -> ()
     | TopNamespace _ -> ()  (* flattened away by flatten_namespaces *)
@@ -277,7 +287,13 @@ let rec resolve_expr
   let rt = resolve_ty map locals in
   match e with
   | EInt _ | EFloat _ | EBool _ | EStringLit _ -> e
-  | EVar x -> EVar (resolve_name map locals x)
+  | EVar x ->
+      let resolved = resolve_name map locals x in
+      (* A use of a const name becomes a call to its lowered 0-arg fn.
+         Locals shadow consts and are left as plain variable refs. *)
+      if not (List.mem x locals) && Hashtbl.mem const_set resolved
+      then ECall (EVar resolved, [])
+      else EVar resolved
   | EBinop (op, a, b) -> EBinop (op, r a, r b)
   | EUnop  (op, a)    -> EUnop  (op, r a)
   | ECall (callee, args) -> ECall (r callee, List.map r args)
@@ -395,6 +411,16 @@ let resolve_decl
       Some (TopAlias {
         alias_name = m_name a.alias_name;
         alias_ty   = resolve_ty map [] a.alias_ty;
+      })
+  | TopConst c ->
+      (* Lower a const to a 0-argument function. Uses of the const name
+         are rewritten to calls in resolve_expr. *)
+      Some (TopFunc {
+        name        = m_name c.const_name;
+        type_params = [];
+        params      = [];
+        return_ty   = resolve_ty map [] c.const_ty;
+        body        = resolve_expr map [] c.const_value;
       })
   | TopType td ->
       let type_params = td.type_params in
@@ -565,7 +591,7 @@ let expand_in_decl (aliases : (string * ty) list) (d : top_decl) : top_decl =
         ext_params = List.map (fun (n, t) -> (n, xt t)) e.ext_params;
         ext_return_ty = xt e.ext_return_ty; }
   | TopTest td -> TopTest { td with test_body = expand_in_expr aliases td.test_body }
-  | TopUse _ | TopAlias _ -> d
+  | TopUse _ | TopAlias _ | TopConst _ -> d
   | TopNamespace _ -> d
 
 (* Top-level entry: take an ordered list of (file_name, parsed program),
@@ -573,6 +599,7 @@ let expand_in_decl (aliases : (string * ty) list) (d : top_decl) : top_decl =
    references, return one merged program ready for the type checker.
    Externs are deduplicated by name. *)
 let resolve (modules : (string * program) list) : program =
+  Hashtbl.clear const_set;
   (* Step 1: each file → list of (namespace_path, decls). Multiple
      files contributing to the same namespace path are merged. *)
   let merged : (string list * top_decl list) list =

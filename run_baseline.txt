@@ -5,6 +5,7 @@ builtin_values RUN 100
 closures RUN 147
 closures_generic RUN 125
 composite RUN 196
+constants RUN 2
 db NOMAIN_OR_ERR
 db_driver NOMAIN_OR_ERR
 fact RUN 176

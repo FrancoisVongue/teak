@@ -37,6 +37,7 @@ type token =
   | TLinear        (* linear — marks a struct/enum as move-only with user drop *)
   | TDrop          (* drop(x) — consume and run the type's destructor *)
   | TUse           (* use mod::item; — selective import *)
+  | TConst         (* const NAME: T = expr; — named compile-time value *)
   | TLen          (* len — array length *)
   | TSlice        (* slice(a, lo, hi) — sub-handle into the same region *)
   | TToInt        (* to_int(b) — widen byte to int *)
@@ -141,6 +142,7 @@ let show = function
   | TLinear       -> "LINEAR"
   | TDrop         -> "DROP"
   | TUse          -> "USE"
+  | TConst        -> "CONST"
   | TLen          -> "LEN"
   | TSlice        -> "SLICE"
   | TToInt        -> "TO_INT"

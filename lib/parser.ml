@@ -1285,6 +1285,25 @@ let parse (toks : token list) : program =
         let target = parse_ty st in
         expect st TSemi;
         loop terminator (TopAlias { alias_name = name; alias_ty = target } :: acc)
+    | TConst ->
+        advance st;
+        let name = match eat st with
+          | TIdent s -> s
+          | TCtorIdent s -> raise (Parse_error
+            (Printf.sprintf
+               "const name %S must be lowercase — constants are values, \
+                uppercase is for types and constructors" s))
+          | t -> raise (Parse_error
+            (Printf.sprintf "expected constant name after `const`, got %s"
+               (Token.show t)))
+        in
+        expect st TColon;
+        let cty = parse_ty st in
+        expect st TEq;
+        let value = parse_expr st in
+        expect st TSemi;
+        loop terminator
+          (TopConst { const_name = name; const_ty = cty; const_value = value } :: acc)
     | TExtern ->
         let e = parse_extern st in
         loop terminator (TopExtern e :: acc)

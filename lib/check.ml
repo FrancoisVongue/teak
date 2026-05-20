@@ -457,6 +457,9 @@ let split_program (prog : program)
     | TopAlias _  :: _    ->
         failwith "check: TopAlias left in program — \
                   the resolver should have inlined all `type` aliases"
+    | TopConst _  :: _    ->
+        failwith "check: TopConst left in program — \
+                  the resolver should have lowered all `const` decls to fns"
     | TopNamespace _ :: _ ->
         failwith "check: TopNamespace left in program — \
                   the resolver should have flattened all `namespace` blocks"
