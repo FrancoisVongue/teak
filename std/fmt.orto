@@ -2,7 +2,7 @@
 // mini-language and no type-directed magic: you convert your values to
 // strings yourself (e.g. str::from_int) and pass them as `parts`. The
 // formatter just walks the template and drops each part into the next
-// `{}` slot, in order. `{{` is a literal `{`.
+// `{}` slot, in order. `{{` is a literal `{`, `}}` a literal `}`.
 
 use vec::{Vec, new, push, slice_of};
 
@@ -39,8 +39,13 @@ fn format(r: Region, template: Ref[byte], parts: Ref[Ref[byte]]) -> Ref[byte] {
                 i := i + 1;
             }
         } else {
-            out := push(out, r, template[i]);
-            i := i + 1;
+            if c == 125 && i + 1 < n && to_int(template[i + 1]) == 125 {
+                out := push(out, r, template[i]);     // '}}' -> literal '}'
+                i := i + 2;
+            } else {
+                out := push(out, r, template[i]);
+                i := i + 1;
+            }
         }
     }
     slice_of(out)

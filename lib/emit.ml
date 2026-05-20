@@ -1092,12 +1092,35 @@ let rec emit_expr
       { stmts;
         value = Printf.sprintf "%s.code(%s)" cv (String.concat ", " vals) }
 
-  | Check.T.TEBinop (op, a, b, _) ->
+  | Check.T.TEBinop (op, a, b, bty) ->
       let ca = emit_expr ctor_map a in
       let cb = emit_expr ctor_map b in
-      { stmts = ca.stmts @ cb.stmts;
-        value =
-          Printf.sprintf "(%s %s %s)" ca.value (c_binop op) cb.value }
+      (match op with
+       | (OpAnd | OpOr) when cb.stmts <> [] ->
+           (* Short-circuit: the right operand must not run when the left
+              already decides the result. Its setup statements (an array
+              bounds-check that would abort, a closure call) go inside a
+              guard rather than being hoisted before the whole expression.
+              The plain `(a && b)` form is kept when b has no statements. *)
+           let tmp = fresh "_sc" in
+           let guard = match op with
+             | OpAnd -> tmp                       (* eval b only if a true  *)
+             | _     -> Printf.sprintf "!%s" tmp  (* OpOr: only if a false  *)
+           in
+           let indent ss = List.map (fun s -> "    " ^ s) ss in
+           let stmts =
+             ca.stmts
+             @ [Printf.sprintf "%s %s = %s;" (c_type bty) tmp ca.value;
+                Printf.sprintf "if (%s) {" guard]
+             @ indent cb.stmts
+             @ [Printf.sprintf "    %s = %s;" tmp cb.value;
+                "}"]
+           in
+           { stmts; value = tmp }
+       | _ ->
+           { stmts = ca.stmts @ cb.stmts;
+             value =
+               Printf.sprintf "(%s %s %s)" ca.value (c_binop op) cb.value })
 
   | Check.T.TEUnop (op, e, _) ->
       let ce = emit_expr ctor_map e in

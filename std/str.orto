@@ -1,6 +1,16 @@
-// std/str.orto — operations over Ref[byte] (the one string type).
-// Strings are just byte buffers in a region; these are ordinary
-// functions that take the region when they allocate.
+// std/str.orto — operations over Ref[byte], the one string type. A string
+// is just a byte buffer living in a region; these are ordinary functions
+// that take the region only when they allocate. Trimming and slicing
+// return views (no copy); building a new string copies into the region.
+//
+// `hash`/`compare` make Ref[byte] usable as a map key and as a sort key
+// (inject str::hash + str::eq into map::new, str::compare into sort::sort).
+
+use vec::{Vec, new, push, slice_of};
+
+// ---------- predicates / inspection ----------
+
+fn is_empty(s: Ref[byte]) -> bool { len(s) == 0 }
 
 fn eq(a: Ref[byte], b: Ref[byte]) -> bool {
     if len(a) != len(b) {
@@ -9,28 +19,207 @@ fn eq(a: Ref[byte], b: Ref[byte]) -> bool {
         let mut i = 0;
         let mut same = true;
         while i < len(a) {
-            if to_int(a[i]) != to_int(b[i]) { same := false; }
-            i := i + 1;
+            if to_int(a[i]) != to_int(b[i]) { same := false; i := len(a); }
+            else { i := i + 1; }
         }
         same
     }
 }
 
+// Lexicographic order: <0 if a<b, 0 if equal, >0 if a>b.
+fn compare(a: Ref[byte], b: Ref[byte]) -> int {
+    let n = if len(a) < len(b) { len(a) } else { len(b) };
+    let mut i = 0;
+    let mut r = 0;
+    while i < n {
+        let ca = to_int(a[i]);
+        let cb = to_int(b[i]);
+        if ca != cb { r := if ca < cb { 0 - 1 } else { 1 }; i := n; }
+        else { i := i + 1; }
+    }
+    if r != 0 { r } else { len(a) - len(b) }
+}
+
+// FNV-1a (32-bit constants, accumulated in a 64-bit int — wraps, fine
+// for hashing). Pair with str::eq when using strings as map keys.
+fn hash(s: Ref[byte]) -> int {
+    let mut h = 2166136261;
+    let mut i = 0;
+    while i < len(s) {
+        h := (h ^ to_int(s[i])) * 16777619;
+        i := i + 1;
+    }
+    h
+}
+
+// True iff `s[pos..pos+len(pat)]` equals `pat`. The shared kernel for
+// find / contains / starts_with / ends_with / count / replace.
+fn match_at(s: Ref[byte], pos: int, pat: Ref[byte]) -> bool {
+    let m = len(pat);
+    if pos < 0 || pos + m > len(s) {
+        false
+    } else {
+        let mut j = 0;
+        let mut ok = true;
+        while j < m {
+            if to_int(s[pos + j]) != to_int(pat[j]) { ok := false; j := m; }
+            else { j := j + 1; }
+        }
+        ok
+    }
+}
+
+// Index of first occurrence of byte c, or -1.
+fn index_of(s: Ref[byte], c: int) -> int {
+    let mut i = 0;
+    let mut found = 0 - 1;
+    while i < len(s) {
+        if to_int(s[i]) == c { found := i; i := len(s); }
+        else { i := i + 1; }
+    }
+    found
+}
+
+// Index of last occurrence of byte c, or -1.
+fn last_index_of(s: Ref[byte], c: int) -> int {
+    let mut i = len(s) - 1;
+    let mut found = 0 - 1;
+    while i >= 0 {
+        if to_int(s[i]) == c { found := i; i := 0 - 1; }
+        else { i := i - 1; }
+    }
+    found
+}
+
+// Index of first occurrence of substring `needle`, or -1. Empty matches 0.
+fn find(s: Ref[byte], needle: Ref[byte]) -> int {
+    let m = len(needle);
+    if m == 0 {
+        0
+    } else {
+        let mut i = 0;
+        let mut res = 0 - 1;
+        while i + m <= len(s) {
+            if match_at(s, i, needle) { res := i; i := len(s) + 1; }
+            else { i := i + 1; }
+        }
+        res
+    }
+}
+
+fn contains(s: Ref[byte], needle: Ref[byte]) -> bool { find(s, needle) >= 0 }
+fn starts_with(s: Ref[byte], pre: Ref[byte]) -> bool { match_at(s, 0, pre) }
+fn ends_with(s: Ref[byte], suf: Ref[byte]) -> bool {
+    match_at(s, len(s) - len(suf), suf)
+}
+
+// Count of non-overlapping occurrences of `needle`.
+fn count(s: Ref[byte], needle: Ref[byte]) -> int {
+    let m = len(needle);
+    if m == 0 {
+        0
+    } else {
+        let mut i = 0;
+        let mut n = 0;
+        while i + m <= len(s) {
+            if match_at(s, i, needle) { n := n + 1; i := i + m; }
+            else { i := i + 1; }
+        }
+        n
+    }
+}
+
+// ---------- views (no allocation) ----------
+
+fn sub(s: Ref[byte], lo: int, hi: int) -> Ref[byte] { slice(s, lo, hi) }
+
+fn is_ws(c: int) -> bool { c == 32 || c == 9 || c == 10 || c == 13 }
+
+fn trim_left(s: Ref[byte]) -> Ref[byte] {
+    let mut i = 0;
+    while i < len(s) && is_ws(to_int(s[i])) { i := i + 1; }
+    slice(s, i, len(s))
+}
+
+fn trim_right(s: Ref[byte]) -> Ref[byte] {
+    let mut j = len(s);
+    while j > 0 && is_ws(to_int(s[j - 1])) { j := j - 1; }
+    slice(s, 0, j)
+}
+
+fn trim(s: Ref[byte]) -> Ref[byte] { trim_left(trim_right(s)) }
+
+// ---------- allocation ----------
+
+fn dup(r: Region, s: Ref[byte]) -> Ref[byte] {
+    let n = len(s);
+    let out = ref(r, n + 1, to_byte(0));
+    let mut i = 0;
+    while i < n { out[i] := s[i]; i := i + 1; }
+    slice(out, 0, n)
+}
+
 fn concat(r: Region, a: Ref[byte], b: Ref[byte]) -> Ref[byte] {
     let la = len(a);
     let lb = len(b);
-    let out = ref(r, la + lb, to_byte(0));
+    let out = ref(r, la + lb + 1, to_byte(0));
     let mut i = 0;
     while i < la { out[i] := a[i]; i := i + 1; }
     let mut j = 0;
     while j < lb { out[la + j] := b[j]; j := j + 1; }
-    out
+    slice(out, 0, la + lb)
+}
+
+fn repeat(r: Region, s: Ref[byte], n: int) -> Ref[byte] {
+    let m = len(s);
+    let total = if n < 0 { 0 } else { m * n };
+    let out = ref(r, total + 1, to_byte(0));
+    let mut k = 0;
+    let mut pos = 0;
+    while k < n {
+        let mut i = 0;
+        while i < m { out[pos] := s[i]; pos := pos + 1; i := i + 1; }
+        k := k + 1;
+    }
+    slice(out, 0, total)
+}
+
+fn reverse(r: Region, s: Ref[byte]) -> Ref[byte] {
+    let n = len(s);
+    let out = ref(r, n + 1, to_byte(0));
+    let mut i = 0;
+    while i < n { out[i] := s[n - 1 - i]; i := i + 1; }
+    slice(out, 0, n)
+}
+
+fn to_upper(r: Region, s: Ref[byte]) -> Ref[byte] {
+    let n = len(s);
+    let out = ref(r, n + 1, to_byte(0));
+    let mut i = 0;
+    while i < n {
+        let c = to_int(s[i]);
+        out[i] := if c >= 97 && c <= 122 { to_byte(c - 32) } else { s[i] };
+        i := i + 1;
+    }
+    slice(out, 0, n)
+}
+
+fn to_lower(r: Region, s: Ref[byte]) -> Ref[byte] {
+    let n = len(s);
+    let out = ref(r, n + 1, to_byte(0));
+    let mut i = 0;
+    while i < n {
+        let c = to_int(s[i]);
+        out[i] := if c >= 65 && c <= 90 { to_byte(c + 32) } else { s[i] };
+        i := i + 1;
+    }
+    slice(out, 0, n)
 }
 
 // Render an int to its decimal byte string.
 fn from_int(r: Region, n: int) -> Ref[byte] {
     if n == 0 {
-        ref(r, [to_byte(48)])          // "0"
+        dup(r, "0")
     } else {
         let neg = n < 0;
         let mut m = if neg { 0 - n } else { n };
@@ -38,25 +227,100 @@ fn from_int(r: Region, n: int) -> Ref[byte] {
         let mut t = m;
         while t > 0 { ndig := ndig + 1; t := t / 10; }
         let total = if neg { ndig + 1 } else { ndig };
-        let buf = ref(r, total, to_byte(0));
+        let buf = ref(r, total + 1, to_byte(0));
         let mut i = total - 1;
         while m > 0 {
-            buf[i] := to_byte(48 + m % 10);   // '0' + digit
+            buf[i] := to_byte(48 + m % 10);
             m := m / 10;
             i := i - 1;
         }
-        if neg { buf[0] := to_byte(45); }      // '-'
-        buf
+        if neg { buf[0] := to_byte(45); }
+        slice(buf, 0, total)
     }
 }
 
-// Index of the first occurrence of byte c, or -1.
-fn index_of(s: Ref[byte], c: int) -> int {
+// Parse a decimal int with optional leading '-'. None on empty/garbage.
+fn parse_int(s: Ref[byte]) -> Option[int] {
+    let n = len(s);
+    if n == 0 {
+        None
+    } else {
+        let neg = to_int(s[0]) == 45;
+        let start = if neg || to_int(s[0]) == 43 { 1 } else { 0 };
+        if start >= n {
+            None
+        } else {
+            let mut acc = 0;
+            let mut i = start;
+            let mut ok = true;
+            while i < n {
+                let c = to_int(s[i]);
+                if c < 48 || c > 57 { ok := false; i := n; }
+                else { acc := acc * 10 + (c - 48); i := i + 1; }
+            }
+            if ok { Some(if neg { 0 - acc } else { acc }) } else { None }
+        }
+    }
+}
+
+// ---------- composing many pieces ----------
+
+fn join(r: Region, parts: Ref[Ref[byte]], sep: Ref[byte]) -> Ref[byte] {
+    let np = len(parts);
+    let mut total = 0;
     let mut i = 0;
-    let mut found = -1;
-    while i < len(s) {
-        if to_int(s[i]) == c { found := i; i := len(s); }
+    while i < np { total := total + len(parts[i]); i := i + 1; }
+    if np > 0 { total := total + len(sep) * (np - 1); }
+    let out = ref(r, total + 1, to_byte(0));
+    let mut pos = 0;
+    i := 0;
+    while i < np {
+        if i > 0 {
+            let mut k = 0;
+            while k < len(sep) { out[pos] := sep[k]; pos := pos + 1; k := k + 1; }
+        }
+        let p = parts[i];
+        let mut j = 0;
+        while j < len(p) { out[pos] := p[j]; pos := pos + 1; j := j + 1; }
         i := i + 1;
     }
-    found
+    slice(out, 0, total)
+}
+
+// Split on a separator byte into a Vec of views into `s` (no copy).
+fn split(r: Region, s: Ref[byte], sep: int) -> Vec[Ref[byte]] {
+    let empty = slice(s, 0, 0);
+    let mut v = new(r, 4, empty);
+    let mut start = 0;
+    let mut i = 0;
+    while i < len(s) {
+        if to_int(s[i]) == sep {
+            v := push(v, r, slice(s, start, i));
+            start := i + 1;
+        }
+        i := i + 1;
+    }
+    push(v, r, slice(s, start, len(s)))
+}
+
+// Replace every non-overlapping occurrence of `old` with `neww`.
+fn replace(r: Region, s: Ref[byte], old: Ref[byte], neww: Ref[byte]) -> Ref[byte] {
+    let m = len(old);
+    if m == 0 {
+        dup(r, s)
+    } else {
+        let mut v = new(r, len(s) + 4, to_byte(0));
+        let mut i = 0;
+        while i < len(s) {
+            if match_at(s, i, old) {
+                let mut j = 0;
+                while j < len(neww) { v := push(v, r, neww[j]); j := j + 1; }
+                i := i + m;
+            } else {
+                v := push(v, r, s[i]);
+                i := i + 1;
+            }
+        }
+        slice_of(v)
+    }
 }

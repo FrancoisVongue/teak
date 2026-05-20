@@ -1,46 +1,119 @@
+// Regression test for the collection modules. Each passing check adds 1
+// to the score; main returns the total so the runner can compare it.
+
 use vec::{Vec};
 use map::{Map};
-use ring::{Ring};
 use set::{make};
+use ring::{Ring};
 use sort::{sort};
 use math::{max};
 
 fn add(acc: int, x: int) -> int { acc + x }
+fn dbl(x: int) -> int { x * 2 }
+fn even(x: int) -> bool { x % 2 == 0 }
+fn eqi(a: int, b: int) -> bool { a == b }
 fn cmp_int(a: int, b: int) -> int { a - b }
 fn hash_int(k: int) -> int { k * 2654435761 }
-fn eq_int(a: int, b: int) -> bool { a == b }
 
-fn main() -> int {
-    arena r = region(65536);
-
+fn check_vec(r: Region) -> int {
     let mut v = vec::new(r, 2, 0);
     let mut i = 0;
-    while i < 10 { v := vec::push(v, r, i); i := i + 1; }
-    let vsum = vec::fold(v, 0, add);                 // 45
+    while i < 10 { v := vec::push(v, r, i); i := i + 1; }       // [0..9]
+    let mut s = 0;
+    if vec::size(v) == 10 { s := s + 1; }
+    if vec::fold(v, 0, add) == 45 { s := s + 1; }
+    if vec::get(v, 3) == 3 { s := s + 1; }
+    let m = vec::map(v, r, dbl, 0);
+    if vec::get(m, 9) == 18 { s := s + 1; }
+    let f = vec::filter(v, r, even);
+    if vec::size(f) == 5 { s := s + 1; }
+    if vec::any(v, even) && vec::all(m, even) { s := s + 1; }
+    if vec::index_of(v, 7, eqi) == 7 && vec::contains(v, 4, eqi) { s := s + 1; }
+    vec::reverse(v);
+    if vec::get(v, 0) == 9 { s := s + 1; }
+    let iv = vec::insert_at(v, r, 0, 100);
+    if vec::get(iv, 0) == 100 { s := s + 1; }
+    let rv = vec::remove_at(iv, 0);
+    if vec::get(rv, 0) == 9 { s := s + 1; }
+    let (pv, _) = vec::pop(rv);
+    if vec::size(pv) == 9 { s := s + 1; }
+    match vec::last(rv) { Some(x) => if x == 0 { s := s + 1; }, None => (), }
+    s                                                           // 12
+}
 
-    let xs = ref(r, [5, 2, 8, 1, 9, 3]);
-    sort::sort(xs, cmp_int);                          // [1,2,3,5,8,9]
+fn check_sort(r: Region) -> int {
+    let xs = ref(r, [5, 2, 8, 1, 9, 3, 7, 4, 6, 0]);
+    sort::sort(xs, cmp_int);
+    let mut s = 0;
+    if sort::is_sorted(xs, cmp_int) { s := s + 1; }
+    if xs[0] == 0 && xs[9] == 9 { s := s + 1; }
+    if sort::bsearch(xs, 6, cmp_int) == 6 { s := s + 1; }
+    if sort::lower_bound(xs, 6, cmp_int) == 6 { s := s + 1; }
+    s                                                           // 4
+}
 
-    let mut m = map::new(r, 4, 0, 0, hash_int, eq_int);
+fn check_map(r: Region) -> int {
+    let mut m = map::new(r, 4, 0, 0, hash_int, eqi);
     let mut j = 0;
-    while j < 20 { m := map::insert(m, r, j, j * j); j := j + 1; }
-    let mget = match map::get(m, 6) { Some(x) => x, None => -1 };   // 36
+    while j < 30 { m := map::insert(m, r, j, j * j); j := j + 1; }   // forces grows
+    let mut s = 0;
+    if map::size(m) == 30 { s := s + 1; }
+    match map::get(m, 6) { Some(x) => if x == 36 { s := s + 1; }, None => (), }
+    if map::contains(m, 29) && !map::contains(m, 99) { s := s + 1; }
+    if map::get_or(m, 99, 0 - 1) == 0 - 1 { s := s + 1; }
+    m := map::remove(m, 6);
+    if !map::contains(m, 6) && map::size(m) == 29 { s := s + 1; }
+    m := map::insert(m, r, 6, 7);                                  // reuse tombstone
+    match map::get(m, 6) { Some(x) => if x == 7 { s := s + 1; }, None => (), }
+    if vec::size(map::keys(m, r, 0)) == 30 { s := s + 1; }
+    s                                                           // 7
+}
 
-    let mut s = set::make(r, 4, 0, hash_int, eq_int);
-    s := set::add(s, r, 1);
-    s := set::add(s, r, 2);
-    s := set::add(s, r, 1);                           // dup
-    let shas = if set::has(s, 2) { 1 } else { 0 };    // 1
+fn check_set(r: Region) -> int {
+    let mut a = set::make(r, 4, 0, hash_int, eqi);
+    let mut b = set::make(r, 4, 0, hash_int, eqi);
+    let mut i = 0;
+    while i < 10 { a := set::add(a, r, i); i := i + 1; }        // {0..9}
+    i := 5;
+    while i < 15 { b := set::add(b, r, i); i := i + 1; }        // {5..14}
+    let mut s = 0;
+    if set::size(a) == 10 && set::has(a, 7) { s := s + 1; }
+    if set::size(set::union(r, a, b)) == 15 { s := s + 1; }
+    if set::size(set::intersect(r, a, b)) == 5 { s := s + 1; }
+    if set::size(set::difference(r, a, b)) == 5 { s := s + 1; }
+    s                                                           // 4
+}
 
-    let mut rg = ring::new(r, 3, 0);
-    rg := ring::push(rg, 10);
-    rg := ring::push(rg, 20);
-    rg := ring::push(rg, 30);
-    rg := ring::push(rg, 40);                         // [20,30,40]
-    rg := ring::push(rg, 50);                         // [30,40,50]
-    let (rg2, p1) = ring::pop(rg);                    // 30
-    let pv = match p1 { Some(x) => x, None => -1 };
+fn check_ring(r: Region) -> int {
+    let mut q = ring::new(r, 3, 0);
+    q := ring::push(q, 10);
+    q := ring::push(q, 20);
+    q := ring::push(q, 30);
+    q := ring::push(q, 40);                                      // [20,30,40]
+    let mut s = 0;
+    if ring::is_full(q) && ring::size(q) == 3 { s := s + 1; }
+    match ring::peek(q) { Some(x) => if x == 20 { s := s + 1; }, None => (), }
+    let (q2, p) = ring::pop(q);
+    match p { Some(x) => if x == 20 { s := s + 1; }, None => (), }
+    if ring::size(q2) == 2 { s := s + 1; }
+    s                                                           // 4
+}
 
-    vsum + xs[0] + xs[5] + mget + shas + pv + max(7, 4)
-    // 45 + 1 + 9 + 36 + 1 + 30 + 7 = 129
+fn check_math() -> int {
+    let mut s = 0;
+    if math::isqrt(144) == 12 { s := s + 1; }
+    if math::pow(2, 10) == 1024 { s := s + 1; }
+    if math::gcd(48, 36) == 12 && math::lcm(4, 6) == 12 { s := s + 1; }
+    if math::next_pow2(100) == 128 && math::is_pow2(64) { s := s + 1; }
+    if math::ilog2(1024) == 10 { s := s + 1; }
+    if to_int(math::fsqrt(81.0)) == 9 { s := s + 1; }
+    if max(7, 4) == 7 { s := s + 1; }
+    s                                                           // 7
+}
+
+fn main() -> int {
+    arena r = region(262144);
+    check_vec(r) + check_sort(r) + check_map(r)
+        + check_set(r) + check_ring(r) + check_math()
+    // 12 + 4 + 7 + 4 + 4 + 7 = 38
 }

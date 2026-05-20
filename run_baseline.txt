@@ -48,5 +48,5 @@ strings_slice RUN 119
 sys NOMAIN_OR_ERR
 tree RUN 123
 unit RUN 67
-stdtest_collections RUN 129
-stdtest_text RUN 115
+stdtest_collections RUN 38
+stdtest_text RUN 23
