@@ -255,6 +255,16 @@ let drop_name_counter = ref 0
 let lambda_counter = ref 0
 let for_counter = ref 0
 
+(* For-loop accesses are bounds-safe by construction: the index is a
+   compiler-generated variable (`_for_i_N`), invisible to user code, that
+   starts at 0, is bounded by `i < len(src)` at the loop top, and is only
+   ever incremented by 1. So `src[i]` inside the loop can never be out of
+   range. We record each generated (index → source) pair here; emit reads
+   it to drop the bounds check on exactly those accesses. Hand-written
+   `while i < len(xs)` loops are NOT recorded — their index is a user
+   variable we don't reason about. *)
+let bounds_safe_index : (string, string) Hashtbl.t = Hashtbl.create 64
+
 (* Closures discovered during inference of the current function. Each is
    finalized (zonked, move-checked) at the end of check_func and turned
    into a lifted top-level function, then appended to the program. *)
@@ -2245,6 +2255,7 @@ let rec infer (env : env) (tparams : string list)
            let n = !for_counter in incr for_counter;
            let src_name = Printf.sprintf "_for_src_%d" n in
            let i_name   = Printf.sprintf "_for_i_%d" n in
+           Hashtbl.replace bounds_safe_index i_name src_name;
            let src_ty = TyApp ("Ref", [elem]) in
            let i_var = T.TEVar (i_name, TyInt) in
            let src_var = T.TEVar (src_name, src_ty) in

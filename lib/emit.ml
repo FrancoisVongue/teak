@@ -134,6 +134,20 @@ let gen_check_needed (arr_e : Check.T.expr) : bool =
     | _ -> true
   else true
 
+(* The bounds check on `src[i]` can be dropped iff it is a for-loop
+   access the lowering recorded as safe-by-construction: i is the
+   compiler-generated index for exactly this src, so 0 <= i < len(src)
+   always holds. User-written loops are never recorded → always checked. *)
+let bounds_check_needed (arr_e : Check.T.expr) (idx_e : Check.T.expr) : bool =
+  if !elide_enabled && not elide_off_env then
+    match arr_e, idx_e with
+    | Check.T.TEVar (src, _), Check.T.TEVar (i, _) ->
+        (match Hashtbl.find_opt Check.bounds_safe_index i with
+         | Some s when s = src -> incr elided_count; false
+         | _ -> true)
+    | _ -> true
+  else true
+
 
 (* ---------- collect distinct TyFun types ---------- *)
 
@@ -830,6 +844,14 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
           TELet ("_", vt, v', rn env body, bt, ad)
         else
           let x' = fresh x in
+          (* Carry for-loop bounds-safety across the rename: if x is a
+             recorded for-index, register the renamed index against the
+             renamed source (already in env, bound by the outer let). *)
+          (match Hashtbl.find_opt Check.bounds_safe_index x with
+           | Some src ->
+               let src' = try List.assoc src env with Not_found -> src in
+               Hashtbl.replace Check.bounds_safe_index x' src'
+           | None -> ());
           let env' = (x, x') :: env in
           TELet (x', vt, v', rn env' body, bt, ad)
     | TEMatch (s, st, arms, rt) ->
@@ -2247,10 +2269,13 @@ and index_setup ctor_map arr_e idx_e elem_c =
               a_var a_var ]
         else []
       in
-      let checks = gen_check @ [
-        Printf.sprintf "if (%s < 0 || %s >= %s.len) abort();"
-          i_var i_var a_var;
-      ] in
+      let bounds_check =
+        if bounds_check_needed arr_e idx_e then
+          [ Printf.sprintf "if (%s < 0 || %s >= %s.len) abort();"
+              i_var i_var a_var ]
+        else []
+      in
+      let checks = gen_check @ bounds_check in
       let slot =
         Printf.sprintf
           "((%s*)(ORTO_REGIONS[%s.slot].buffer + %s.offset))[%s]"
