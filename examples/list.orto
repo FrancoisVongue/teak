@@ -1,0 +1,19 @@
+// A linked list using Ref[T] — a one-element region handle. Ref makes
+// the reference nature obvious in the type: a node holds a Ref to the
+// rest, which lives in the same region. Ref[T] is sugar for a one-slot
+// Array[T]; ref/get build and read it.
+
+enum List { Nil, Cons(int, Ref[List]) }
+
+fn sum(l: List) -> int {
+    match l {
+        Nil => 0,
+        Cons(v, rest) => v + sum(get(rest))
+    }
+}
+
+fn main() -> int {
+    arena r = region(4096);
+    let l = Cons(1, ref(r, Cons(2, ref(r, Cons(3, ref(r, Nil))))));
+    sum(l)   // 1 + 2 + 3 = 6
+}

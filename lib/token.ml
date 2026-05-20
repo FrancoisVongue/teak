@@ -66,6 +66,9 @@ type token =
   | TPrintln      (* println(expr)  — same, plus trailing '\n' *)
   | TArena        (* arena r = region(N); — scope-bound region binding *)
   | TClosure      (* closure(r, fn...) — capturing lambda, env in region r *)
+  | TRef          (* ref(r, v) — allocate one value in region r, return Ref[T] *)
+  | TGet          (* get(rf) — read the value a Ref points at *)
+  | TSet          (* set(rf, v) — write through a Ref *)
   (* punctuation *)
   | TLParen
   | TRParen
@@ -170,6 +173,9 @@ let show = function
   | TPrintln      -> "PRINTLN"
   | TArena        -> "ARENA"
   | TClosure      -> "CLOSURE"
+  | TRef          -> "REF"
+  | TGet          -> "GET"
+  | TSet          -> "SET"
   | TLParen       -> "("
   | TRParen       -> ")"
   | TLBrace       -> "{"

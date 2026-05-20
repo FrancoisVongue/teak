@@ -52,7 +52,7 @@
 | `arena r = region(N)` вместо `let` | ✅ Region — scope-якорь, не значение. `let` отвергает Region, `arena` отвергает не-Region. Bijective. `arena` lower'ится в linear TELet — mono/emit не знают о нём |
 | `[T; N]` fixed-size array как отдельный тип | ❌ Не нужен — stack-массив = `Array[T]` в `stack_region(N)`. Один механизм (Region × Array), gen-counter ловит use-after-scope как у heap |
 | Возврат `Region` из функции | ❌ Запрещён — регион создаётся в scope который его освобождает. Иначе Region стал бы movable linear с tracking'ом владения |
-| Closures | ❌ HOF через explicit ctx-параметр (`fn(T, Ctx) -> U` + `ctx`) или цикл. Capture скрывает состояние |
+| Closures | ✅ Сделано — `closure(r, fn...)`, env захватывается **по копии в регион** (gen-checked), не by-reference. Толстый указатель, единый тип `fn(A)->B`. Вписались ортогонально (см. ниже) |
 | `print`/`println` как intrinsic | ✅ tuple/scalar → один `writev`, ноль аллокаций, без региона. Не variadic (tuple раскрывается на compile-time), не typeclass |
 | `main` и externs не мангляются | Оставлено — вынужденно C-линкером |
 | Move analysis (~200 строк) | Удалено при унификации Region/linear |
@@ -117,9 +117,8 @@ cc -O2 -fstack-check -fno-strict-aliasing -D_FORTIFY_SOURCE=2 out.c -luring
 
 | Что | Почему не делаем |
 |---|---|
-| **Closures с capture by reference** (`\|x\| { use(captured_var) }`) | Capture скрывает состояние, эквивалентно OOP с `this`. Captured переменные либо с stack (dangling после возврата функции), либо требуют hoisting на heap (escape analysis = магия за спиной). Альтернатива: явная struct + function pointer, на 2 строки больше, всё видно. |
+| **Capture by reference** / **escape-анализ для hoisting'а env** | Это магия за спиной — где живёт окружение, неявно. Замыкания У НАС ЕСТЬ (`closure(r, fn...)`), но env захватывается **по копии в явный регион** (gen-checked): видно где живёт, протухание ловится. By-reference и невидимый hoisting — не делаем. (Это бывший «никогда», ставший «сделано»: фича не вписывалась → значит понятие в голове было загрязнено → нашли закон (env = региональный агрегат) → вписалась. См. центральное видение в `CLAUDE.md`.) |
 | **`&local_var` оператор** (ссылка на стек-слот) | Создаёт dangling pointer если ссылка переживёт scope. C делает молча, Rust ловит через lifetimes (расползающаяся машинерия), GC языки прячут escape analysis'ом (магия + GC). У нас нет оператора → проблема не возникает. Хочешь долгоживущую ссылку — клади в `Region`, получай gen-проверяемый handle. |
-| **Lambdas / anonymous functions** | Тот же случай — захватывают окружение неявно. Лямбда без capture эквивалентна named top-level fn, но без преимуществ читаемости. |
 | **Method syntax `x.method()`** | Сахар поверх `method(x)`. Открывает дверь для `impl` блоков, traits, virtual dispatch — каскад OOP-машинерии. Отказ один раз — закрывает каскад. |
 | **Operator overloading** | `a + b` должно делать одно. Перегрузка = invisible different behavior по типу аргумента. |
 | **Implicit conversions кроме int→float** | Та же причина. |

@@ -73,6 +73,9 @@ let lower_ident_or_keyword s =
   | "println" -> TPrintln
   | "arena"   -> TArena
   | "closure" -> TClosure
+  | "ref"     -> TRef
+  | "get"     -> TGet
+  | "set"     -> TSet
   | "_"     -> TUnderscore
   | _       -> TIdent s
 

@@ -138,7 +138,9 @@ orto-код, не compiler) и крупные архитектурные шаг�
 
 Эти не блокируют. Каждый — серьёзная архитектурная работа, требующая обсуждения.
 
-- **Closures / lambdas.** Сейчас только именованные функции. Closures открывают callbacks, higher-order patterns (`map`, `fold`, `filter`). Усложнение — capture analysis, runtime representation (fat pointer), interaction с linear типами.
+- ~~**Closures / lambdas.**~~ **Сделано** (`examples/lambda.orto`, `closures.orto`, `closures_generic.orto`). Все function-значения — толстый указатель `{env_slot, env_offset, env_gen, code}`. Анонимные `fn(p: T) -> R { body }` без захвата → lambda-lifting в обычную функцию; с захватом — `closure(r, fn...)`, env в регионе, gen-checked. Полиморфные замыкания работают. Capture-by-reference и escape-анализ мы НЕ делали — env живёт в явном регионе, протухание ловит gen-проверка. Фича вписалась ортогонально, без магии, которой боялись.
+
+- ~~**Рекурсивные данные (деревья/списки).**~~ **Сделано** (`examples/tree.orto`, `list.orto`). `enum Tree { Node(int, Array[Tree]) }` или `enum List { Cons(int, Ref[List]) }` — поле за хендлом (`Array`/`Ref`/`*T`) разрывает цикл по размеру, узлы живут в регионе. `Ref[T]` — одноклеточная ссылка (сахар над `Array[T]` из одного), `ref/get/set`.
 
 - **Threading.** Уже expressible через linear типы — `linear struct Thread { id: int } drop_Thread = pthread_join`. Channels — `linear Sender`, `linear Receiver` с send/recv. Atomic primitives через `extern fn` (memory barriers от C). Не требует новой концепции — большая работа в stdlib + extern wrappers. См. `NETLINK_ANALYSIS.md`.
 

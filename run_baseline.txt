@@ -21,6 +21,7 @@ iouring NOMAIN_OR_ERR
 iouring_batch GCCFAIL
 lambda RUN 42
 linear_basic RUN 0
+list RUN 6
 log_format RUN 29
 loops_basic RUN 55
 netlink_msg RUN 0

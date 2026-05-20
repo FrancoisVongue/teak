@@ -96,6 +96,10 @@ let rec parse_ty st =
       let ret = parse_ty st in
       TyFun (args, ret)
   | TCtorIdent s  ->
+      (* `Ref[T]` is surface sugar for a one-element region handle:
+         it is exactly `Array[T]` underneath. The name communicates
+         "a gen-checked reference to a single T living in a region". *)
+      let s = if s = "Ref" then "Array" else s in
       if peek st = TLBracket then begin
         advance st;
         let args = parse_ty_list st in
@@ -407,7 +411,7 @@ and parse_atom st =
   | TInt _ | TFloat _ | TTrue | TFalse | TLParen | TLBrace
   | TIdent _ | TCtorIdent _
   | TStringLit _
-  | TFn | TClosure
+  | TFn | TClosure | TRef | TGet | TSet
   | TIf | TMatch | TWhile | TBreak | TContinue | TFor | TReturn
   | TArray | TLen | TSlice
   | TToInt | TToByte | TToFloat | TToU16 | TToU32 | TToU64
@@ -536,6 +540,28 @@ and parse_atom_consume st =
       let body = parse_block st in
       expect st TRParen;
       EClosure (region, ps, ret, body)
+  | TRef ->
+      (* ref(r, v) — one-element region handle. Sugar for array(r, 1, v). *)
+      expect st TLParen;
+      let r = parse_expr st in
+      expect st TComma;
+      let v = parse_expr st in
+      expect st TRParen;
+      EArray (r, EInt 1, v)
+  | TGet ->
+      (* get(rf) — read the pointed-at value. Sugar for rf[0]. *)
+      expect st TLParen;
+      let rf = parse_expr st in
+      expect st TRParen;
+      EIndex (rf, EInt 0)
+  | TSet ->
+      (* set(rf, v) — write through the reference. Sugar for rf[0] := v. *)
+      expect st TLParen;
+      let rf = parse_expr st in
+      expect st TComma;
+      let v = parse_expr st in
+      expect st TRParen;
+      EAssignIdx (rf, EInt 0, v)
   | TIf -> parse_if_after_kw st
   | TMatch -> parse_match_after_kw st
   | TWhile ->
