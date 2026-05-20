@@ -9,7 +9,7 @@
 //     становятся dangling, gen-check abort'нет.
 
 fn main() -> int {
-    let r = region(4096);
+    arena r = region(4096);
 
     // Восемь значений: 4, 1, 4, 2, 4, 1, 3, 2. Максимум = 4.
     let values = array(r, [4, 1, 4, 2, 4, 1, 3, 2]);

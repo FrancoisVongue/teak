@@ -4,18 +4,18 @@
 fn main() -> int {
     // 1. Heap region. Блок через malloc, обычное выравнивание.
     //    Для произвольных размеров, не знаешь сколько надо — этот выбор.
-    let heap = region(4096);
+    arena heap = region(4096);
     let a = array(heap, [1, 2, 3, 4, 5]);
 
     // 2. Stack region. Блок на стек-фрейме main, размер литерал.
     //    Никакого malloc — bump-pointer в локальном `char[1024]`.
     //    Для маленьких compile-time-known размеров — быстро.
-    let stk = stack_region(1024);
+    arena stk = stack_region(1024);
     let b = array(stk, [10, 20, 30]);
 
     // 3. Aligned region. Блок через posix_memalign, A-byte aligned.
     //    Для mmap, GPU buffers, DMA, page protection.
-    let aln = aligned_region(4096, 4096);
+    arena aln = aligned_region(4096, 4096);
     let c = array(aln, [100, 200]);
 
     // Все три Array работают одинаково: gen-check + bounds-check,

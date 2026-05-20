@@ -297,6 +297,11 @@ let rec resolve_expr
       let new_locals = if x = "_" then locals else x :: locals in
       let body' = resolve_expr map new_locals body in
       ELet (x, m, asc', v', body')
+  | EArena (x, v, body) ->
+      let v' = r v in
+      let new_locals = x :: locals in
+      let body' = resolve_expr map new_locals body in
+      EArena (x, v', body')
   | EAssign (x, v) -> EAssign (resolve_name map locals x, r v)
   | EWhile (c, b) -> EWhile (r c, r b)
   | EBreak | EContinue -> e
@@ -481,6 +486,7 @@ let expand_in_expr (aliases : (string * ty) list) (e : expr) : expr =
     | EField (e, f) -> EField (ex e, f)
     | EIf (c, t, e) -> EIf (ex c, ex t, ex e)
     | ELet (x, m, asc, v, b) -> ELet (x, m, Option.map xt asc, ex v, ex b)
+    | EArena (x, v, b) -> EArena (x, ex v, ex b)
     | EAssign (x, v) -> EAssign (x, ex v)
     | EWhile (c, b) -> EWhile (ex c, ex b)
     | EReturn v -> EReturn (ex v)

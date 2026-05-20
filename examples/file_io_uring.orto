@@ -42,7 +42,7 @@ fn do_read(r: Region, ring: Ring, path: Array[byte]) -> int {
 }
 
 fn main() -> int {
-    let r = region(4096);
+    arena r = region(4096);
     let ring = ring_new(8);
     if ring_failed(ring) { return 10 }
 

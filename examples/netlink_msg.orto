@@ -58,7 +58,7 @@ fn nl_hdr_show(r: Region, h: NlMsgHdr) -> Array[byte] {
 }
 
 fn main() -> int {
-    let r = region(4096);
+    arena r = region(4096);
 
     // Build a RTM_GETLINK request header.
     let req = NlMsgHdr {

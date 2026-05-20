@@ -33,7 +33,7 @@ fn main() -> int {
     print_loop(g2, 0);
 
     // Allocate Array[byte] in a heap region, fill, slice, print.
-    let r   = region(64);
+    arena r   = region(64);
     let buf = array(r, 5, to_byte(0));
     write_alphabet(buf, 0, 5);
     print_loop(buf, 0);             // ABCDE

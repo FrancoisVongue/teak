@@ -302,6 +302,13 @@ let rec is_linear_ty (t : ty) : bool =
       List.exists is_linear_ty ts
   | _ -> false
 
+(* A Region is bound exclusively with `arena`, never `let`. This keeps
+   the scope-anchor role visible at the binding site. *)
+let is_region_ty (t : ty) : bool =
+  match prune t with
+  | TyApp ("Region", _) -> true
+  | _ -> false
+
 let rec zonk (t : ty) : ty =
   match prune t with
   | TyInt -> TyInt
@@ -1233,6 +1240,12 @@ let rec infer (env : env) (tparams : string list)
   | ELet (x, is_mut, ascription, value, body) ->
       if x <> "_" then check_not_c_reserved "let-binding" x;
       let (tv, tv_ty) = infer env tparams vars value in
+      if is_region_ty tv_ty then
+        raise (Type_error
+          (Printf.sprintf
+             "regions are bound with `arena`, not `let` \
+              (write `arena %s = ...`). A region is a scope-anchored \
+              resource, not a copyable value." x));
       (match ascription with
        | None -> ()
        | Some t ->
@@ -1301,6 +1314,38 @@ let rec infer (env : env) (tparams : string list)
         else is_linear_ty tv_ty
       in
       (T.TELet (x_actual, tv_ty, tv, tb, tb_ty, auto_drop), tb_ty)
+
+  | EArena (x, value, body) ->
+      check_not_c_reserved "arena-binding" x;
+      let (tv, tv_ty) = infer env tparams vars value in
+      if not (is_region_ty tv_ty) then
+        raise (Type_error
+          (Printf.sprintf
+             "`arena %s = ...` requires a region value (region(...), \
+              stack_region(...), or aligned_region(...)), got %s"
+             x (show_ty (zonk tv_ty))));
+      (* Reuse the linear-binding machinery: a region is linear, so
+         `arena s = r` (aliasing an existing region) is rejected the
+         same way `let s = r` would be — the value must be a fresh
+         region constructor, not a bare variable / field. *)
+      (match tv with
+       | T.TEVar (src, _) ->
+           raise (Type_error
+             (Printf.sprintf
+                "cannot bind one region to another (arena %s = %s): \
+                 a region must come from a fresh region(...) call"
+                x src))
+       | T.TEField (_, fname, _) ->
+           raise (Type_error
+             (Printf.sprintf
+                "cannot bind a region field to a new name \
+                 (arena %s = ....%s)" x fname))
+       | _ -> ());
+      let body_vars = (x, (tv_ty, false)) :: vars in
+      let (tb, tb_ty) = infer env tparams body_vars body in
+      (* Lower to a linear let with auto_drop — mono/emit never see
+         EArena. The region frees at this scope's end. *)
+      (T.TELet (x, tv_ty, tv, tb, tb_ty, true), tb_ty)
 
   | EAssign (x, value) ->
       let (tv, tv_ty) = infer env tparams vars value in

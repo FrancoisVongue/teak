@@ -43,7 +43,7 @@ fn average(xs: Array[int]) -> float {
 }
 
 fn main() -> int {
-    let r = region(1024);
+    arena r = region(1024);
 
     // Geometry
     let a = area_of_circle(2.0);   // ≈ 12.566

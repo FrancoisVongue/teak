@@ -817,6 +817,22 @@ and parse_block st =
 
 and parse_block_body st =
   match peek st with
+  | TArena ->
+      (* `arena r = <region-expr>;` — scope-bound region binding. No
+         mut, no ascription, no destructuring: the form is deliberately
+         minimal. The checker asserts the value types to Region. *)
+      advance st;
+      let name = match eat st with
+        | TIdent s -> s
+        | t -> raise (Parse_error
+          (Printf.sprintf "expected identifier after `arena`, got %s"
+            (Token.show t)))
+      in
+      expect st TEq;
+      let value = parse_expr st in
+      expect st TSemi;
+      let body = parse_block_body st in
+      EArena (name, value, body)
   | TLet ->
       advance st;
       (* Tuple destructuring let:  `let (x, y, z) = expr;`

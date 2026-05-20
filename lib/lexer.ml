@@ -71,6 +71,7 @@ let lower_ident_or_keyword s =
   | "namespace" -> TNamespace
   | "print"   -> TPrint
   | "println" -> TPrintln
+  | "arena"   -> TArena
   | "_"     -> TUnderscore
   | _       -> TIdent s
 

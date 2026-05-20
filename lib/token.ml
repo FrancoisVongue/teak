@@ -64,6 +64,7 @@ type token =
   | TNamespace    (* `namespace foo::bar { decls }` — nested namespace block *)
   | TPrint        (* print(expr)    — intrinsic: writev a tuple or scalar *)
   | TPrintln      (* println(expr)  — same, plus trailing '\n' *)
+  | TArena        (* arena r = region(N); — scope-bound region binding *)
   (* punctuation *)
   | TLParen
   | TRParen
@@ -166,6 +167,7 @@ let show = function
   | TNamespace    -> "NAMESPACE"
   | TPrint        -> "PRINT"
   | TPrintln      -> "PRINTLN"
+  | TArena        -> "ARENA"
   | TLParen       -> "("
   | TRParen       -> ")"
   | TLBrace       -> "{"

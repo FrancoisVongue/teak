@@ -100,7 +100,7 @@ fn handle_request(req_r: Region, users: Array[Person], req: Array[byte]) -> Arra
 
 fn main() -> int {
     // Long-lived storage for the user table — lives the whole program.
-    let app_r = region(1024 * 32);
+    arena app_r = region(1024 * 32);
     let users = all_users(app_r);
 
     // Simulated request queue. In a real server these would arrive
@@ -118,7 +118,7 @@ fn main() -> int {
     for i in 0..len(requests) {
         // Per-request scratch region. Everything the handler
         // allocates dies when this scope exits.
-        let req_r = region(8192);
+        arena req_r = region(8192);
         print("----\n");
         let response = handle_request(req_r, users, requests[i]);
         print(response);

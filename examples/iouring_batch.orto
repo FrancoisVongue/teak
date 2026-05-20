@@ -26,7 +26,7 @@ fn write_temp(ring: Ring, path: Array[byte], content: Array[byte]) -> int {
 }
 
 fn main() -> int {
-    let r = region(8192);
+    arena r = region(8192);
     let ring = ring_new(16);
     if ring_failed(ring) { return 10 }
 

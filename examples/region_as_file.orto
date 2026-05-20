@@ -42,7 +42,7 @@ fn main() -> int {
     // Scope-exit drop fires here for `c` → drop_Connection prints "C\n"
 
     // 2) Region — exactly the same shape.
-    let r = region(1024);
+    arena r = region(1024);
     let sum1 = allocate_some(r);   // borrow
     let sum2 = allocate_some(r);   // borrow again — fine
     // Scope-exit drop fires here for `r` → its slab slot returns to free list

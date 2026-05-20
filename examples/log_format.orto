@@ -15,7 +15,7 @@ fn format_log(r: Region, input: Array[byte]) -> Array[byte] {
 }
 
 fn main() -> int {
-    let r = region(4096);
+    arena r = region(4096);
     let line = format_log(r, "user=alice,age=30,city=NYC");
     println(line);
     len(line)

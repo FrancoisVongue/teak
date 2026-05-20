@@ -11,10 +11,11 @@
 |---|---|
 | Данные | `int`/`bool`/`byte`/`float` литералы, `struct`, `enum`, `fn` type, generics `[T]` |
 | Вычисление | `let` / `if` / `match` / `while` / call / binop / unop |
-| Память | `Region`, `Array[T]`, `linear struct/enum`, `drop_<T>`, `*T` (FFI escape) |
+| Память | `Region` (через `arena`), `Array[T]`, `linear struct/enum`, `drop_<T>`, `*T` (FFI escape) |
 | Конкурентность | `await`, `spawn`, `Task[T]`, `Stream[T]`, `Result[T]` |
 | FFI | `extern fn` |
-| Модули | `use foo::{bar};` — манглинг в `resolve.ml` |
+| Модули | `use a::b::{c};` — вложенные namespace, манглинг в `resolve.ml` |
+| I/O | `print(...)` / `println(...)` — intrinsic, один `writev` |
 
 ## Sugar (parser/check переписывает в ядро)
 
@@ -28,6 +29,8 @@
 | `0xFF` / `0b1010` | `EInt` |
 | trailing `;` перед `}` | `let _ = body; 0` |
 | pattern guards `pat if c => body` | match arm + проверка |
+| `arena r = region(N); body` | linear `let r` с auto_drop (lower в check) |
+| `namespace a::b { decls }` | per-namespace манглинг `a__b__name` (flatten в resolve) |
 
 ## Дизайн-решения (закрыто)
 
@@ -46,6 +49,11 @@
 | `fr->` префикс в emit | Оставлено — implementation detail, не language surface |
 | `spawn` только на ECall | Оставлено — семантическая необходимость |
 | `Region` спец-правила в `let mut` | Оставлено — обобщено через `is_linear_ty(t)`, не hardcoded имя |
+| `arena r = region(N)` вместо `let` | ✅ Region — scope-якорь, не значение. `let` отвергает Region, `arena` отвергает не-Region. Bijective. `arena` lower'ится в linear TELet — mono/emit не знают о нём |
+| `[T; N]` fixed-size array как отдельный тип | ❌ Не нужен — stack-массив = `Array[T]` в `stack_region(N)`. Один механизм (Region × Array), gen-counter ловит use-after-scope как у heap |
+| Возврат `Region` из функции | ❌ Запрещён — регион создаётся в scope который его освобождает. Иначе Region стал бы movable linear с tracking'ом владения |
+| Closures | ❌ HOF через explicit ctx-параметр (`fn(T, Ctx) -> U` + `ctx`) или цикл. Capture скрывает состояние |
+| `print`/`println` как intrinsic | ✅ tuple/scalar → один `writev`, ноль аллокаций, без региона. Не variadic (tuple раскрывается на compile-time), не typeclass |
 | `main` и externs не мангляются | Оставлено — вынужденно C-линкером |
 | Move analysis (~200 строк) | Удалено при унификации Region/linear |
 | `match` только на ADT | Расширено — scrutinee_kind dispatch покрывает int/byte/bool/bytes |

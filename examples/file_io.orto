@@ -36,7 +36,7 @@ fn do_read(r: Region, path: Array[byte]) -> int {
 }
 
 fn main() -> int {
-    let r = region(4096);
+    arena r = region(4096);
     let path = c_str(r, "/tmp/orto_file_io_demo.txt");
     let w = do_write(path);
     if w != 0 { return w }
