@@ -1,0 +1,56 @@
+// examples/word_freq.orto — top-N word frequencies. Exercises most of the
+// standard library at once: str (tokenize), map (count), vec (collect),
+// sort (rank), fmt (render), math (clamp the N).
+
+use map::{Map};
+use vec::{Vec};
+use sort::{sort};
+use str::{split, hash, eq, from_int};
+use fmt::{format};
+use math::{min};
+
+struct WC { word: Ref[byte], n: int }
+
+fn by_count(a: WC, b: WC) -> int { b.n - a.n }   // descending by count
+
+fn main() -> int {
+    arena r = region(262144);
+    let text = "the quick brown fox the lazy dog the fox jumps the dog";
+
+    // 1. tokenize on spaces -> Vec[Ref[byte]]
+    let words = str::split(r, text, 32);
+
+    // 2. count occurrences in a Map[Ref[byte], int]; behaviour injected.
+    let mut counts = map::new(r, 16, "", 0, str::hash, str::eq);
+    let mut i = 0;
+    while i < vec::size(words) {
+        let w = vec::get(words, i);
+        counts := map::insert(counts, r, w, map::get_or(counts, w, 0) + 1);
+        i := i + 1;
+    }
+
+    // 3. move (word, count) pairs into a vec so we can sort them
+    let ks = map::keys(counts, r, "");
+    let mut pairs = vec::new(r, vec::size(ks), WC { word: "", n: 0 });
+    i := 0;
+    while i < vec::size(ks) {
+        let w = vec::get(ks, i);
+        pairs := vec::push(pairs, r, WC { word: w, n: map::get_or(counts, w, 0) });
+        i := i + 1;
+    }
+
+    // 4. rank by frequency, descending
+    sort::sort(vec::slice_of(pairs), by_count);
+
+    // 5. render the top few
+    let top = math::min(3, vec::size(pairs));
+    i := 0;
+    while i < top {
+        let p = vec::get(pairs, i);
+        print(fmt::format(r, "{} -> {}\n", ref(r, [p.word, str::from_int(r, p.n)])));
+        i := i + 1;
+    }
+
+    // highest count, as a sanity return value
+    vec::get(pairs, 0).n
+}
