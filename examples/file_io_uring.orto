@@ -1,0 +1,55 @@
+// Same as file_io.orto but every I/O op goes through io_uring instead
+// of direct read/write/open/close syscalls.
+//
+// io_uring is targeted at Linux 5.6+. We don't compile on macOS or
+// Windows — that's intentional. The synchronous façade here calls
+// io_uring_submit + io_uring_wait_cqe per op, so we don't yet get
+// the batched/async advantages — but the SAME code path will scale
+// once the language has coroutines.
+//
+// Build:
+//   dune exec bin/main.exe -- examples/file_io_uring.orto
+//   cc examples/file_io_uring.c examples/iouring_helpers.c \
+//      -luring -fsanitize=address,leak -g -o /tmp/file_io_uring
+//   /tmp/file_io_uring
+
+use iouring::{Ring, ring_new, ring_failed,
+              uring_open, uring_read, uring_write, uring_close};
+use sys::{o_wronly, o_rdonly, o_creat, o_trunc};
+use str::c_str;
+// print is an intrinsic
+
+fn do_write(r: Region, ring: Ring, path: Array[byte]) -> int {
+    let flags = o_wronly() + o_creat() + o_trunc();
+    let fd = uring_open(ring, path, flags, 420);
+    if fd < 0 { return 1 }
+    let msg = "hello via io_uring\n";
+    let n = uring_write(ring, fd, msg, 0);
+    uring_close(ring, fd);
+    if n < 0 { return 2 }
+    0
+}
+
+fn do_read(r: Region, ring: Ring, path: Array[byte]) -> int {
+    let fd = uring_open(ring, path, o_rdonly(), 0);
+    if fd < 0 { return 3 }
+    let buf = array(r, 256, to_byte(0));
+    let n = uring_read(ring, fd, buf, 0);
+    uring_close(ring, fd);
+    if n <= 0 { return 4 }
+    print(slice(buf, 0, n));
+    0
+}
+
+fn main() -> int {
+    arena r = region(4096);
+    let ring = ring_new(8);
+    if ring_failed(ring) { return 10 }
+
+    let path = c_str(r, "/tmp/orto_iouring_demo.txt");
+
+    let w = do_write(r, ring, path);
+    if w != 0 { return w }
+    do_read(r, ring, path)
+    // ring drops here → orto_ring_exit → io_uring_queue_exit + free
+}

@@ -26,6 +26,10 @@ exception Parse_error of string
 
 type state = { mutable toks : token list }
 
+(* Counter for fresh names introduced by parser sugar (`e?` etc.).
+   Bumped per occurrence, reset per program in `parse`. *)
+let try_counter = ref 0
+
 let peek st = match st.toks with [] -> TEOF | t :: _ -> t
 let advance st = match st.toks with [] -> () | _ :: ts -> st.toks <- ts
 let eat st = let t = peek st in advance st; t
@@ -41,6 +45,46 @@ let rec parse_ty st =
   match eat st with
   | TIntTy        -> TyInt
   | TBoolTy       -> TyBool
+  | TByteTy       -> TyApp ("byte", [])
+  | TU16Ty        -> TyApp ("u16", [])
+  | TU32Ty        -> TyApp ("u32", [])
+  | TU64Ty        -> TyApp ("u64", [])
+  | TFloatTy      -> TyApp ("float", [])
+  | TLParen       ->
+      (* Tuple type: (T1, T2, ..., Tn) for n >= 2.  A single `(T)` is
+         not supported — drop the parens. *)
+      let first = parse_ty st in
+      (match peek st with
+       | TComma ->
+           advance st;
+           if peek st = TRParen then
+             raise (Parse_error
+               "1-element tuple type `(T,)` is not supported — drop the trailing comma");
+           let rec collect () =
+             let t = parse_ty st in
+             match peek st with
+             | TComma ->
+                 advance st;
+                 if peek st = TRParen then [t]
+                 else t :: collect ()
+             | TRParen -> [t]
+             | tok -> raise (Parse_error
+                 (Printf.sprintf "expected `,` or `)` in tuple type, got %s"
+                    (Token.show tok)))
+           in
+           let rest = collect () in
+           expect st TRParen;
+           TyTuple (first :: rest)
+       | TRParen ->
+           raise (Parse_error
+             "single-element tuple type `(T)` is not supported — drop the parens")
+       | t -> raise (Parse_error
+           (Printf.sprintf "expected `,` or `)` in tuple type, got %s"
+              (Token.show t))))
+  | TStar         ->
+      (* *T — raw C pointer. Prefix only; infix * is multiplication. *)
+      let inner = parse_ty st in
+      TyPtr inner
   | TFn           ->
       expect st TLParen;
       let args =
@@ -115,23 +159,67 @@ let parse_binop_chain st (ops : (token * binop) list) lower =
 
 let rec parse_expr st = parse_assign st
 
-(* `:=` is only valid for array index assignment: `a[i] := v`. *)
+(* `:=` is allowed in two shapes:
+     `a[i] := v` — array slot assignment (always allowed)
+     `x := v`    — variable reassignment (requires `let mut x = ...`) *)
 and parse_assign st =
-  let lhs = parse_or st in
+  let lhs = parse_pipe st in
   if peek st = TColonEq then begin
     advance st;
     let rhs = parse_assign st in
     match lhs with
     | EIndex (arr, idx) -> EAssignIdx (arr, idx, rhs)
+    | EVar x -> EAssign (x, rhs)
     | _ -> raise (Parse_error
-        "`:=` is only allowed on array indexing: a[i] := v")
+        "`:=` requires a variable name or array indexing on the left")
   end else lhs
 
+(* Pipeline: `x |> f` rewrites to `f(x)`. `x |> f(a, b)` rewrites to
+   `f(x, a, b)` — x is threaded in as the FIRST argument. Left-
+   associative: `x |> f |> g` is `g(f(x))`. Lower precedence than
+   any binary operator, higher than assignment. *)
+and parse_pipe st =
+  let lhs = parse_or st in
+  let rec loop lhs =
+    if peek st = TPipeArrow then begin
+      advance st;
+      let rhs = parse_or st in
+      let combined = match rhs with
+        | ECall (f, args) -> ECall (f, lhs :: args)
+        | _ -> ECall (rhs, [lhs])
+      in
+      loop combined
+    end else lhs
+  in
+  loop lhs
+
+(* Operator precedence, low → high (mirrors C so it's familiar):
+     ||           — parse_or
+     &&           — parse_and
+     |            — parse_bor       (bitwise OR)
+     ^            — parse_bxor      (bitwise XOR)
+     &            — parse_band      (bitwise AND)
+     == !=        — parse_eq
+     < > <= >=    — parse_cmp
+     << >>        — parse_shift
+     + -          — parse_add
+     * / %        — parse_mul
+     ! - * ~      — parse_unary (prefix)
+*)
 and parse_or st =
   parse_binop_chain st [TOrOr, OpOr] parse_and
 
 and parse_and st =
-  parse_binop_chain st [TAndAnd, OpAnd] parse_eq
+  parse_binop_chain st [TAndAnd, OpAnd] parse_bor
+
+and parse_bor st =
+  parse_binop_chain st [TPipe, OpBOr] parse_bxor
+
+and parse_bxor st =
+  parse_binop_chain st [TCaret, OpBXor] parse_band
+
+and parse_band st =
+  parse_binop_chain st [TAmp, OpBAnd] parse_eq
 
 and parse_eq st =
   parse_binop_chain st [TEqEq, OpEq; TNeq, OpNeq] parse_cmp
@@ -139,7 +227,10 @@ and parse_eq st =
 and parse_cmp st =
   parse_binop_chain st
     [TLt, OpLt; TGt, OpGt; TLe, OpLe; TGe, OpGe]
-    parse_add
+    parse_shift
+
+and parse_shift st =
+  parse_binop_chain st [TShl, OpShl; TShr, OpShr] parse_add
 
 and parse_add st =
   parse_binop_chain st [TPlus, OpAdd; TMinus, OpSub] parse_mul
@@ -155,11 +246,71 @@ and parse_unary st =
       advance st;
       let inner = parse_unary st in
       EUnop (OpNot, inner)
+  | TTilde ->
+      advance st;
+      let inner = parse_unary st in
+      EUnop (OpBNot, inner)
   | TMinus ->
       advance st;
       let inner = parse_unary st in
       EUnop (OpNeg, inner)
+  | TStar ->
+      (* *p — pointer deref. Prefix-only here; infix * is matched in
+         parse_mul, which only triggers after an operand has been parsed. *)
+      advance st;
+      let inner = parse_unary st in
+      EDeref inner
+  | TAwait ->
+      advance st;
+      parse_await_tail st
+  | TSpawn ->
+      advance st;
+      let inner = parse_unary st in
+      ESpawn inner
+  | TYield ->
+      (* `yield` is pure syntactic sugar for `await orto_nop()` —
+         submit a NOP SQE and let the dispatcher run other tasks.
+         The desugaring keeps the backend free of a separate yield
+         path; everything routes through the async-extern await
+         lowering. orto_nop is injected as a builtin extern by
+         check.ml so no `use` is required. *)
+      advance st;
+      EAwait (ECall (EVar "orto_nop", []))
   | _ -> parse_postfix st
+
+(* After `await`: distinguish three forms based on look-ahead.
+     await all { e1, e2, ... }   → EAwaitAll       (static, tuple result)
+     await all <expr>            → EAwaitAllDyn    (dynamic, array result)
+     await <expr>                → EAwait
+   `all` is recognised here only — outside the `await` context it
+   remains an ordinary identifier. *)
+and parse_await_tail st =
+  match peek st with
+  | TIdent "all" ->
+      advance st;
+      (match peek st with
+       | TLBrace ->
+           advance st;
+           let branches =
+             if peek st = TRBrace then []
+             else
+               let rec collect () =
+                 let e = parse_expr st in
+                 if peek st = TComma then begin
+                   advance st;
+                   if peek st = TRBrace then [e] else e :: collect ()
+                 end else [e]
+               in
+               collect ()
+           in
+           expect st TRBrace;
+           EAwaitAll branches
+       | _ ->
+           let coll = parse_unary st in
+           EAwaitAllDyn coll)
+  | _ ->
+      let inner = parse_unary st in
+      EAwait inner
 
 and parse_postfix st =
   let head = parse_atom st in
@@ -174,18 +325,39 @@ and parse_postfix_chain st head =
       parse_postfix_chain st (ECall (head, args))
   | TDot ->
       advance st;
-      let field = match eat st with
-        | TIdent s -> s
-        | t -> raise (Parse_error
-          (Printf.sprintf "expected field name after '.', got %s"
-             (Token.show t)))
-      in
-      parse_postfix_chain st (EField (head, field))
+      (match eat st with
+       | TIdent s ->
+           parse_postfix_chain st (EField (head, s))
+       | TInt n when n >= 0 ->
+           parse_postfix_chain st (ETupleIdx (head, n))
+       | t -> raise (Parse_error
+         (Printf.sprintf "expected field name or tuple index after `.`, got %s"
+            (Token.show t))))
   | TLBracket ->
       advance st;
       let idx = parse_expr st in
       expect st TRBracket;
       parse_postfix_chain st (EIndex (head, idx))
+  | TQuestion ->
+      (* `e?` desugar:
+           match e {
+             Ok(v)  => v,
+             Err(e) => return Err(e),
+           }
+         The enclosing function's return type must be Result[…] —
+         the check pass will reject the early return otherwise. *)
+      advance st;
+      incr try_counter;
+      let ok_v  = Printf.sprintf "_try_ok_%d"  !try_counter in
+      let err_v = Printf.sprintf "_try_err_%d" !try_counter in
+      let desugared =
+        EMatch (head, [
+          (PCtor ("Ok",  [ok_v]),  None, EVar ok_v);
+          (PCtor ("Err", [err_v]), None,
+            EReturn (ECtor ("Err", [EVar err_v])));
+        ])
+      in
+      parse_postfix_chain st desugared
   | _ -> head
 
 and parse_record_init_elems st =
@@ -232,23 +404,66 @@ and parse_args st =
 
 and parse_atom st =
   match peek st with
-  | TInt _ | TTrue | TFalse | TLParen
+  | TInt _ | TFloat _ | TTrue | TFalse | TLParen | TLBrace
   | TIdent _ | TCtorIdent _
-  | TIf | TMatch
-  | TArray | TBuf | TLen | TRegion
-  | TLBracket -> parse_atom_consume st
+  | TStringLit _
+  | TIf | TMatch | TWhile | TBreak | TContinue | TFor | TReturn
+  | TArray | TLen | TSlice
+  | TToInt | TToByte | TToFloat | TToU16 | TToU32 | TToU64
+  | TCAlloc | TCFree | TNullPtr | TIsNull | TArrayData | TTryAt | TDrop
+  | TRegion | TStackRegion | TAlignedRegion
+  | TPrint | TPrintln -> parse_atom_consume st
   | t -> raise (Parse_error
     (Printf.sprintf "expected expression, got %s" (Token.show t)))
 
 and parse_atom_consume st =
+  match peek st with
+  | TLBrace ->
+      (* Bare `{ ... }` as an expression — a block. Useful in match
+         arm bodies where you want let-bindings before the result. *)
+      parse_block st
+  | _ ->
   match eat st with
   | TInt n      -> EInt n
+  | TFloat f    -> EFloat f
   | TTrue       -> EBool true
   | TFalse      -> EBool false
+  | TStringLit s -> EStringLit s
   | TLParen     ->
-      let e = parse_expr st in
-      expect st TRParen;
-      e
+      (* Three shapes:
+           ()            — disallowed (no zero-tuple syntax for now)
+           (e)           — parenthesised expression
+           (e1, e2, ...) — tuple literal, n >= 2 (trailing comma allowed)
+         A bare (e,) is rejected — singleton tuples don't add anything
+         orthogonal here, and we'd rather grow that later if we need it. *)
+      if peek st = TRParen then
+        raise (Parse_error "`()` is not a valid expression — use a value or 0 for placeholder");
+      let first = parse_expr st in
+      (match peek st with
+       | TRParen -> advance st; first
+       | TComma ->
+           advance st;
+           if peek st = TRParen then
+             raise (Parse_error
+               "1-element tuple `(e,)` is not supported — drop the trailing comma");
+           let rec collect () =
+             let e = parse_expr st in
+             match peek st with
+             | TComma ->
+                 advance st;
+                 if peek st = TRParen then [e]
+                 else e :: collect ()
+             | TRParen -> [e]
+             | t -> raise (Parse_error
+                 (Printf.sprintf "expected `,` or `)` in tuple literal, got %s"
+                    (Token.show t)))
+           in
+           let rest = collect () in
+           expect st TRParen;
+           ETuple (first :: rest)
+       | t -> raise (Parse_error
+           (Printf.sprintf "expected `)` or `,` after parenthesised expression, got %s"
+              (Token.show t))))
   | TIdent name -> EVar name
   | TCtorIdent name ->
       (match peek st with
@@ -265,6 +480,52 @@ and parse_atom_consume st =
        | _ -> ECtor (name, []))
   | TIf -> parse_if_after_kw st
   | TMatch -> parse_match_after_kw st
+  | TWhile ->
+      let cond = parse_expr st in
+      let body = parse_block st in
+      EWhile (cond, body)
+  | TBreak -> EBreak
+  | TContinue -> EContinue
+  | TFor ->
+      (* Two shapes share the `for x in ...` head:
+           for <var> in <lo>..<hi> { <body> }   — int range, desugars to while.
+           for <var> in <stream-expr> { <body> } — multishot Stream[T] drain.
+         Parse a single expression after `in` and disambiguate on the
+         next token: `..` selects the range path, `{` selects the
+         stream path. *)
+      let var = match eat st with
+        | TIdent s -> s
+        | t -> raise (Parse_error
+          (Printf.sprintf "expected loop variable name after `for`, got %s"
+             (Token.show t)))
+      in
+      expect st TIn;
+      let lo_or_src = parse_expr st in
+      (match peek st with
+       | TDotDot ->
+           advance st;
+           let hi = parse_expr st in
+           let body = parse_block st in
+           let hi_var = Printf.sprintf "_for_hi_%d" (Hashtbl.hash (var, hi)) in
+           let bump = EAssign (var, EBinop (OpAdd, EVar var, EInt 1)) in
+           let new_body =
+             ELet ("_", false, None, body,
+               ELet ("_", false, None, bump, EInt 0))
+           in
+           ELet (hi_var, false, None, hi,
+             ELet (var, true, None, lo_or_src,
+               EWhile (EBinop (OpLt, EVar var, EVar hi_var), new_body)))
+       | TLBrace ->
+           let body = parse_block st in
+           EForStream (var, lo_or_src, body)
+       | t ->
+           raise (Parse_error
+             (Printf.sprintf
+                "after `for %s in <expr>`: expected `..` (range form) or `{` (stream form), got %s"
+                var (Token.show t))))
+  | TReturn ->
+      let v = parse_expr st in
+      EReturn v
   | TArray ->
       expect st TLParen;
       let r = parse_expr st in
@@ -304,42 +565,142 @@ and parse_atom_consume st =
       let e = parse_expr st in
       expect st TRParen;
       ELen e
-  | TBuf ->
-      (* buf(N, init) — stack array, N must be an int literal at parse time. *)
+  | TSlice ->
+      expect st TLParen;
+      let a = parse_expr st in
+      expect st TComma;
+      let lo = parse_expr st in
+      expect st TComma;
+      let hi = parse_expr st in
+      expect st TRParen;
+      ESlice (a, lo, hi)
+  | TToInt ->
+      expect st TLParen;
+      let e = parse_expr st in
+      expect st TRParen;
+      EToInt e
+  | TToByte ->
+      expect st TLParen;
+      let e = parse_expr st in
+      expect st TRParen;
+      EToByte e
+  | TToU16 ->
+      expect st TLParen;
+      let e = parse_expr st in
+      expect st TRParen;
+      EToU16 e
+  | TToU32 ->
+      expect st TLParen;
+      let e = parse_expr st in
+      expect st TRParen;
+      EToU32 e
+  | TToU64 ->
+      expect st TLParen;
+      let e = parse_expr st in
+      expect st TRParen;
+      EToU64 e
+  | TToFloat ->
+      expect st TLParen;
+      let e = parse_expr st in
+      expect st TRParen;
+      EToFloat e
+  | TCAlloc ->
+      expect st TLBracket;
+      let t = parse_ty st in
+      expect st TRBracket;
       expect st TLParen;
       let n = parse_expr st in
-      (match n with
-       | EInt _ -> ()
-       | _ -> raise (Parse_error
-           "buf(N, init): N must be an integer literal (compile-time size)"));
-      expect st TComma;
-      let v = parse_expr st in
       expect st TRParen;
-      EBuf (n, v)
-  | TLBracket ->
-      (* `[v0, v1, ..., vN]` standalone — stack array literal. *)
-      let elems =
-        if peek st = TRBracket then []
-        else
-          let rec collect () =
-            let e = parse_expr st in
-            if peek st = TComma then begin
-              advance st;
-              if peek st = TRBracket then [e] else e :: collect ()
-            end else [e]
-          in
-          collect ()
-      in
+      ECAlloc (t, n)
+  | TCFree ->
+      expect st TLParen;
+      let p = parse_expr st in
+      expect st TRParen;
+      ECFree p
+  | TNullPtr ->
+      expect st TLBracket;
+      let t = parse_ty st in
       expect st TRBracket;
-      EBufLit elems
+      expect st TLParen;
+      expect st TRParen;
+      ENullPtr t
+  | TIsNull ->
+      expect st TLParen;
+      let p = parse_expr st in
+      expect st TRParen;
+      EIsNull p
+  | TArrayData ->
+      expect st TLParen;
+      let a = parse_expr st in
+      expect st TRParen;
+      EArrayData a
+  | TTryAt ->
+      expect st TLParen;
+      let a = parse_expr st in
+      expect st TComma;
+      let i = parse_expr st in
+      expect st TRParen;
+      ETryAt (a, i)
+  | TDrop ->
+      expect st TLParen;
+      let e = parse_expr st in
+      expect st TRParen;
+      EDrop e
+  | TPrint ->
+      expect st TLParen;
+      let e = parse_expr st in
+      expect st TRParen;
+      EPrint (false, e)
+  | TPrintln ->
+      expect st TLParen;
+      let e = parse_expr st in
+      expect st TRParen;
+      EPrint (true, e)
+  | TStackRegion ->
+      (* stack_region(N) — N is any int expression; lowered to a C99
+         VLA in the surrounding function's frame. Goes through the
+         slab so gen-check still works. *)
+      expect st TLParen;
+      let n = parse_expr st in
+      expect st TRParen;
+      EStackRegion n
+  | TAlignedRegion ->
+      (* aligned_region(N, A) — N is the size in bytes, A is the
+         alignment (must be an int literal and a power of two). *)
+      expect st TLParen;
+      let n = parse_expr st in
+      expect st TComma;
+      let a = parse_expr st in
+      (match a with
+       | EInt k when k > 0 && (k land (k - 1)) = 0 -> ()
+       | EInt _ -> raise (Parse_error
+           "aligned_region(_, A): A must be a positive power of two")
+       | _ -> raise (Parse_error
+           "aligned_region(_, A): A must be an integer literal"));
+      expect st TRParen;
+      EAlignedRegion (n, a)
   | _ -> assert false
 
 and parse_if_after_kw st =
   let cond = parse_expr st in
   let then_b = parse_block st in
-  expect st TElse;
-  let else_b = parse_block st in
-  EIf (cond, then_b, else_b)
+  (* `else` is optional. When absent, the implicit else is int 0 —
+     both branches must then unify to int. This is the form used
+     inside loops: `if cond { break }`. *)
+  if peek st <> TElse then
+    EIf (cond, then_b, EInt 0)
+  else begin
+    advance st;
+    (* Support `else if ... { ... }` as sugar for nested if. *)
+    let else_b =
+      if peek st = TIf then begin
+        advance st;
+        parse_if_after_kw st
+      end else
+        parse_block st
+    in
+    EIf (cond, then_b, else_b)
+  end
 
 and parse_match_after_kw st =
   let scrut = parse_expr st in
@@ -359,13 +720,33 @@ and parse_arms st =
 
 and parse_arm st =
   let p = parse_pat st in
+  let guard =
+    if peek st = TIf then begin
+      advance st;
+      Some (parse_expr st)
+    end else None
+  in
   expect st TFatArrow;
   let body = parse_expr st in
-  (p, body)
+  (p, guard, body)
 
 and parse_pat st =
+  let first = parse_single_pat st in
+  if peek st = TPipe then begin
+    let rec collect acc =
+      if peek st = TPipe then begin
+        advance st;
+        let p = parse_single_pat st in
+        collect (p :: acc)
+      end else
+        List.rev acc
+    in
+    POr (first :: collect [])
+  end else first
+
+and parse_single_pat st =
   match eat st with
-  | TUnderscore  -> PWild
+  | TUnderscore  -> PBind "_"
   | TCtorIdent c ->
       if peek st = TLParen then begin
         advance st;
@@ -374,6 +755,40 @@ and parse_pat st =
         PCtor (c, vars)
       end else
         PCtor (c, [])
+  | TIdent x -> PBind x
+  | TInt n -> PInt n
+  | TMinus ->
+      (match eat st with
+       | TInt n -> PInt (- n)
+       | t -> raise (Parse_error
+         (Printf.sprintf "expected integer literal after `-` in pattern, got %s"
+            (Token.show t))))
+  | TTrue  -> PBool true
+  | TFalse -> PBool false
+  | TStringLit s -> PStr s
+  | TLParen ->
+      (* Tuple pattern: `(p1, p2, ..., pn)` for n >= 2.
+         `(p)` alone would be parens-around-pat, but tuple patterns
+         only make sense over an actual tuple — and tuples need at
+         least two components — so require at least one comma. *)
+      let first = parse_single_pat st in
+      if peek st = TComma then begin
+        let rec collect acc =
+          if peek st = TComma then begin
+            advance st;
+            (* trailing comma allowed: `(a, b,)` *)
+            if peek st = TRParen then List.rev acc
+            else collect (parse_single_pat st :: acc)
+          end else
+            List.rev acc
+        in
+        let rest = collect [] in
+        expect st TRParen;
+        PTuple (first :: rest)
+      end else begin
+        expect st TRParen;
+        first   (* parens around single pattern, no-op *)
+      end
   | t -> raise (Parse_error
     (Printf.sprintf "expected pattern, got %s" (Token.show t)))
 
@@ -402,8 +817,62 @@ and parse_block st =
 
 and parse_block_body st =
   match peek st with
+  | TArena ->
+      (* `arena r = <region-expr>;` — scope-bound region binding. No
+         mut, no ascription, no destructuring: the form is deliberately
+         minimal. The checker asserts the value types to Region. *)
+      advance st;
+      let name = match eat st with
+        | TIdent s -> s
+        | t -> raise (Parse_error
+          (Printf.sprintf "expected identifier after `arena`, got %s"
+            (Token.show t)))
+      in
+      expect st TEq;
+      let value = parse_expr st in
+      expect st TSemi;
+      let body = parse_block_body st in
+      EArena (name, value, body)
   | TLet ->
       advance st;
+      (* Tuple destructuring let:  `let (x, y, z) = expr;`
+         Distinguishable from `let mut ...` / `let name ...` by the
+         immediate `(` after `let`. Inside, we accept lowercase idents
+         and `_` (wildcard) — same shape as a ctor's argument pattern. *)
+      if peek st = TLParen then begin
+        advance st;
+        let rec collect () =
+          let v = match eat st with
+            | TIdent s    -> s
+            | TUnderscore -> "_"
+            | t -> raise (Parse_error
+                (Printf.sprintf "expected identifier or `_` in `let (...)`, got %s"
+                   (Token.show t)))
+          in
+          match peek st with
+          | TComma ->
+              advance st;
+              if peek st = TRParen then [v]
+              else v :: collect ()
+          | TRParen -> [v]
+          | t -> raise (Parse_error
+              (Printf.sprintf "expected `,` or `)` in `let (...)`, got %s"
+                 (Token.show t)))
+        in
+        let names = collect () in
+        expect st TRParen;
+        if List.length names < 2 then
+          raise (Parse_error
+            "`let (x) = ...` needs at least 2 names — use `let x = ...` for one");
+        expect st TEq;
+        let value = parse_expr st in
+        expect st TSemi;
+        let body = parse_block_body st in
+        ELetTuple (names, value, body)
+      end else
+      let is_mut =
+        if peek st = TMut then begin advance st; true end else false
+      in
       let name = match eat st with
         | TIdent s    -> s
         | TUnderscore -> "_"
@@ -421,22 +890,33 @@ and parse_block_body st =
       let value = parse_expr st in
       expect st TSemi;
       let body = parse_block_body st in
-      ELet (name, ascription, value, body)
+      ELet (name, is_mut, ascription, value, body)
   | _ ->
+      (* Whether the upcoming expression starts with a `{...}`-bearing
+         keyword. If so, an implicit `;` is allowed after the closing
+         `}` (the for-desugar wraps the EWhile in lets, so peeking AFTER
+         parse_expr can't see this — we peek BEFORE). *)
+      let starts_block_like = match peek st with
+        | TIf | TMatch | TWhile | TFor -> true
+        | _ -> false
+      in
       let e = parse_expr st in
       if peek st = TSemi then begin
         advance st;
         if peek st = TRBrace then
-          (* trailing `;` before `}` — treat as expression-with-unit-result.
-             We have no unit, so allow this only if the expression is the
-             last thing and just discard the trailing semi. But since we
-             must produce SOME value as block result, this is an error. *)
-          raise (Parse_error
-            "block cannot end with `;` — last expression is the block's value")
+          (* Trailing `;` discards the last expression's value; the
+             block's result becomes int 0 (placeholder for unit). *)
+          ELet ("_", false, None, e, EInt 0)
         else
           let rest = parse_block_body st in
-          ELet ("_", None, e, rest)
-      end else e
+          ELet ("_", false, None, e, rest)
+      end
+      else if starts_block_like && peek st <> TRBrace then
+        (* Block-like construct followed by another statement without a
+           `;` between — implicit boundary, treat as discard. *)
+        let rest = parse_block_body st in
+        ELet ("_", false, None, e, rest)
+      else e
 
 (* ---------- functions ---------- *)
 
@@ -493,11 +973,16 @@ let parse_extern st =
   expect st TRParen;
   expect st TArrow;
   let return_ty = parse_ty st in
+  (* The return type drives the calling convention:
+       -> Task[T]    — SQE-prep extern, lowers under `await`
+       -> Stream[T]  — multishot SQE source, drained by `for x in s`
+       -> T          — ordinary sync FFI call
+     No modifier keywords; the type IS the signal. *)
   { ext_name = name; ext_params = params; ext_return_ty = return_ty }
 
 (* ---------- type declarations ---------- *)
 
-let parse_struct st : top_decl =
+let parse_struct st ~is_linear : top_decl =
   expect st TStruct;
   let name = match eat st with
     | TCtorIdent s -> s
@@ -531,9 +1016,10 @@ let parse_struct st : top_decl =
     rec_name = name;
     rec_type_params = type_params;
     rec_fields = fields;
+    rec_is_linear = is_linear;
   }
 
-let parse_enum st : top_decl =
+let parse_enum st ~is_linear : top_decl =
   expect st TEnum;
   let name = match eat st with
     | TCtorIdent s -> s
@@ -571,32 +1057,176 @@ let parse_enum st : top_decl =
   in
   let variants = collect_variants () in
   expect st TRBrace;
-  TopType { type_name = name; type_params; variants }
+  TopType { type_name = name; type_params; variants; is_linear }
+
+(* ---------- use declarations ---------- *)
+
+(* `use a::b::c::{x, y};` — selective import with a multi-component path.
+   Grammar: `use` PATH `;`  where PATH is one of
+     - ident (:: ident)*               (single-item, last ident is item)
+     - ident (:: ident)* :: { items }  (block form, all idents form path)
+   We disambiguate with two-token lookahead: after consuming
+   `ident ::` we check if what follows is another `ident ::` (more
+   path), an ident-then-not-`::` (single item form), or `{` (block). *)
+let parse_use ?(is_pub=false) st : use_decl =
+  expect st TUse;
+  let first = match eat st with
+    | TIdent s | TCtorIdent s -> s
+    | t -> raise (Parse_error
+      (Printf.sprintf "expected namespace name after `use`, got %s"
+         (Token.show t)))
+  in
+  expect st TColonCol;
+  let path_rev = ref [first] in
+  let single_item = ref None in
+  let rec loop () =
+    match st.toks with
+    | (TIdent s | TCtorIdent s) :: TColonCol :: _ ->
+        advance st; advance st;
+        path_rev := s :: !path_rev;
+        loop ()
+    | (TIdent s | TCtorIdent s) :: _ ->
+        advance st;
+        single_item := Some s
+    | TLBrace :: _ -> ()
+    | t :: _ -> raise (Parse_error
+        (Printf.sprintf "expected path component, import item, or `{`, got %s"
+           (Token.show t)))
+    | [] -> raise (Parse_error "unexpected end of input in `use` declaration")
+  in
+  loop ();
+  let module_path = List.rev !path_rev in
+  let items =
+    match !single_item with
+    | Some i -> [i]
+    | None ->
+        expect st TLBrace;
+        let rec collect_items () =
+          let item = match eat st with
+            | TIdent s | TCtorIdent s -> s
+            | t -> raise (Parse_error
+              (Printf.sprintf "expected import item, got %s" (Token.show t)))
+          in
+          if peek st = TComma then begin
+            advance st;
+            if peek st = TRBrace then [item]
+            else item :: collect_items ()
+          end else [item]
+        in
+        let items = collect_items () in
+        expect st TRBrace;
+        items
+  in
+  expect st TSemi;
+  if items = [] then
+    raise (Parse_error
+      (Printf.sprintf "use %s::{} — must import at least one item"
+         (String.concat "::" module_path)));
+  { use_module = module_path; use_items = items; use_pub = is_pub }
+
+(* Parse a dotted namespace path: ident (:: ident)*. At least one
+   component; used only for the header of `namespace a::b::c { ... }`. *)
+let parse_namespace_path st : string list =
+  let first = match eat st with
+    | TIdent s -> s
+    | t -> raise (Parse_error
+      (Printf.sprintf "expected namespace name after `namespace`, got %s"
+         (Token.show t)))
+  in
+  let rec loop acc =
+    if peek st = TColonCol then begin
+      advance st;
+      let nxt = match eat st with
+        | TIdent s -> s
+        | t -> raise (Parse_error
+          (Printf.sprintf "expected namespace component after `::`, got %s"
+             (Token.show t)))
+      in
+      loop (nxt :: acc)
+    end else List.rev acc
+  in
+  loop [first]
 
 (* ---------- entry point ---------- *)
 
 let parse (toks : token list) : program =
+  try_counter := 0;
   let st = { toks } in
-  let rec loop acc =
-    match peek st with
-    | TEOF  -> List.rev acc
+  (* Parse the body of a top-level region — either the whole file
+     (terminator = TEOF) or the inside of a `namespace { ... }` block
+     (terminator = TRBrace). Namespace blocks nest via `loop` calling
+     itself with TRBrace. *)
+  let rec loop terminator acc =
+    let t = peek st in
+    if t = terminator then List.rev acc
+    else match t with
+    | TUse ->
+        let u = parse_use st in
+        loop terminator (TopUse u :: acc)
+    | TPub ->
+        advance st;
+        (match peek st with
+         | TUse ->
+             let u = parse_use ~is_pub:true st in
+             loop terminator (TopUse u :: acc)
+         | t -> raise (Parse_error
+           (Printf.sprintf "after `pub`, expected `use`, got %s"
+              (Token.show t))))
+    | TNamespace ->
+        advance st;
+        let path = parse_namespace_path st in
+        expect st TLBrace;
+        let inner = loop TRBrace [] in
+        expect st TRBrace;
+        loop terminator (TopNamespace (path, inner) :: acc)
     | TFn   ->
         let f = parse_func st in
-        loop (TopFunc f :: acc)
+        loop terminator (TopFunc f :: acc)
     | TStruct ->
-        let td = parse_struct st in
-        loop (td :: acc)
+        let td = parse_struct st ~is_linear:false in
+        loop terminator (td :: acc)
     | TEnum ->
-        let td = parse_enum st in
-        loop (td :: acc)
+        let td = parse_enum st ~is_linear:false in
+        loop terminator (td :: acc)
+    | TLinear ->
+        advance st;
+        (match peek st with
+         | TStruct ->
+             let td = parse_struct st ~is_linear:true in
+             loop terminator (td :: acc)
+         | TEnum ->
+             let td = parse_enum st ~is_linear:true in
+             loop terminator (td :: acc)
+         | t -> raise (Parse_error
+           (Printf.sprintf "expected `struct` or `enum` after `linear`, got %s"
+              (Token.show t))))
     | TType ->
-        raise (Parse_error
-          "`type` keyword is reserved for future aliases; use `struct` or `enum`")
+        advance st;
+        let name = match eat st with
+          | TCtorIdent s -> s
+          | t -> raise (Parse_error
+            (Printf.sprintf "expected type alias name after `type`, got %s"
+               (Token.show t)))
+        in
+        expect st TEq;
+        let target = parse_ty st in
+        expect st TSemi;
+        loop terminator (TopAlias { alias_name = name; alias_ty = target } :: acc)
     | TExtern ->
         let e = parse_extern st in
-        loop (TopExtern e :: acc)
+        loop terminator (TopExtern e :: acc)
+    | TTest ->
+        advance st;
+        let name = match eat st with
+          | TStringLit s -> s
+          | t -> raise (Parse_error
+            (Printf.sprintf "expected string literal after `test`, got %s"
+               (Token.show t)))
+        in
+        let body = parse_block st in
+        loop terminator (TopTest { test_name = name; test_body = body } :: acc)
     | t -> raise (Parse_error
-      (Printf.sprintf "expected `fn`, `struct`, `enum`, or `extern` at top level, got %s"
+      (Printf.sprintf "expected `use`, `fn`, `struct`, `enum`, `linear`, `type`, `extern`, `test`, or `namespace`, got %s"
          (Token.show t)))
   in
-  loop []
+  loop TEOF []

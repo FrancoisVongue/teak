@@ -1,0 +1,100 @@
+// std::sys — thin layer over libc system calls.
+//
+// File / socket descriptors are wrapped in a `linear struct Fd` so the
+// compiler ensures you can't accidentally clone, alias, or forget to
+// close them. The underlying syscalls are accessed via plain `extern
+// fn` declarations — that's the "through-hole" to libc, no language
+// magic needed.
+//
+// Most byte buffers passed to syscalls live in a user-allocated Region
+// (so Array[byte] is the natural type). `array_data(buf)` converts to
+// `*byte` at the call site.
+
+// ---------- libc syscalls and helpers ----------
+
+extern fn open(path: *byte, flags: int, mode: int) -> int
+extern fn close(fd: int) -> int
+extern fn read(fd: int, buf: *byte, n: int) -> int
+extern fn write(fd: int, buf: *byte, n: int) -> int
+extern fn lseek(fd: int, offset: int, whence: int) -> int
+
+extern fn socket(domain: int, type_: int, protocol: int) -> int
+extern fn bind(fd: int, addr: *byte, addrlen: int) -> int
+extern fn listen(fd: int, backlog: int) -> int
+extern fn accept(fd: int, addr: *byte, addrlen: *int) -> int
+extern fn connect(fd: int, addr: *byte, addrlen: int) -> int
+extern fn sendto(fd: int, buf: *byte, n: int, flags: int,
+                 addr: *byte, addrlen: int) -> int
+extern fn recvfrom(fd: int, buf: *byte, n: int, flags: int,
+                   addr: *byte, addrlen: *int) -> int
+
+extern fn getpid() -> int
+
+// errno as a function (libc usually exposes it via __errno_location).
+extern fn __errno_location() -> *int
+fn errno() -> int { *__errno_location() }
+
+// ---------- common flag constants ----------
+
+// Constants are lowercase fns (orto parses CapitalCase as ctor names).
+fn o_rdonly()   -> int { 0      }
+fn o_wronly()   -> int { 1      }
+fn o_rdwr()     -> int { 2      }
+fn o_creat()    -> int { 64     }   // 0o100
+fn o_trunc()    -> int { 512    }   // 0o1000
+fn o_append()   -> int { 1024   }   // 0o2000
+
+fn af_unix()    -> int { 1      }
+fn af_inet()    -> int { 2      }
+fn af_netlink() -> int { 16     }
+fn sock_dgram()  -> int { 2     }
+fn sock_stream() -> int { 1     }
+fn sock_raw()    -> int { 3     }
+
+fn seek_set() -> int { 0 }
+fn seek_cur() -> int { 1 }
+fn seek_end() -> int { 2 }
+
+// ---------- linear file/socket descriptor ----------
+
+linear struct Fd { raw: int }
+
+fn drop_Fd(f: Fd) -> int { close(f.raw); 0 }
+
+// fd_wrap takes a raw int from libc and wraps it in a Fd, asserting
+// it's a real descriptor. Use after checking raw >= 0.
+fn fd_wrap(raw: int) -> Fd { Fd { raw: raw } }
+
+// Low-level openers — return the raw fd (-1 on error). Wrap into a
+// Fd at the call site once you've verified raw >= 0; this keeps the
+// resource-owning type out of generic Option[T].
+//
+//     let raw = sys_open(path, flags, mode);
+//     if raw < 0 { return error_path(raw) }
+//     let f = fd_wrap(raw);
+//     // f drops automatically at scope end
+//
+// The pattern is a couple of lines and totally explicit; the
+// alternative would be a custom `linear enum FdResult` per-call,
+// which is more boilerplate for the same effect.
+
+fn sys_open(path: Array[byte], flags: int, mode: int) -> int {
+    open(array_data(path), flags, mode)
+}
+
+fn sys_socket(domain: int, type_: int, protocol: int) -> int {
+    socket(domain, type_, protocol)
+}
+
+// Borrow operations on Fd — the descriptor stays alive.
+fn fd_read(f: Fd, buf: Array[byte]) -> int {
+    read(f.raw, array_data(buf), len(buf))
+}
+
+fn fd_write(f: Fd, buf: Array[byte]) -> int {
+    write(f.raw, array_data(buf), len(buf))
+}
+
+fn fd_seek(f: Fd, offset: int, whence: int) -> int {
+    lseek(f.raw, offset, whence)
+}

@@ -1,15 +1,17 @@
-// Built-in Option[T]: Some(T) | None. User defines Result.
+// Built-in Option[T]: Some(T) | None. Result[T] is also built-in
+// since Stage 3 phase 7 — used to wrap await results — so the
+// hand-rolled flavour here is renamed DivOutcome to avoid clash.
 
-enum ResultInt {
-    Ok(int),
-    Err(int),
+enum DivOutcome {
+    Good(int),
+    Bad(int),
 }
 
-fn safe_div(a: int, b: int) -> ResultInt {
+fn safe_div(a: int, b: int) -> DivOutcome {
     if b == 0 {
-        Err(1)
+        Bad(1)
     } else {
-        Ok(a / b)
+        Good(a / b)
     }
 }
 
@@ -35,8 +37,8 @@ fn first_positive(a: int, b: int) -> Option[int] {
 fn main() -> int {
     let r = safe_div(10, 2);
     let v = match r {
-        Ok(q)  => q,
-        Err(_) => 0,
+        Good(q) => q,
+        Bad(_)  => 0,
     };
 
     let o = first_positive(0 - 1, 7);

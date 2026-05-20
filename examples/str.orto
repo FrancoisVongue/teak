@@ -1,0 +1,336 @@
+// std::str — operations over Array[byte].
+//
+// Allocating functions take a Region as first argument.
+// View functions (eq, find, slice-based) take no Region.
+
+// ---------- comparison and search (no allocation) ----------
+
+fn bytes_eq(a: Array[byte], b: Array[byte]) -> bool {
+    if len(a) != len(b) { false }
+    else {
+        let mut i = 0;
+        while i < len(a) {
+            if a[i] != b[i] { break }
+            i := i + 1;
+        }
+        i == len(a)
+    }
+}
+
+fn index_of(s: Array[byte], c: byte) -> int {
+    let mut i = 0;
+    while i < len(s) {
+        if s[i] == c { break }
+        i := i + 1;
+    }
+    if i == len(s) { 0 - 1 } else { i }
+}
+
+fn last_index_of(s: Array[byte], c: byte) -> int {
+    let mut i = len(s) - 1;
+    while i >= 0 {
+        if s[i] == c { return i }
+        i := i - 1;
+    }
+    0 - 1
+}
+
+fn find_substr(hay: Array[byte], needle: Array[byte]) -> int {
+    if len(needle) == 0 { return 0 }
+    let mut i = 0;
+    while i + len(needle) <= len(hay) {
+        if bytes_eq(slice(hay, i, i + len(needle)), needle) {
+            return i
+        }
+        i := i + 1;
+    }
+    0 - 1
+}
+
+fn starts_with(s: Array[byte], prefix: Array[byte]) -> bool {
+    if len(s) < len(prefix) { false }
+    else { bytes_eq(slice(s, 0, len(prefix)), prefix) }
+}
+
+fn ends_with(s: Array[byte], suffix: Array[byte]) -> bool {
+    if len(s) < len(suffix) { false }
+    else {
+        let n = len(s);
+        let m = len(suffix);
+        bytes_eq(slice(s, n - m, n), suffix)
+    }
+}
+
+fn contains_substr(hay: Array[byte], needle: Array[byte]) -> bool {
+    find_substr(hay, needle) >= 0
+}
+
+// ---------- character class helpers ----------
+
+fn is_digit(b: byte) -> bool {
+    let n = to_int(b);
+    n >= 48 && n <= 57
+}
+
+fn is_alpha(b: byte) -> bool {
+    let n = to_int(b);
+    (n >= 65 && n <= 90) || (n >= 97 && n <= 122)
+}
+
+fn is_ws(b: byte) -> bool {
+    let n = to_int(b);
+    n == 32 || n == 9 || n == 10 || n == 13   // space, tab, LF, CR
+}
+
+// ---------- trim / slice (no allocation) ----------
+
+fn trim_start(s: Array[byte]) -> Array[byte] {
+    let mut i = 0;
+    while i < len(s) && is_ws(s[i]) {
+        i := i + 1;
+    }
+    slice(s, i, len(s))
+}
+
+fn trim_end(s: Array[byte]) -> Array[byte] {
+    let mut j = len(s);
+    while j > 0 && is_ws(s[j - 1]) {
+        j := j - 1;
+    }
+    slice(s, 0, j)
+}
+
+fn trim(s: Array[byte]) -> Array[byte] {
+    trim_end(trim_start(s))
+}
+
+// ---------- parsing ----------
+
+fn parse_int(s: Array[byte]) -> int {
+    let mut acc = 0;
+    let mut i = 0;
+    let mut neg = false;
+    if len(s) > 0 && s[0] == to_byte(45) {   // '-'
+        neg := true;
+        i := 1;
+    }
+    while i < len(s) {
+        let n = to_int(s[i]);
+        if n < 48 || n > 57 { break }
+        acc := acc * 10 + (n - 48);
+        i := i + 1;
+    }
+    if neg { 0 - acc } else { acc }
+}
+
+// Stricter parse: returns None if s contains anything other than digits
+// (with optional leading '-'). Empty string also returns None.
+fn try_parse_int(s: Array[byte]) -> Option[int] {
+    if len(s) == 0 { return None }
+    let mut acc = 0;
+    let mut i = 0;
+    let mut neg = false;
+    if s[0] == to_byte(45) {
+        if len(s) == 1 { return None }
+        neg := true;
+        i := 1;
+    }
+    while i < len(s) {
+        if !is_digit(s[i]) { return None }
+        acc := acc * 10 + (to_int(s[i]) - 48);
+        i := i + 1;
+    }
+    Some(if neg { 0 - acc } else { acc })
+}
+
+// ---------- case conversion ----------
+
+fn upper_byte(b: byte) -> byte {
+    let n = to_int(b);
+    if n >= 97 && n <= 122 { to_byte(n - 32) } else { b }
+}
+
+fn lower_byte(b: byte) -> byte {
+    let n = to_int(b);
+    if n >= 65 && n <= 90 { to_byte(n + 32) } else { b }
+}
+
+fn to_upper(r: Region, s: Array[byte]) -> Array[byte] {
+    let dst = array(r, len(s), to_byte(0));
+    let mut i = 0;
+    while i < len(s) {
+        dst[i] := upper_byte(s[i]);
+        i := i + 1;
+    }
+    dst
+}
+
+fn to_lower(r: Region, s: Array[byte]) -> Array[byte] {
+    let dst = array(r, len(s), to_byte(0));
+    let mut i = 0;
+    while i < len(s) {
+        dst[i] := lower_byte(s[i]);
+        i := i + 1;
+    }
+    dst
+}
+
+// ---------- copy / concat ----------
+
+fn copy_into(dst: Array[byte], src: Array[byte], at: int) -> int {
+    let mut i = 0;
+    while i < len(src) {
+        dst[at + i] := src[i];
+        i := i + 1;
+    }
+    0
+}
+
+fn bytes_copy(r: Region, s: Array[byte]) -> Array[byte] {
+    let dst = array(r, len(s), to_byte(0));
+    copy_into(dst, s, 0);
+    dst
+}
+
+// Like bytes_copy but appends a NUL byte. For passing strings to C
+// APIs that expect NUL-terminated input (open, getenv, etc.).
+// The returned Array's len does NOT include the trailing NUL —
+// `array_data` still points at a NUL-terminated region in memory.
+fn c_str(r: Region, s: Array[byte]) -> Array[byte] {
+    let dst = array(r, len(s) + 1, to_byte(0));
+    copy_into(dst, s, 0);
+    // last slot already 0 from the array initializer.
+    slice(dst, 0, len(s))
+}
+
+fn concat(r: Region, a: Array[byte], b: Array[byte]) -> Array[byte] {
+    let dst = array(r, len(a) + len(b), to_byte(0));
+    copy_into(dst, a, 0);
+    copy_into(dst, b, len(a));
+    dst
+}
+
+fn total_len(parts: Array[Array[byte]]) -> int {
+    let mut total = 0;
+    let mut i = 0;
+    while i < len(parts) {
+        total := total + len(parts[i]);
+        i := i + 1;
+    }
+    total
+}
+
+fn concat_all(r: Region, parts: Array[Array[byte]]) -> Array[byte] {
+    let dst = array(r, total_len(parts), to_byte(0));
+    let mut at = 0;
+    let mut i = 0;
+    while i < len(parts) {
+        copy_into(dst, parts[i], at);
+        at := at + len(parts[i]);
+        i := i + 1;
+    }
+    dst
+}
+
+// Like concat_all but with a separator between parts.
+fn bytes_join(r: Region, sep: Array[byte], parts: Array[Array[byte]]) -> Array[byte] {
+    if len(parts) == 0 { return array(r, 0, to_byte(0)) }
+    let mut total = 0;
+    for i in 0..len(parts) {
+        total := total + len(parts[i]);
+    }
+    total := total + len(sep) * (len(parts) - 1);
+
+    let dst = array(r, total, to_byte(0));
+    let mut at = 0;
+    for i in 0..len(parts) {
+        if i > 0 {
+            copy_into(dst, sep, at);
+            at := at + len(sep);
+        }
+        copy_into(dst, parts[i], at);
+        at := at + len(parts[i]);
+    }
+    dst
+}
+
+// ---------- splitting (allocation) ----------
+
+// Count occurrences of c in s (used to size split result).
+fn count_byte(s: Array[byte], c: byte) -> int {
+    let mut n = 0;
+    for i in 0..len(s) {
+        if s[i] == c { n := n + 1; }
+    }
+    n
+}
+
+// Split s by separator byte. Returns Array of slices into s (no copying
+// of bytes — view-only). Result lives in r.
+fn split_byte(r: Region, s: Array[byte], sep: byte) -> Array[Array[byte]] {
+    let parts_n = count_byte(s, sep) + 1;
+    let result = array(r, parts_n, slice(s, 0, 0));
+    let mut start = 0;
+    let mut idx = 0;
+    for i in 0..len(s) {
+        if s[i] == sep {
+            result[idx] := slice(s, start, i);
+            idx := idx + 1;
+            start := i + 1;
+        }
+    }
+    result[idx] := slice(s, start, len(s));
+    result
+}
+
+// ---------- integer formatting ----------
+
+fn digits_count(n: int) -> int {
+    if n == 0 { return 1 }
+    let mut count = 0;
+    let mut x = if n < 0 { 0 - n } else { n };
+    while x > 0 {
+        count := count + 1;
+        x := x / 10;
+    }
+    if n < 0 { count + 1 } else { count }
+}
+
+fn int_to_bytes(r: Region, n: int) -> Array[byte] {
+    let k = digits_count(n);
+    let dst = array(r, k, to_byte(0));
+    let neg = n < 0;
+    let mut x = if neg { 0 - n } else { n };
+    let mut pos = k - 1;
+    if x == 0 { dst[0] := to_byte(48); return dst }
+    while x > 0 {
+        dst[pos] := to_byte(48 + (x % 10));
+        x := x / 10;
+        pos := pos - 1;
+    }
+    if neg { dst[0] := to_byte(45); }   // '-'
+    dst
+}
+
+// ---------- ad-hoc helpers ----------
+
+// Find "key=VALUE" in a comma-separated string. Returns a slice over
+// VALUE (or empty slice if not found). All slicing — no allocation.
+fn lookup(s: Array[byte], key: Array[byte]) -> Array[byte] {
+    let mut from = 0;
+    while from < len(s) {
+        if from + len(key) + 1 <= len(s)
+           && bytes_eq(slice(s, from, from + len(key)), key)
+           && s[from + len(key)] == to_byte(61) {
+            let val_start = from + len(key) + 1;
+            let rest = slice(s, val_start, len(s));
+            let comma = index_of(rest, to_byte(44));
+            return if comma < 0 { rest } else { slice(rest, 0, comma) }
+        }
+        let rest = slice(s, from, len(s));
+        let comma = index_of(rest, to_byte(44));
+        if comma < 0 { return slice(s, 0, 0) }
+        from := from + comma + 1;
+    }
+    slice(s, 0, 0)
+}

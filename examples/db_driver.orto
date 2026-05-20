@@ -1,0 +1,35 @@
+// Fake DB driver — pretends to be a postgres/sqlite-style client.
+//
+// The real version of this module would speak the actual wire
+// protocol over a socket. For the demo we hardcode a small "users"
+// table and ignore the SQL parameter. The shape of the public API
+// (Region in, Array[Row] out, each cell as Array[byte]) is what a
+// real driver would look like.
+
+use str::int_to_bytes;
+
+struct Row {
+    cells: Array[Array[byte]],
+}
+
+// Build one Row from int/string/int triple — internal helper.
+fn make_row(r: Region, id: int, name: Array[byte], email: Array[byte], age: int) -> Row {
+    Row { cells: array(r, [
+        int_to_bytes(r, id), name, email, int_to_bytes(r, age),
+    ])}
+}
+
+// Run a SELECT. A real driver would parse `sql`, send it over the
+// wire, and stream rows back into `r`. We return the hardcoded
+// users table and ignore the SQL.
+fn run_query(r: Region, _sql: Array[byte]) -> Array[Row] {
+    array(r, [
+        make_row(r, 1, "alice",   "alice@example.com",  30),
+        make_row(r, 2, "bob",     "bob@example.com",    45),
+        make_row(r, 3, "carol",   "carol@example.com",  22),
+        make_row(r, 4, "dave",    "dave@elsewhere.org", 38),
+        make_row(r, 5, "eve",     "eve@elsewhere.org",  51),
+        make_row(r, 6, "frank",   "frank@example.com",  29),
+        make_row(r, 7, "grace",   "grace@elsewhere.org", 33),
+    ])
+}

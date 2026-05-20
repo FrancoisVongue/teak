@@ -1,0 +1,7 @@
+// std::io — kept only for `putchar` legacy users.
+//
+// The functions `print` and `println` used to live here as
+// `putchar`-loops. They are now language intrinsics — call
+// `print(...)` / `println(...)` directly without importing anything.
+
+extern fn putchar(c: int) -> int

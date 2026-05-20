@@ -1,47 +1,20 @@
 # orto compiler — technical debt
 
 Долги, обнаруженные по ходу разработки. Каждый — кандидат на чистку,
-но не блокер. Записаны в порядке обнаружения, не приоритета.
+но не блокер.
 
 ---
 
-## 1. Дублирование validate_ty / validate_ty_for_ascription
-**Файл:** lib/check.ml  
-**Найдено:** стадия Records  
-**Суть:** две почти идентичные функции валидации типов, одна берёт type_env и
-record_env отдельно, другая лезет в env. Каждый раз когда добавляется новое
-"что является типом" (struct/enum/будущие aliases/Ref/...), приходится
-синхронно править обе. Унификация через единый `env`-like объект, передаваемый
-обеим — ~30 строк экономии, ~1 час работы.
+## Открытые
 
-## 2. Неиспользуемые spread temp-биндинги
-**Файл:** lib/check.ml (генерация TELet для spread base'ов)  
-**Найдено:** стадия spread/struct/enum  
+### 1. Неиспользуемые spread temp-биндинги
+**Файл:** lib/check.ml (генерация TELet для spread base'ов)
 **Суть:** когда после `..base` все поля переопределяются явно, временная
-переменная для base'а становится мёртвой. Пример: `Stack { ..s, top: 1,
-mid: 2, bot: 3, depth: 4 }` — `s` копируется в `_spread_1` и не
-используется. GCC не варнит (struct copy), но это лишняя работа.
-Фикс: пост-обработка после построения field_map — если для каждого
-поля `_spread_N.field` НЕ финальное значение, дроп этот binding.
-~20 строк.
+переменная для base'а становится мёртвой. GCC не варнит (struct copy),
+но это лишняя работа.
 
-## 3. TPipe токен висит без употребления
-**Файл:** lib/lexer.ml, lib/token.ml  
-**Найдено:** стадия struct/enum  
-**Суть:** `|` теперь нигде не используется в грамматике. Зарезервирован
-под возможные or-patterns (`match x { 1 | 2 => ... }`). Если or-patterns
-не будем делать — удалить. Удаление: 1 строка лексера, 2 в token.ml.
-
-## 4. `type` keyword занят, но только ошибка
-**Файл:** lib/parser.ml  
-**Найдено:** стадия struct/enum  
-**Суть:** `type` зарезервирован под будущие aliases (`type Bytes = Ref[Buf]`
-и т.п.). Сейчас выдаёт ошибку с подсказкой "используй struct/enum".
-Когда дойдём до aliases — реализовать.
-
-## 5. ctor_map использует имя конструктора как ключ — коллизия после mono
-**Файл:** lib/emit.ml, build_ctor_map  
-**Найдено:** стадия Ref  
+### 2. ctor_map использует имя конструктора как ключ — коллизия после mono
+**Файл:** lib/emit.ml, build_ctor_map
 **Суть:** после мономорфизации Option_int и Option_bool оба имеют ctor
 "Some". `Hashtbl.add` ставит обе записи, `Hashtbl.find` возвращает
 случайную (последнюю). Для tag это OK (tag всегда тот же для одного
@@ -49,40 +22,107 @@ ctor name), но arg_tys могут оказаться от не-той инст
 Фикс: ключ в ctor_map должен включать имя owner'а mangled, не
 только ctor name. ~20 строк.
 
+### 3. `drop_fn_name_for` через string-manipulation
+**Файл:** lib/check.ml
+**Суть:** convention-by-name `mod__name` → `mod__drop_name` через
+поиск первого `__`. Fragile если кто-то использует `__` в имени.
+Чище: хранить base_name отдельным полем в decl. ~30 строк рефакторинга.
+
+### 4. `_drop_N` имя протекает в C-output
+`let _ = linear_value` → переименовывается в `_drop_N` и попадает в C
+как имя переменной. Программист видит. Не баг, но косметика. Можно
+ввести специальный AST-узел `TEDiscard`.
+
+### 5. `linear` поле дублируется (`is_linear` для type_decl, `rec_is_linear` для record_decl)
+**Файл:** lib/ast.ml
+**Суть:** Унаследовано от исторического разделения `struct` vs `enum`.
+Один флаг с разными именами в двух типах данных. Если унифицировать
+record_decl/type_decl — упростится.
+
+### 6. for-in по связанной Stream-переменной не поддерживается
+**Файл:** lib/emit.ml, async_split_segments TEForStream case
+**Суть:** v1 поддерживает только инлайн-форму `for x in stream_extern(args) { ... }`.
+Bound-форма `let s = stream_extern(...); for x in s { ... }` требует
+вытянуть SQE prep в момент let'a и вернуть Stream[T] значение
+{slot, gen} как в Task. Сейчас падает на emit. См. STAGE3_ASYNC.md §13
+phase 6 (handed off as follow-up).
+
+### 7. drop_Stream через ASYNC_CANCEL
+**Файл:** lib/emit.ml, emit_stream_drop_defs
+**Суть:** Сейчас drop_Stream помечает слот как DETACHED и multishot SQE
+продолжает гореть до самозакрытия источника. По спеке §16 нужен
+io_uring_prep_cancel перед освобождением. ~20 строк.
+
+### 8a. `let x = v;` внутри async-функции (внутри while без suspension)
+**Файл:** lib/emit.ml, async_rewrite_to_frame + sync emit_expr TELet.
+**Суть:** Когда `let x = v` живёт ВНУТРИ async-функции, но окружающее
+выражение (например `while` без suspension) делегирует генерацию sync
+emit'у, sync TELet эмитит `int x = v;` как C-локал. Но
+async_rewrite_to_frame переименовал все использования `x` в теле в
+`fr->x`. Поэтому декларация неиспользуется, а тело читает
+неинициализированное `fr->x`. Исправляется добавлением
+`fr->x = v;` после let'a в async-контексте (или переписыванием TELet
+в TEAssign внутри переписчика). Не задевает тесты без `let`-внутри-
+неприостанавливающегося-`while`, но любой такой случай будет
+давать мусор.
+
+### 8b. Pattern match on tuples — `match t { (a, b, c) => ... }`
+**Файл:** lib/parser.ml + check.ml — v1 поддерживает только
+`let (a, b, c) = t;` и `t.0`. Расширение match-pattern'а: новый
+вариант `PTuple of pat list`, проверка совместимости с TyTuple,
+выполнение из `t.f0/f1/...`. Не блокирует — простые случаи
+выражаются let+if.
+
+### 8c. 1-tuple `(e,)`/`(T,)`
+Сейчас отвергается. Не нужно для текущих задач, но если кто-нибудь
+зацепится — добавить можно как обёртку над одним типом, mangling
+`Tuple1_T`. Дешёво.
+
+### 8d. Wide tuples — производительность
+Кортежи передаются по значению (memcpy всех полей). Для кортежей в
+сотни байт это становится заметным. Не актуально пока, но имеет
+смысл когда такие кортежи появятся.
+
+### 8. `for x in stream` — обработка multishot EOF без значения
+**Файл:** lib/emit.ml, TEForStream lowering
+**Суть:** Сейчас тело прогоняется ровно для каждого CQE; финальный CQE
+с `more==0` тоже считается событием. Для accept_multishot это правильно
+(последний CQE — закрытие источника, не accepted fd). Для recv_multishot
+аналогично. Если в будущем понадобится автоматическая фильтрация EOF,
+нужен явный SQE-shape-aware path. Пока — на программисте проверять
+`if conn < 0 { break }`.
+
 ---
 
-## Не-долги, но открытые вопросы (записаны для памяти)
+## Закрыто
 
-- **View на структуру с Own.** При попытке скопировать структуру содержащую
-  Own-поля через Ref — возможна автоматическая трансформация Own→Ref во
-  всех полях ("view"). Сейчас просто запрещаем `unwrap`/`look` на
-  non-copyable. Если станет больно — добавим явную операцию `view(r)` или
-  автоматическую трансформацию. Связано с многоуровневой вложенностью —
-  как обрабатывать `Own[Box[Own[int]]]`: только верхний уровень или
-  рекурсивно? Думать когда столкнёмся.
+- ~~Дублирование validate_ty / validate_ty_for_ascription~~ — унифицировано.
+- ~~Имя ty_contains_own устарело~~ — переименовано в ty_contains_linear.
+- ~~Параллельные Array/Buf таблицы в emit~~ — объединены.
+- ~~Own/Ref/take/unwrap/look/legacy ref/deref/:=/??/panic~~ — удалено.
+- ~~Cascade destructors~~ — невозможны по построению (linear только в top-level position).
+- ~~Strings~~ — `Array[byte]` + статический region для литералов + `slice` + `to_int`/`to_byte`.
+- ~~Raw pointers `*T`~~ — `c_alloc`/`c_free`/`*p`/`null_ptr`/`is_null`/`array_data` для FFI.
+- ~~Модули~~ — `use foo::bar;` selective import, auto-loading, mangling `mod__name`.
+- ~~mut + loops~~ — `let mut x = ...; x := v;` + `while` + `break`/`continue`. `if` без else. Trailing `;`.
+- ~~Pipeline `|>`~~ — sugar в parser.
+- ~~for loop~~ — sugar в parser.
+- ~~return keyword~~ — early exit.
+- ~~or-patterns~~ — `1 | 2 | 3 =>`, `Red | Green | Blue =>`.
+- ~~type aliases~~ — `type Bytes = Array[byte];`, resolved-away.
+- ~~try_at~~ — `Option[T]` defensive read.
+- ~~Pattern matching v1~~ — литералы/bind/exhaustivity по типу скрутини.
+- ~~Pattern guards~~ — `pat if cond => body` для non-ADT match.
+- ~~Linear types~~ — `linear struct/enum` + `drop_T` + alias/mut/data-position checks. Region унифицирован как первый-классный linear.
+- ~~Dead move analysis (`takes_consume`/`tail_consume`/`is_consumed`/`is_copyable`/`consume_arg`)~~ — удалено ~195 строк после унификации Region.
+- ~~T.func.param_drops field~~ — всегда [], удалено.
+- ~~PWild как отдельный variant~~ — унифицирован с PBind "_".
 
-- **Запись в Own-поле когда поле содержит большие данные.** `o.field := v`
-  где field уже содержал Own на heap-ячейку — старая ячейка должна
-  освободиться. Это implicit destructor. Скорее всего реализуется
-  естественно через "освобождение Own", но нужно проверить когда дойдём.
+---
 
-- **Threading.** Когда добавим потоки: atomic gen-counter (~30 строк),
-  явная операция передачи Own между потоками через channel-like API.
-  Ref'ы шарятся свободно с atomic load на gen. Базовая модель не меняется.
+## Не-долги, открытые дизайн-вопросы
 
-- **Field access на Own даёт Own или Ref?** Решили: Ref. Не Own. Чтобы
-  избежать "два Own на одну ячейку". Хочешь Own на поле — конструируешь
-  явно через специальную операцию (если когда-нибудь нужно).
-
-- **Семантика результата `:=` (Francois хочет вернуться).** После
-  завершения Ref-стадии (Option/??/panic/:= с возвратом Option[T])
-  пересмотреть: что должна возвращать операция присваивания? Пока
-  отложено до завершения большой переделки.
-
-- **unit тип** — Francois решил не вводить пока, возвращать `int` (0) когда
-  нечего вернуть. Может появиться при работе со строками.
-- **Лямбды** — не решено. Пока только именованные функции верхнего уровня.
-  HOF работают через `fn` references по имени.
-- **Pipeline `|>`** — обсуждался как сахар для цепочек `let s = apply(s, ...)`.
-  Не делаем пока. Возвращаемся если боль усилится.
-- **Strings** — после Ref-стадии планируется как `Ref[Bytes]` или похожее.
+См. `ROADMAP.md` секцию "◯ Открытые дизайн-вопросы" — closures,
+threading, format() variadic, nested patterns, ADT guards, type-level
+alignment. Каждый — серьёзная архитектурная работа, обсуждается
+отдельно.

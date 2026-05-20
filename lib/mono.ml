@@ -27,6 +27,9 @@ let rec mangle_ty (t : ty) : string =
              @ ["to"; mangle_ty ret]
       in
       String.concat "_" parts
+  | TyPtr inner -> "ptr_" ^ mangle_ty inner
+  | TyTuple ts ->
+      "Tuple_" ^ String.concat "_" (List.map mangle_ty ts)
   | TyMeta _ -> failwith "mono: TyMeta after check"
 
 let mangle_name (name : string) (ts : ty list) : string =
@@ -61,6 +64,15 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
       Queue.add (name, ts) fn_queue
     end
   in
+  (* For a linear ADT/record instantiation, force-include its drop fn
+     in the mono'd output. The drop fn is non-generic and named by the
+     `drop_fn_name_for` convention applied to the mono'd type name. *)
+  let request_drop_for_linear (orig_name : string) (ts : ty list) (is_linear : bool) =
+    if is_linear then
+      let mono_name = mangle_name orig_name ts in
+      let drop_name = Check.drop_fn_name_for mono_name in
+      request_fn drop_name []
+  in
   let request_adt name ts =
     if not (Hashtbl.mem adt_seen (name, ts)) then begin
       Hashtbl.add adt_seen (name, ts) ();
@@ -80,6 +92,19 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
     Hashtbl.replace record_names rd.rec_name ()) prog.records;
   let is_record_name n = Hashtbl.mem record_names n in
 
+  let record_linear : (string, unit) Hashtbl.t =
+    Hashtbl.create (List.length prog.records)
+  in
+  List.iter (fun (rd : record_decl) ->
+    if rd.rec_is_linear then Hashtbl.replace record_linear rd.rec_name ())
+    prog.records;
+  let adt_linear : (string, unit) Hashtbl.t =
+    Hashtbl.create (List.length prog.types)
+  in
+  List.iter (fun (td : type_decl) ->
+    if td.is_linear then Hashtbl.replace adt_linear td.type_name ())
+    prog.types;
+
   let rec rewrite_ty (subst : (string * ty) list) (t : ty) : ty =
     match t with
     | TyInt | TyBool -> t
@@ -88,10 +113,6 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
          with Not_found ->
            failwith (Printf.sprintf
              "mono rewrite_ty: free type variable %S" n))
-    | TyApp ("Buf", [inner]) ->
-        TyApp ("Buf", [rewrite_ty subst inner])
-    | TyApp ("Buf", _) ->
-        failwith "mono rewrite_ty: Buf with wrong arity (should be unary)"
     | TyApp ("Array", [inner]) ->
         (* Array is structural — emit emits one wrapper+cell pair per
            distinct element type. *)
@@ -103,13 +124,38 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         TyApp ("Region", [])
     | TyApp ("Region", _) ->
         failwith "mono rewrite_ty: Region takes no type arguments"
+    | TyApp ("Task", [inner]) ->
+        (* Stage 3 builtin — slot-pool handle. emit phases (4–5) generate
+           one wrapper struct per distinct result type, just like Array. *)
+        TyApp ("Task", [rewrite_ty subst inner])
+    | TyApp ("Task", _) ->
+        failwith "mono rewrite_ty: Task with wrong arity (should be unary)"
+    | TyApp ("Stream", [inner]) ->
+        TyApp ("Stream", [rewrite_ty subst inner])
+    | TyApp ("Stream", _) ->
+        failwith "mono rewrite_ty: Stream with wrong arity (should be unary)"
+    | TyApp ("byte", []) | TyApp ("u16", []) | TyApp ("u32", []) | TyApp ("u64", []) ->
+        t
+    | TyApp ("byte", _) ->
+        failwith "mono rewrite_ty: byte takes no type arguments"
+    | TyApp ("float", []) ->
+        TyApp ("float", [])
+    | TyApp ("float", _) ->
+        failwith "mono rewrite_ty: float takes no type arguments"
     | TyApp (n, args) ->
         let args = List.map (rewrite_ty subst) args in
-        if is_record_name n then request_rec n args
-        else request_adt n args;
+        if is_record_name n then begin
+          request_rec n args;
+          request_drop_for_linear n args (Hashtbl.mem record_linear n)
+        end else begin
+          request_adt n args;
+          request_drop_for_linear n args (Hashtbl.mem adt_linear n)
+        end;
         TyApp (mangle_name n args, [])
     | TyFun (args, ret) ->
         TyFun (List.map (rewrite_ty subst) args, rewrite_ty subst ret)
+    | TyPtr inner -> TyPtr (rewrite_ty subst inner)
+    | TyTuple ts -> TyTuple (List.map (rewrite_ty subst) ts)
     | TyMeta _ ->
         failwith "mono rewrite_ty: TyMeta after checking"
   in
@@ -118,7 +164,8 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
     (e : Check.T.expr) : Check.T.expr =
     let rt = rewrite_ty subst in
     match e with
-    | Check.T.TEInt _ | Check.T.TEBool _ -> e
+    | Check.T.TEInt _ | Check.T.TEFloat _ | Check.T.TEBool _
+    | Check.T.TEStringLit _ -> e
     | Check.T.TEVar (x, t) -> Check.T.TEVar (x, rt t)
 
     | Check.T.TEFnRef (name, ts, fn_ty) ->
@@ -172,8 +219,8 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
                        rewrite_expr subst v,
                        rewrite_expr subst b, rt bt, ad)
     | Check.T.TEMatch (s, st, arms, rty) ->
-        let arms = List.map (fun (p, b) ->
-          (p, rewrite_expr subst b)) arms in
+        let arms = List.map (fun (p, g, b) ->
+          (p, Option.map (rewrite_expr subst) g, rewrite_expr subst b)) arms in
         Check.T.TEMatch (rewrite_expr subst s, rt st, arms, rt rty)
 
     | Check.T.TEArray (r, n, v, t) ->
@@ -184,12 +231,13 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         Check.T.TEArrayLit (rewrite_expr subst r,
                             List.map (rewrite_expr subst) elems,
                             rt t)
-    | Check.T.TEBuf (n, v, t) ->
-        Check.T.TEBuf (rewrite_expr subst n, rewrite_expr subst v, rt t)
-    | Check.T.TEBufLit (elems, t) ->
-        Check.T.TEBufLit (List.map (rewrite_expr subst) elems, rt t)
     | Check.T.TERegion (n, t) ->
         Check.T.TERegion (rewrite_expr subst n, rt t)
+    | Check.T.TEStackRegion (n, t) ->
+        Check.T.TEStackRegion (rewrite_expr subst n, rt t)
+    | Check.T.TEAlignedRegion (n, a, t) ->
+        Check.T.TEAlignedRegion (rewrite_expr subst n,
+                                 rewrite_expr subst a, rt t)
     | Check.T.TEIndex (a, i, t) ->
         Check.T.TEIndex (rewrite_expr subst a, rewrite_expr subst i, rt t)
     | Check.T.TEAssignIdx (a, i, v, t) ->
@@ -198,9 +246,81 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
                              rewrite_expr subst v, rt t)
     | Check.T.TELen (e, t) ->
         Check.T.TELen (rewrite_expr subst e, rt t)
+    | Check.T.TESlice (a, lo, hi, t) ->
+        Check.T.TESlice (rewrite_expr subst a,
+                         rewrite_expr subst lo,
+                         rewrite_expr subst hi, rt t)
+    | Check.T.TEToInt e ->
+        Check.T.TEToInt (rewrite_expr subst e)
+    | Check.T.TEToByte e ->
+        Check.T.TEToByte (rewrite_expr subst e)
+    | Check.T.TEToU16 e ->
+        Check.T.TEToU16 (rewrite_expr subst e)
+    | Check.T.TEToU32 e ->
+        Check.T.TEToU32 (rewrite_expr subst e)
+    | Check.T.TEToU64 e ->
+        Check.T.TEToU64 (rewrite_expr subst e)
+    | Check.T.TEToFloat e ->
+        Check.T.TEToFloat (rewrite_expr subst e)
+    | Check.T.TEToIntFromFloat e ->
+        Check.T.TEToIntFromFloat (rewrite_expr subst e)
+    | Check.T.TECAlloc (et, n, rt_) ->
+        Check.T.TECAlloc (rt et, rewrite_expr subst n, rt rt_)
+    | Check.T.TECFree p ->
+        Check.T.TECFree (rewrite_expr subst p)
+    | Check.T.TENullPtr t ->
+        Check.T.TENullPtr (rt t)
+    | Check.T.TEIsNull p ->
+        Check.T.TEIsNull (rewrite_expr subst p)
+    | Check.T.TEArrayData (a, t) ->
+        Check.T.TEArrayData (rewrite_expr subst a, rt t)
+    | Check.T.TEDeref (p, t) ->
+        Check.T.TEDeref (rewrite_expr subst p, rt t)
+    | Check.T.TEAssign (x, v, t) ->
+        Check.T.TEAssign (x, rewrite_expr subst v, rt t)
+    | Check.T.TEWhile (c, b) ->
+        Check.T.TEWhile (rewrite_expr subst c, rewrite_expr subst b)
+    | Check.T.TEBreak | Check.T.TEContinue -> e
+    | Check.T.TEReturn (v, t) ->
+        Check.T.TEReturn (rewrite_expr subst v, rt t)
+    | Check.T.TETryAt (a, i, t) ->
+        Check.T.TETryAt (rewrite_expr subst a, rewrite_expr subst i, rt t)
+    | Check.T.TEDrop (e, t) ->
+        Check.T.TEDrop (rewrite_expr subst e, rt t)
+    | Check.T.TEAwait (e, t, p) ->
+        Check.T.TEAwait (rewrite_expr subst e, rt t, rt p)
+    | Check.T.TESpawn (e, t) ->
+        Check.T.TESpawn (rewrite_expr subst e, rt t)
+    | Check.T.TEForStream (x, et, s, b) ->
+        Check.T.TEForStream (x, rt et,
+                             rewrite_expr subst s,
+                             rewrite_expr subst b)
+    | Check.T.TETuple (es, t) ->
+        Check.T.TETuple (List.map (rewrite_expr subst) es, rt t)
+    | Check.T.TETupleIdx (e, i, t) ->
+        Check.T.TETupleIdx (rewrite_expr subst e, i, rt t)
+    | Check.T.TELetTuple (ns, vt, v, b, bt, ads) ->
+        Check.T.TELetTuple (ns, rt vt,
+                            rewrite_expr subst v,
+                            rewrite_expr subst b, rt bt, ads)
+    | Check.T.TEAwaitAll (bs, t, ptys) ->
+        Check.T.TEAwaitAll (List.map (rewrite_expr subst) bs,
+                            rt t, List.map rt ptys)
+    | Check.T.TEPrint (nl, es, ts) ->
+        Check.T.TEPrint (nl, List.map (rewrite_expr subst) es,
+                         List.map rt ts)
   in
 
-  request_fn "main" [];
+  (* Start mono from main when present; if the program has tests
+     but no main (--test mode), seed mono from test bodies instead.
+     Tests themselves aren't fns in mono's queue — they're walked
+     once below to trigger every fn they call. *)
+  if List.exists (fun (f : Check.T.func) -> f.name = "main") prog.funcs then
+    request_fn "main" []
+  else begin
+    List.iter (fun (t : Check.T.test) ->
+      ignore (rewrite_expr [] t.body)) prog.tests
+  end;
 
   (* Indexes for O(1) lookup of original fns/types by name. *)
   let orig_fns_idx : (string, Check.T.func) Hashtbl.t =
@@ -244,6 +364,7 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
           params      = new_params;
           return_ty   = new_ret;
           body        = new_body;
+          is_async    = orig.is_async;
         } in
         Hashtbl.replace mono_fns mono.name mono
       done;
@@ -263,6 +384,7 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
           type_name   = mangle_name name ts;
           type_params = [];
           variants    = new_variants;
+          is_linear   = orig.is_linear;
         } in
         Hashtbl.replace mono_adts mono.type_name mono
       done;
@@ -281,6 +403,7 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
           rec_name        = mangle_name name ts;
           rec_type_params = [];
           rec_fields      = new_fields;
+          rec_is_linear   = orig.rec_is_linear;
         } in
         Hashtbl.replace mono_recs mono.rec_name mono
       done;
@@ -298,7 +421,16 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
   let final_records =
     Hashtbl.fold (fun _ v acc -> v :: acc) mono_recs []
   in
+  (* Tests need rewrite_expr just like fn bodies — they may
+     instantiate generics. The subst environment is empty (tests
+     have no type params themselves), so rewrite_expr just walks
+     the tree and triggers monomorph requests where needed. *)
+  let final_tests =
+    List.map (fun (t : Check.T.test) ->
+      { t with Check.T.body = rewrite_expr [] t.body }) prog.tests
+  in
   { Check.T.types   = final_types;
     Check.T.records = final_records;
     Check.T.funcs   = final_funcs;
-    Check.T.externs = prog.externs }
+    Check.T.externs = prog.externs;
+    Check.T.tests   = final_tests }

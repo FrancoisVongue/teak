@@ -20,6 +20,8 @@ module T = struct
     | TEInt    of int
     | TEBool   of bool
     | TEVar    of string * ty
+    | TEStringLit of string
+                  (* "..." — byte literal, lives in the static region *)
     | TEFnRef  of string * ty list * ty
                   (* fn as a value: name, type args, fn type *)
     | TECall   of expr * expr list * ty
@@ -36,24 +38,105 @@ module T = struct
                   (* name, var_ty, value, body, body_ty, auto_drop.
                      auto_drop=true means: when control leaves this Let,
                      emit a runtime drop of the bound variable. Used for
-                     Own[T] bindings that are not consumed. *)
-    | TEMatch  of expr * ty * (pat * expr) list * ty
+                     Region bindings that are not consumed. *)
+    | TEMatch  of expr * ty * (pat * expr option * expr) list * ty
+                  (* scrut, scrut_ty, arms (pattern + optional guard + body), result_ty *)
     | TEArray  of expr * expr * expr * ty
                   (* array(r, N, init) — allocate in region r, result is Array[T] *)
     | TEArrayLit of expr * expr list * ty
                   (* array(r, [v0..vN]) — allocate in r, init each slot *)
-    | TEBuf    of expr * expr * ty
-                  (* buf(N, init) — stack array; N must be int literal *)
-    | TEBufLit of expr list * ty
-                  (* [v0..vN-1] — stack array literal *)
     | TERegion of expr * ty
-                  (* region(N) — result is Region *)
+                  (* region(N) — heap arena *)
+    | TEStackRegion of expr * ty
+                  (* stack_region(N) — block on stack; N is int literal *)
+    | TEAlignedRegion of expr * expr * ty
+                  (* aligned_region(N, A) — heap arena, A-byte aligned *)
     | TEIndex  of expr * expr * ty
                   (* a[i] — result is T (element type) *)
     | TEAssignIdx of expr * expr * expr * ty
                   (* a[i] := v — result is int (placeholder for unit) *)
     | TELen    of expr * ty
                   (* len(a) — result is int *)
+    | TESlice  of expr * expr * expr * ty
+                  (* slice(a, lo, hi) — sub-handle into the same region *)
+    | TEToInt  of expr
+                  (* to_int(b) — widen byte to int *)
+    | TEToByte of expr
+                  (* to_byte(n) — truncate int to byte (u8) *)
+    | TEToU16 of expr
+                  (* to_u16(n)  — truncate int to u16 *)
+    | TEToU32 of expr
+                  (* to_u32(n)  — truncate int to u32 *)
+    | TEToU64 of expr
+                  (* to_u64(n)  — int to u64 (signed→unsigned reinterpret) *)
+    | TEToFloat of expr
+                  (* to_float(n) — int → float *)
+    | TEFloat  of float
+                  (* float literal *)
+    | TEToIntFromFloat of expr
+                  (* to_int(f) when f : float — truncate-toward-zero *)
+    | TECAlloc of ty * expr * ty
+                  (* c_alloc[T](n) — elem type T, count, result type TyPtr T *)
+    | TECFree  of expr
+                  (* c_free(p) *)
+    | TENullPtr of ty
+                  (* null_ptr[T]() — result type TyPtr T *)
+    | TEIsNull of expr
+                  (* is_null(p) -> bool *)
+    | TEArrayData of expr * ty
+                  (* array_data(a: Array[T]) -> TyPtr T *)
+    | TETryAt of expr * expr * ty
+                  (* try_at(a, i) — third field is result Option[T] *)
+    | TEDrop  of expr * ty
+                  (* drop(x) — second field is x's (linear) type *)
+    | TEDeref  of expr * ty
+                  (* p deref — second field is element type T *)
+    | TEAssign of string * expr * ty
+                  (* x := v — third field is the type of x *)
+    | TEWhile  of expr * expr
+                  (* while cond { body } — always int 0 *)
+    | TEBreak
+    | TEContinue
+    | TEReturn of expr * ty
+                  (* return v — second field is the enclosing fn's return ty *)
+    | TEAwait  of expr * ty * ty
+                  (* await op — second field is the outer (visible) value
+                     type, third field is the unwrapped payload T. For
+                     `await Task[T]` outer is `Result[T]`, payload is T.
+                     For `await Stream[T]` outer is T, payload is T (no
+                     Result wrap on stream events — see STAGE3_ASYNC §10
+                     and emit.ml comment on TEForStream). *)
+    | TESpawn  of expr * ty
+                  (* spawn f(args) — second field is the wrapped result
+                     type Task[T]. `yield` doesn't have a typed node:
+                     the parser desugars it to TEAwait on a call to
+                     the builtin extern `orto_nop`. *)
+    | TEForStream of string * ty * expr * expr
+                  (* for x in <stream> { body } — multishot drain.
+                     Fields: binder, element type T (peeled off
+                     Stream[T]), the stream source expression, body. *)
+    | TETuple    of expr list * ty
+                  (* (e1, e2, ...) — second field is the tuple type *)
+    | TETupleIdx of expr * int * ty
+                  (* t.i — third field is the resulting component type *)
+    | TELetTuple of string list * ty * expr * expr * ty * bool list
+                  (* let (x, y, z) = v; body — fields: binder names,
+                     tuple ty of v, value, body, body ty, per-binder
+                     auto_drop flags. *)
+    | TEAwaitAll of expr list * ty * ty list
+                  (* await all { e1, ..., en } — second field is the
+                     visible tuple type (Tuple of Result-wrapped per-branch
+                     types after Phase 7), third field is the per-branch
+                     payload types (the T inside the Task[T] each branch
+                     would have produced).  Lowered to "kick all, then
+                     sequentially await each" in emit. *)
+    | TEPrint of bool * expr list * ty list
+                  (* print/println intrinsic.
+                     bool = trailing newline? expr list = per-component
+                     subexprs (flattened from tuple literal, or
+                     [single_expr] if a scalar was passed). ty list =
+                     parallel list of each component's type — emit uses
+                     it to pick the right writev formatter. *)
 
   type func = {
     name        : string;
@@ -61,12 +144,30 @@ module T = struct
     params      : (string * ty) list;
     return_ty   : ty;
     body        : expr;
+    (* Stage 3: true iff this function body contains a suspension
+       point reachable directly (await or yield not inside a nested
+       spawn). Such functions are lowered into a stackless state
+       machine in phase 4; ordinary functions emit unchanged. *)
+    is_async    : bool;
   }
 
   type extern = {
     name      : string;
     params    : (string * ty) list;
     return_ty : ty;
+    (* For `extern async fn f(...) -> T`: source signature is
+       Task[T], C-side glue takes the bare params + a hidden
+       user_data pointer.
+       For `extern async stream fn f(...) -> T`: source signature is
+       Stream[T] and the glue preps a multishot SQE that emits many
+       CQEs, each carrying one T. *)
+    is_async  : bool;
+    is_stream : bool;
+  }
+
+  type test = {
+    name : string;
+    body : expr;
   }
 
   type program = {
@@ -74,6 +175,7 @@ module T = struct
     records : record_decl list;
     funcs   : func list;
     externs : extern list;
+    tests   : test list;
   }
 end
 
@@ -84,17 +186,23 @@ end
 
 type op_typing =
   | OpFixed of ty * ty     (* operand type, result type *)
-  | OpEqual                (* both operands same type; type must be int or bool *)
+  | OpEqual                (* both operands same type; must be int/bool/byte/float *)
+  | OpNumeric              (* both operands same numeric (int or float); result same *)
+  | OpComparison           (* both operands same numeric (int or float); result bool *)
 
 let binop_typing = function
-  | OpAdd | OpSub | OpMul | OpDiv | OpMod -> OpFixed (TyInt, TyInt)
-  | OpLt | OpGt | OpLe | OpGe              -> OpFixed (TyInt, TyBool)
+  | OpAdd | OpSub | OpMul | OpDiv          -> OpNumeric
+  | OpMod                                   -> OpFixed (TyInt, TyInt)  (* C: only int *)
+  | OpLt | OpGt | OpLe | OpGe              -> OpComparison
   | OpAnd | OpOr                            -> OpFixed (TyBool, TyBool)
   | OpEq | OpNeq                            -> OpEqual
+  | OpBOr | OpBAnd | OpBXor                 -> OpFixed (TyInt, TyInt)
+  | OpShl | OpShr                           -> OpFixed (TyInt, TyInt)
 
 let unop_typing = function
-  | OpNeg -> (TyInt, TyInt)
-  | OpNot -> (TyBool, TyBool)
+  | OpNeg  -> (TyInt, TyInt)
+  | OpNot  -> (TyBool, TyBool)
+  | OpBNot -> (TyInt, TyInt)
 
 (* ---------- C reserved words ----------
 
@@ -123,6 +231,50 @@ let check_not_c_reserved (kind : string) (name : string) : unit =
 
 let meta_counter = ref 0
 let drop_name_counter = ref 0
+
+(* Depth of the current while loop nest. break/continue require > 0.
+   Reset at each function-body entry. *)
+let loop_depth = ref 0
+
+(* The return type of the function currently being checked, so EReturn
+   can verify the type of its expression. Reset on every check_func. *)
+let current_return_ty : ty option ref = ref None
+
+(* Set of type names that are linear: Region (always) plus every
+   user-declared `linear struct/enum`. Populated by build_env. *)
+let linear_type_names : (string, unit) Hashtbl.t = Hashtbl.create 8
+
+let reset_linear_table () =
+  Hashtbl.clear linear_type_names;
+  Hashtbl.add linear_type_names "Region" ();
+  (* Stage 3: Task[T] is an in-flight computation; Stream[T] is a
+     multishot source of events. Both are owned, move-only handles
+     into the dispatcher's slot pool, so they live alongside Region
+     as builtin linear types. *)
+  Hashtbl.add linear_type_names "Task" ();
+  Hashtbl.add linear_type_names "Stream" ()
+
+let mark_linear n = Hashtbl.replace linear_type_names n ()
+
+let is_linear_name n = Hashtbl.mem linear_type_names n
+
+(* The mangled name of the drop function for a linear type. Given the
+   type's (possibly mangled) name "<mod>__<base>", returns
+   "<mod>__drop_<base>". For unmangled names like "Region" (builtin),
+   returns "drop_Region". *)
+let drop_fn_name_for (type_name : string) : string =
+  let n = String.length type_name in
+  let rec find_dd i =
+    if i + 1 >= n then None
+    else if type_name.[i] = '_' && type_name.[i + 1] = '_' then Some i
+    else find_dd (i + 1)
+  in
+  match find_dd 0 with
+  | Some i ->
+      let prefix = String.sub type_name 0 (i + 2) in
+      let base   = String.sub type_name (i + 2) (n - i - 2) in
+      prefix ^ "drop_" ^ base
+  | None -> "drop_" ^ type_name
 let fresh_meta () : meta =
   incr meta_counter;
   { id = !meta_counter; resolved = None }
@@ -135,6 +287,28 @@ let rec prune (t : ty) : ty =
       r
   | _ -> t
 
+let rec is_linear_ty (t : ty) : bool =
+  match prune t with
+  | TyApp ("Array", [inner]) ->
+      (* Induced linearity: an Array of a linear element type is itself
+         linear — its drop frees the elements first. Builtin containers
+         propagate; nominal user types do not (they declare linearity
+         explicitly via `linear struct`). *)
+      is_linear_ty inner
+  | TyApp (n, _) -> is_linear_name n
+  | TyTuple ts ->
+      (* Induced linearity: a tuple containing any linear component is
+         itself linear — destructuring moves every component out. *)
+      List.exists is_linear_ty ts
+  | _ -> false
+
+(* A Region is bound exclusively with `arena`, never `let`. This keeps
+   the scope-anchor role visible at the binding site. *)
+let is_region_ty (t : ty) : bool =
+  match prune t with
+  | TyApp ("Region", _) -> true
+  | _ -> false
+
 let rec zonk (t : ty) : ty =
   match prune t with
   | TyInt -> TyInt
@@ -142,6 +316,8 @@ let rec zonk (t : ty) : ty =
   | TyVar n -> TyVar n
   | TyApp (n, args) -> TyApp (n, List.map zonk args)
   | TyFun (args, ret) -> TyFun (List.map zonk args, zonk ret)
+  | TyPtr inner -> TyPtr (zonk inner)
+  | TyTuple ts -> TyTuple (List.map zonk ts)
   | TyMeta _ as t -> t
 
 let rec occurs (m : meta) (t : ty) : bool =
@@ -150,6 +326,8 @@ let rec occurs (m : meta) (t : ty) : bool =
   | TyApp (_, args) -> List.exists (occurs m) args
   | TyFun (args, ret) ->
       List.exists (occurs m) args || occurs m ret
+  | TyPtr inner -> occurs m inner
+  | TyTuple ts -> List.exists (occurs m) ts
   | TyMeta m' -> m.id = m'.id
 
 let rec unify (t1 : ty) (t2 : ty) : unit =
@@ -165,6 +343,9 @@ let rec unify (t1 : ty) (t2 : ty) : unit =
     when List.length a1 = List.length a2 ->
       List.iter2 unify a1 a2;
       unify r1 r2
+  | TyPtr a, TyPtr b -> unify a b
+  | TyTuple ts1, TyTuple ts2 when List.length ts1 = List.length ts2 ->
+      List.iter2 unify ts1 ts2
   | TyMeta m1, TyMeta m2 when m1.id = m2.id -> ()
   | TyMeta m, t | t, TyMeta m ->
       if occurs m t then
@@ -188,6 +369,8 @@ let rec subst_ty (subst : (string * ty) list) (t : ty) : ty =
   | TyApp (n, args) -> TyApp (n, List.map (subst_ty subst) args)
   | TyFun (args, ret) ->
       TyFun (List.map (subst_ty subst) args, subst_ty subst ret)
+  | TyPtr inner -> TyPtr (subst_ty subst inner)
+  | TyTuple ts -> TyTuple (List.map (subst_ty subst) ts)
   | TyMeta _ -> t
 
 let make_instantiation (tparams : string list) : (string * ty) list * ty list =
@@ -212,29 +395,56 @@ type env = {
 }
 
 let split_program (prog : program)
-  : type_decl list * record_decl list * func list * extern_decl list =
-  let rec loop ts rs fs es = function
-    | []                  -> (List.rev ts, List.rev rs, List.rev fs, List.rev es)
-    | TopType t   :: rest -> loop (t :: ts) rs fs es rest
-    | TopRecord r :: rest -> loop ts (r :: rs) fs es rest
-    | TopFunc f   :: rest -> loop ts rs (f :: fs) es rest
-    | TopExtern e :: rest -> loop ts rs fs (e :: es) rest
+  : type_decl list * record_decl list * func list * extern_decl list * test_decl list =
+  let rec loop ts rs fs es ks = function
+    | []                  -> (List.rev ts, List.rev rs, List.rev fs, List.rev es, List.rev ks)
+    | TopType t   :: rest -> loop (t :: ts) rs fs es ks rest
+    | TopRecord r :: rest -> loop ts (r :: rs) fs es ks rest
+    | TopFunc f   :: rest -> loop ts rs (f :: fs) es ks rest
+    | TopExtern e :: rest -> loop ts rs fs (e :: es) ks rest
+    | TopTest t   :: rest -> loop ts rs fs es (t :: ks) rest
+    | TopUse _    :: _    ->
+        failwith "check: TopUse left in program — \
+                  the resolver should have eliminated all `use` decls"
+    | TopAlias _  :: _    ->
+        failwith "check: TopAlias left in program — \
+                  the resolver should have inlined all `type` aliases"
+    | TopNamespace _ :: _ ->
+        failwith "check: TopNamespace left in program — \
+                  the resolver should have flattened all `namespace` blocks"
   in
-  loop [] [] [] [] prog
+  loop [] [] [] [] [] prog
 
 (* ---------- type validation ---------- *)
 
-(* Tests whether a type contains a linear (non-copyable) builtin —
-   Own[_] or Region — anywhere except behind a function arrow. Linear
-   types can only live as the top-level type of a name; they are
-   forbidden as record fields, ADT variant args, or type args.
-   Array[_] is copyable now — its memory lives in a Region. *)
-let rec ty_contains_own (t : ty) : bool =
+(* Tests whether a type contains a linear builtin or user-linear type
+   anywhere except behind a function arrow or raw pointer. Linear types
+   may only live as the top-level type of a name — never as a record
+   field, variant argument, or type-argument of a non-linear container. *)
+let rec ty_contains_linear (t : ty) : bool =
   match t with
-  | TyApp ("Region", _) -> true
-  | TyApp (_, args) -> List.exists ty_contains_own args
+  | TyApp (n, _) when is_linear_name n -> true
+  | TyApp (_, args) -> List.exists ty_contains_linear args
   | TyFun _ -> false
+  | TyPtr _ -> false
+  | TyTuple ts -> List.exists ty_contains_linear ts
   | TyInt | TyBool | TyVar _ | TyMeta _ -> false
+
+(* When a generic is instantiated (function call, ctor application,
+   record literal), every type meta receives values by copy. Resolving
+   it to a linear type (Region) violates that contract — Region cannot
+   be copied, only moved. Catch this at the call site rather than
+   crashing later in mono. *)
+let check_instantiation (where : string) (metas : ty list) : unit =
+  List.iter (fun m ->
+    let mz = zonk m in
+    if ty_contains_linear mz then
+      raise (Type_error
+        (Printf.sprintf
+           "%s: cannot instantiate a generic type parameter with the \
+            linear type %s — only copyable types are allowed here"
+           where (show_ty mz))))
+    metas
 
 let rec validate_ty
   (type_env : (string * type_decl) list)
@@ -247,20 +457,29 @@ let rec validate_ty
   | TyMeta _ -> t
   | TyApp (n, args) ->
       let args = List.map (validate_ty type_env record_env in_scope) args in
-      (* Own[_] cannot appear in data position — only as the immediate
-         top-level type of a name (variable, parameter, function return).
-         We enforce this by forbidding Own in any type argument of any
-         TyApp, including inside Own itself (no Own[Own[T]]). The check
-         on field types and variant arg types happens separately after
-         build_env. Function types are not "data position" — they hide
-         their contents, so fn(...) -> Own[T] stays legal. *)
-      List.iter (fun arg ->
-        if ty_contains_own arg then
-          raise (Type_error
-            (Printf.sprintf
-               "Own[_] is not allowed as a type argument of %S — \
-                Own must be a top-level type of a name, not nested in data"
-               n))) args;
+      (* A linear type cannot appear in data position — only as the
+         immediate top-level type of a name (variable, parameter,
+         function return). We enforce this by forbidding linear types
+         in any type argument of any TyApp. The check on field types
+         and variant arg types happens separately after build_env.
+         Function types are not "data position" — they hide their
+         contents, so fn(...) -> Region stays legal.
+
+         Exception: Task[T] and Stream[T] are themselves linear, so a
+         linear T is fine — the task/stream owns the inner value and
+         transfers it via await/for-in. This is the first sliver of
+         "induced linearity" — the full version (Array[T] when T is
+         linear) lands in phase 3. *)
+      let propagates_linearity =
+        (n = "Task" || n = "Stream" || n = "Array") in
+      if not propagates_linearity then
+        List.iter (fun arg ->
+          if ty_contains_linear arg then
+            raise (Type_error
+              (Printf.sprintf
+                 "A linear type is not allowed as a type argument of %S — \
+                  linear types must be a top-level type of a name, not nested in data"
+                 n))) args;
       if List.mem n in_scope then begin
         if args <> [] then
           raise (Type_error
@@ -276,16 +495,6 @@ let rec validate_ty
                "Array expects exactly 1 type argument, got %d"
                (List.length args)));
         TyApp ("Array", args)
-      end else if n = "Buf" then begin
-        (* Buf[T] is a raw stack-allocated array handle — no gen,
-           no bounds check. Copyable, but its storage lives in some
-           caller frame; returning a Buf is UB by design. *)
-        if List.length args <> 1 then
-          raise (Type_error
-            (Printf.sprintf
-               "Buf expects exactly 1 type argument, got %d"
-               (List.length args)));
-        TyApp ("Buf", args)
       end else if n = "Region" then begin
         (* Region is a built-in nullary type — owned arena. Linear. *)
         if List.length args <> 0 then
@@ -294,6 +503,43 @@ let rec validate_ty
                "Region takes no type arguments, got %d"
                (List.length args)));
         TyApp ("Region", [])
+      end else if n = "Task" then begin
+        (* Task[T] — Stage 3 builtin, linear handle to an in-flight
+           task. The slot is owned; T is the future result type. *)
+        if List.length args <> 1 then
+          raise (Type_error
+            (Printf.sprintf
+               "Task expects exactly 1 type argument, got %d"
+               (List.length args)));
+        TyApp ("Task", args)
+      end else if n = "Stream" then begin
+        (* Stream[T] — Stage 3 builtin, linear multishot source.
+           Drained with `for x in stream { ... }`. *)
+        if List.length args <> 1 then
+          raise (Type_error
+            (Printf.sprintf
+               "Stream expects exactly 1 type argument, got %d"
+               (List.length args)));
+        TyApp ("Stream", args)
+      end else if n = "byte" || n = "u16" || n = "u32" || n = "u64" then begin
+        (* Unsigned int primitives, fixed width. byte = u8.
+           No arithmetic in orto; go through `to_int` for math, then
+           `to_<width>` to truncate back. Same idiom as byte. *)
+        if List.length args <> 0 then
+          raise (Type_error
+            (Printf.sprintf
+               "%s takes no type arguments, got %d" n
+               (List.length args)));
+        TyApp (n, [])
+      end else if n = "float" then begin
+        (* float — IEEE 754 double, 8 bytes. NaN / Infinity behave per
+           IEEE: NaN != NaN, comparisons with NaN are false. *)
+        if List.length args <> 0 then
+          raise (Type_error
+            (Printf.sprintf
+               "float takes no type arguments, got %d"
+               (List.length args)));
+        TyApp ("float", [])
       end else
         (match List.assoc_opt n type_env with
          | Some td ->
@@ -322,6 +568,14 @@ let rec validate_ty
   | TyFun (args, ret) ->
       TyFun (List.map (validate_ty type_env record_env in_scope) args,
              validate_ty type_env record_env in_scope ret)
+  | TyPtr inner ->
+      TyPtr (validate_ty type_env record_env in_scope inner)
+  | TyTuple ts ->
+      if List.length ts < 2 then
+        raise (Type_error
+          (Printf.sprintf
+             "tuple type needs at least 2 components, got %d" (List.length ts)));
+      TyTuple (List.map (validate_ty type_env record_env in_scope) ts)
 
 (* ---------- building environment ---------- *)
 
@@ -330,6 +584,11 @@ let build_env
   (records : record_decl list)
   (funcs : func list)
   (externs : extern_decl list) : env =
+  reset_linear_table ();
+  List.iter (fun (td : type_decl) ->
+    if td.is_linear then mark_linear td.type_name) types;
+  List.iter (fun (rd : record_decl) ->
+    if rd.rec_is_linear then mark_linear rd.rec_name) records;
   let seen_types = Hashtbl.create 16 in
   List.iter (fun (td : type_decl) ->
     check_not_c_reserved "type" td.type_name;
@@ -379,14 +638,20 @@ let build_env
           let arg_tys =
             List.map (validate_ty type_env record_env in_scope) v.arg_tys
           in
-          List.iter (fun aty ->
-            if ty_contains_own aty then
-              raise (Type_error
-                (Printf.sprintf
-                   "constructor %S of %S: a linear type (Own/Array) cannot \
-                    be a variant argument — linear types must be top-level \
-                    types of a name"
-                   v.ctor_name td.type_name))) arg_tys;
+          (* A non-linear ADT cannot carry linear data — its drop is
+             a no-op and the resource would silently leak. A `linear`
+             ADT can carry linears; its user-written drop_T is
+             responsible for releasing them via match + drop. *)
+          if not td.is_linear then
+            List.iter (fun aty ->
+              if ty_contains_linear aty then
+                raise (Type_error
+                  (Printf.sprintf
+                     "constructor %S of %S: a linear type cannot \
+                      be a variant argument of a non-linear ADT — \
+                      mark the ADT `linear` if you want it to own \
+                      the resource"
+                     v.ctor_name td.type_name))) arg_tys;
           { v with arg_tys })
           td.variants
       in
@@ -398,12 +663,12 @@ let build_env
       let fields =
         List.map (fun (fname, fty) ->
           let fty = validate_ty type_env record_env in_scope fty in
-          if ty_contains_own fty then
+          if not rd.rec_is_linear && ty_contains_linear fty then
             raise (Type_error
               (Printf.sprintf
-                 "field %S of record %S: a linear type (Own/Array) cannot \
-                  be a record field — linear types must be top-level types \
-                  of a name"
+                 "field %S of record %S: a linear type cannot be a \
+                  field of a non-linear struct — mark the struct \
+                  `linear` if you want it to own the resource"
                  fname rd.rec_name));
           (fname, fty))
           rd.rec_fields
@@ -456,6 +721,15 @@ let build_env
       in
       let ret_ty =
         validate_ty type_env record_env in_scope f.return_ty in
+      (match prune ret_ty with
+       | TyApp ("Region", _) ->
+           raise (Type_error
+             (Printf.sprintf
+                "function %S cannot return Region — \
+                 each Region must be created in the scope that frees it; \
+                 caller should call region(...) and pass it in"
+                f.name))
+       | _ -> ());
       (f.name, (f.type_params, (param_tys, ret_ty)))) funcs
   in
   let extern_sigs =
@@ -473,12 +747,32 @@ let build_env
           validate_ty type_env record_env [] t) e.ext_params
       in
       let ret_ty = validate_ty type_env record_env [] e.ext_return_ty in
+      (* Calling convention is read straight off the declared return
+         type. The C-side glue exposed by an extern returning Task[T]
+         or Stream[T] writes results back via a hidden frame pointer
+         argument — emit handles that indirection. *)
       (e.ext_name, ([], (param_tys, ret_ty)))) externs
   in
-  { types = type_env;
-    records = record_env;
-    ctors = ctor_env;
-    fns = user_sigs @ extern_sigs }
+  let env = { types = type_env;
+              records = record_env;
+              ctors = ctor_env;
+              fns = user_sigs @ extern_sigs } in
+  (* For every user-declared linear type, require a matching drop fn
+     in the same module. The fn is found by name convention. *)
+  let check_drop_fn type_name =
+    let fn_name = drop_fn_name_for type_name in
+    if not (List.mem_assoc fn_name env.fns) then
+      raise (Type_error
+        (Printf.sprintf
+           "linear type %S requires a drop function %S in the same module \
+            (signature: fn %s(<param>: %s) -> int)"
+           type_name fn_name fn_name type_name))
+  in
+  List.iter (fun (td : type_decl) ->
+    if td.is_linear then check_drop_fn td.type_name) types;
+  List.iter (fun (rd : record_decl) ->
+    if rd.rec_is_linear then check_drop_fn rd.rec_name) records;
+  env
 
 (* ---------- recursive type detection ---------- *)
 
@@ -500,6 +794,8 @@ let check_no_recursive_types
     | TyFun (args, ret) ->
         let acc = List.fold_left deps_in_ty acc args in
         deps_in_ty acc ret
+    | TyPtr _ -> acc   (* pointers break by-value cycles *)
+    | TyTuple ts -> List.fold_left deps_in_ty acc ts
   in
   let direct_deps name : string list =
     match List.assoc_opt name type_env with
@@ -528,185 +824,202 @@ let check_no_recursive_types
   List.iter (fun (n, _) -> visit n n [n]) type_env;
   List.iter (fun (n, _) -> visit n n [n]) record_env
 
-(* ---------- pattern checking ---------- *)
+(* ---------- pattern checking ----------
 
-let check_match_arms_structure
-  (env : env)
-  (type_name : string)
-  (arms : (pat * 'a) list) : unit =
-  let td = List.assoc type_name env.types in
-  let all_ctors = List.map (fun v -> v.ctor_name) td.variants in
-  let seen = Hashtbl.create 8 in
-  let has_wildcard = ref false in
-  List.iter (fun (p, _) ->
-    if !has_wildcard then
-      raise (Type_error "unreachable pattern after wildcard");
-    match p with
-    | PWild -> has_wildcard := true
-    | PCtor (c, _) ->
-        if Hashtbl.mem seen c then
-          raise (Type_error
-            (Printf.sprintf "duplicate pattern %S in match" c));
-        if not (List.mem c all_ctors) then
-          raise (Type_error
-            (Printf.sprintf
-               "constructor %S does not belong to type %S"
-               c type_name));
-        Hashtbl.add seen c ()) arms;
-  if not !has_wildcard then begin
-    let missing =
-      List.filter (fun c -> not (Hashtbl.mem seen c)) all_ctors
-    in
-    if missing <> [] then
-      raise (Type_error
-        (Printf.sprintf "non-exhaustive match: missing %s"
-           (String.concat ", " missing)))
-  end
+   The scrutinee's type decides what kinds of patterns are allowed,
+   and what exhaustivity means. Centralised so each branch is short
+   and follows from a single rule. *)
 
-(* ---------- copyability ----------
+type scrut_kind =
+  | SK_Adt   of string             (* ADT — match by ctor *)
+  | SK_Int                         (* int — literal patterns, default required *)
+  | SK_Byte                        (* byte — same rules as int *)
+  | SK_Bool                        (* bool — true/false, exhaustive if both covered *)
+  | SK_Bytes                       (* Array[byte] — string literal patterns *)
+  | SK_Tuple of ty list            (* tuple — PTuple of matching arity *)
 
-   A type is copyable iff `let y = x` makes semantic sense for it —
-   i.e. the value can be duplicated without violating ownership.
-   Currently the only non-copyable primitive is Own[_]; structural
-   types inherit non-copyability transitively from their fields/variants.
-   Ref[_] is copyable (it's just pointer + generation tag).
-   Type variables are assumed copyable for now — generics carry no
-   bounds yet, and Own-typed arguments can't reach a generic position
-   without an explicit move. *)
-let rec is_copyable (env : env) (t : ty) : bool =
+let scrutinee_kind (env : env) (t : ty) : scrut_kind =
   match prune t with
-  | TyInt | TyBool -> true
-  | TyVar _        -> true
-  | TyFun _        -> true
-  | TyMeta _       -> true
-  | TyApp ("Region", _) -> false
-  | TyApp ("Array", _) -> true   (* region-backed, wrapper is just a handle *)
-  | TyApp ("Buf", _) -> true     (* stack array handle — raw pointer + length *)
-  | TyApp (n, args) when List.mem_assoc n env.records ->
-      let rd = List.assoc n env.records in
-      let subst = List.combine rd.rec_type_params args in
-      List.for_all
-        (fun (_, fty) -> is_copyable env (subst_ty subst fty))
-        rd.rec_fields
-  | TyApp (n, args) when List.mem_assoc n env.types ->
-      let td = List.assoc n env.types in
-      let subst = List.combine td.type_params args in
-      List.for_all
-        (fun v ->
-          List.for_all
-            (fun aty -> is_copyable env (subst_ty subst aty))
-            v.arg_tys)
-        td.variants
-  | TyApp _ -> true   (* unknown name — should not occur after validate_ty *)
+  | TyInt  -> SK_Int
+  | TyBool -> SK_Bool
+  | TyApp ("byte", []) -> SK_Byte
+  | TyApp ("float", []) ->
+      raise (Type_error
+        "match on float is not supported — NaN / signed-zero edge cases \
+         break exhaustivity. Use `if`/`else if` chain or a bind pattern \
+         with a guard (`x if x > 0.5 => ...`).")
+  | TyApp ("Array", [inner]) ->
+      (match prune inner with
+       | TyApp ("byte", []) -> SK_Bytes
+       | _ ->
+           raise (Type_error
+             (Printf.sprintf
+                "match scrutinee must be int, bool, byte, Array[byte], tuple, or an ADT, got %s"
+                (show_ty (zonk t)))))
+  | TyTuple ts -> SK_Tuple ts
+  | TyApp (n, _) when List.mem_assoc n env.types -> SK_Adt n
+  | _ ->
+      raise (Type_error
+        (Printf.sprintf
+           "match scrutinee must be int, bool, byte, Array[byte], tuple, or an ADT, got %s"
+           (show_ty (zonk t))))
 
-(* ---------- consume analysis for Own ---------- *)
-
-(* Determines whether a name `x` is "consumed" — i.e. ownership flows
-   out of the current scope through x. Three ways this can happen:
-
-   1. `take(x)` is invoked somewhere in the expression tree.
-   2. `x` is passed (as a bare EVar) into a position that requires
-      moving — a function argument, a constructor argument, or a
-      record field value — when the type at that position is
-      non-copyable. The "position is non-copyable" test uses the
-      type of x itself (which after unification must match the
-      formal type), so this naturally subsumes both `Own[T]` and
-      any struct/ADT containing Own.
-   3. `x` appears in *tail position* — as the final result of some
-      branch of computation, meaning ownership flows out of the let
-      that bound it.
-
-   Reads that do not move ownership are NOT consumes: `unwrap(x)`,
-   `deref(x)`, `look(x)`, `x.field`. `ref(x)` is the legacy alloc
-   form; in the new model it would be a borrow that doesn't consume,
-   so we deliberately don't count it here. *)
-
-(* Used by takes_consume to recognise a bare consume in arg position. *)
-let consumed_in_arg (env : env) (x : string) (a : T.expr) : bool =
-  match a with
-  | T.TEVar (y, t) when y = x -> not (is_copyable env t)
+(* A pattern that always matches everything that reaches it.
+   For tuples this means each component is itself a catch-all. *)
+let rec is_catchall_pat = function
+  | PBind _ -> true
+  | PTuple ps -> List.for_all is_catchall_pat ps
   | _ -> false
 
-(* takes_consume: does the expression contain a direct consume of `x`? *)
-let rec takes_consume (env : env) (x : string) (e : T.expr) : bool =
-  match e with
-  | T.TEInt _ | T.TEBool _ | T.TEVar _ | T.TEFnRef _ -> false
-  | T.TECall (callee, args, _) ->
-      takes_consume env x callee
-      || List.exists (takes_consume env x) args
-      || List.exists (consumed_in_arg env x) args
-  | T.TEBinop (_, a, b, _) ->
-      takes_consume env x a || takes_consume env x b
-  | T.TEUnop (_, a, _) -> takes_consume env x a
-  | T.TECtor (_, _, args, _) ->
-      List.exists (takes_consume env x) args
-      || List.exists (consumed_in_arg env x) args
-  | T.TERecord (_, _, fields, _) ->
-      List.exists (fun (_, e) -> takes_consume env x e) fields
-      || List.exists (fun (_, e) -> consumed_in_arg env x e) fields
-  | T.TEField (e, _, _) -> takes_consume env x e
-  | T.TEIf (c, t, el, _) ->
-      takes_consume env x c
-      || takes_consume env x t
-      || takes_consume env x el
-  | T.TELet (y, _, v, b, _, _) ->
-      (* `let y = x` where x is non-copyable consumes x (move into y). *)
-      takes_consume env x v
-      || consumed_in_arg env x v
-      || (y <> x && takes_consume env x b)
-  | T.TEMatch (s, _, arms, _) ->
-      takes_consume env x s
-      || List.exists (fun (p, body) ->
-        let shadowed = match p with
-          | PWild -> false
-          | PCtor (_, names) -> List.mem x names
+(* Reject patterns that don't belong on this scrutinee kind. Also
+   reject malformed or-patterns. Doesn't enforce exhaustivity — that's
+   the next step. *)
+let rec pat_compatible_with_kind kind p =
+  match kind, p with
+  | _, PBind _ -> true
+  | SK_Adt _, PCtor _ -> true
+  | SK_Int, PInt _ | SK_Byte, PInt _ -> true
+  | SK_Bool, PBool _ -> true
+  | SK_Bytes, PStr _ -> true
+  | SK_Tuple ts, PTuple ps when List.length ts = List.length ps ->
+      List.for_all2 (fun t p ->
+        let sub_kind = try scrutinee_kind {types=[]; records=[]; ctors=[]; fns=[]} t
+                       with _ -> SK_Int (* fallback; full check happens in real arm typing *)
         in
-        not shadowed && takes_consume env x body) arms
-  | T.TEArray (r, n, v, _) ->
-      takes_consume env x r || takes_consume env x n || takes_consume env x v
-  | T.TEArrayLit (r, elems, _) ->
-      takes_consume env x r
-      || List.exists (takes_consume env x) elems
-  | T.TEBuf (n, v, _) ->
-      takes_consume env x n || takes_consume env x v
-  | T.TEBufLit (elems, _) ->
-      List.exists (takes_consume env x) elems
-  | T.TERegion (n, _) -> takes_consume env x n
-  | T.TEIndex (a, i, _) ->
-      takes_consume env x a || takes_consume env x i
-  | T.TEAssignIdx (a, i, v, _) ->
-      takes_consume env x a || takes_consume env x i || takes_consume env x v
-  | T.TELen (e, _) -> takes_consume env x e
+        pat_compatible_with_kind sub_kind p) ts ps
+  | _, POr pats -> List.for_all (pat_compatible_with_kind kind) pats
+  | _, _ -> false
 
-(* tail_consume: does x reach the tail position of the expression? *)
-let rec tail_consume (x : string) (e : T.expr) : bool =
-  match e with
-  | T.TEVar (y, _) -> y = x
-  | T.TELet (y, _, _, body, _, _) ->
-      y <> x && tail_consume x body
-  | T.TEIf (_, t, el, _) -> tail_consume x t || tail_consume x el
-  | T.TEMatch (_, _, arms, _) ->
-      List.exists (fun (p, body) ->
-        let shadowed = match p with
-          | PWild -> false
-          | PCtor (_, names) -> List.mem x names
+let pat_kind_name = function
+  | SK_Adt n -> Printf.sprintf "ADT %s" n
+  | SK_Int -> "int"
+  | SK_Byte -> "byte"
+  | SK_Bool -> "bool"
+  | SK_Tuple ts ->
+      Printf.sprintf "tuple of arity %d" (List.length ts)
+  | SK_Bytes -> "Array[byte]"
+
+(* Walk arms left-to-right enforcing:
+     - patterns suit the scrutinee kind
+     - or-pattern sub-arms suit the kind too, and forbid bindings
+     - ADT-specific: ctor exists in the ADT
+     - no arm after a catch-all *)
+let check_match_arms_structure
+  (env : env)
+  (kind : scrut_kind)
+  (arms : (pat * 'g option * 'a) list) : unit =
+  let all_ctors = match kind with
+    | SK_Adt name ->
+        let td = List.assoc name env.types in
+        List.map (fun v -> v.ctor_name) td.variants
+    | _ -> []
+  in
+  let seen_ctors = Hashtbl.create 8 in
+  let catchall_seen = ref false in
+  let register_ctor ~guarded c =
+    if Hashtbl.mem seen_ctors c then
+      raise (Type_error
+        (Printf.sprintf "duplicate pattern %S in match" c));
+    if not (List.mem c all_ctors) then
+      raise (Type_error
+        (Printf.sprintf
+           "constructor %S does not belong to %s"
+           c (pat_kind_name kind)));
+    (* A guarded arm doesn't fully cover its constructor — the guard
+       could fail at runtime, leaving the case unhandled. Don't mark
+       as seen so the same ctor can appear in a later unguarded arm. *)
+    if not guarded then Hashtbl.add seen_ctors c ()
+  in
+  List.iter (fun (p, guard, _) ->
+    let guarded = guard <> None in
+    if !catchall_seen then
+      raise (Type_error "unreachable pattern after wildcard or bind");
+    if not (pat_compatible_with_kind kind p) then
+      raise (Type_error
+        (Printf.sprintf
+           "pattern %s is not valid for a %s scrutinee"
+           (show_pat p) (pat_kind_name kind)));
+    (* Only an unguarded catch-all is truly catch-all. *)
+    if is_catchall_pat p && not guarded then catchall_seen := true
+    else match p with
+    | PCtor (c, _) -> register_ctor ~guarded c
+    | POr pats ->
+        List.iter (function
+          | PCtor (c, vs) ->
+              if vs <> [] then
+                raise (Type_error
+                  (Printf.sprintf
+                     "or-pattern arm %S(...) must not bind variables"
+                     c));
+              register_ctor ~guarded c
+          | PInt _ | PBool _ | PStr _ -> ()
+          | _ ->
+              raise (Type_error
+                "or-pattern arms must be constructors or literals, with no bindings"))
+          pats
+    | PInt _ | PBool _ | PStr _ -> ()
+    | _ -> ()
+  ) arms;
+  if not !catchall_seen then begin
+    match kind with
+    | SK_Adt _ ->
+        let missing =
+          List.filter (fun c -> not (Hashtbl.mem seen_ctors c)) all_ctors
         in
-        not shadowed && tail_consume x body) arms
-  | _ -> false   (* any other terminal: int, ctor, call result, ... — not x *)
+        if missing <> [] then
+          raise (Type_error
+            (Printf.sprintf "non-exhaustive match: missing %s"
+               (String.concat ", " missing)))
+    | SK_Bool ->
+        let bool_present b =
+          List.exists (fun (p, guard, _) ->
+            guard = None &&
+            let rec check = function
+              | PBool b' -> b' = b
+              | POr ps -> List.exists check ps
+              | _ -> false
+            in check p) arms
+        in
+        if not (bool_present true && bool_present false) then
+          raise (Type_error
+            "non-exhaustive bool match: must cover both `true` and `false` \
+             unguarded, or include a catch-all arm")
+    | _ ->
+        raise (Type_error
+          (Printf.sprintf
+             "non-exhaustive %s match: an unguarded catch-all (`_` or bind) \
+              is required because the value domain is not enumerable"
+             (pat_kind_name kind)))
+  end
 
-let is_consumed (env : env) (x : string) (e : T.expr) : bool =
-  takes_consume env x e || tail_consume x e
-
+(* vars carries (name, (type, is_mut)) so EAssign can verify mutability. *)
 let rec infer (env : env) (tparams : string list)
-  (vars : (string * ty) list) (e : expr)
+  (vars : (string * (ty * bool)) list) (e : expr)
   : T.expr * ty =
   match e with
   | EInt n  -> (T.TEInt n,  TyInt)
+  | EFloat f -> (T.TEFloat f, TyApp ("float", []))
   | EBool b -> (T.TEBool b, TyBool)
+  | EStringLit s ->
+      (* "..." : Array[byte] — bytes live in the static region forever.
+         The handle is copyable, the gen tag will always match. *)
+      let result_ty = TyApp ("Array", [TyApp ("byte", [])]) in
+      (T.TEStringLit s, result_ty)
 
   | EBinop (op, a, b) ->
       let (ta, ta_ty) = infer env tparams vars a in
       let (tb, tb_ty) = infer env tparams vars b in
+      let require_numeric_operand t =
+        match prune t with
+        | TyInt -> ()
+        | TyApp ("float", []) -> ()
+        | TyMeta _ -> unify t TyInt   (* default to int *)
+        | t ->
+            raise (Type_error
+              (Printf.sprintf
+                 "%s requires int or float operands, got %s"
+                 (show_binop op) (show_ty (zonk t))))
+      in
       let result_ty =
         match binop_typing op with
         | OpFixed (operand_ty, result_ty) ->
@@ -717,12 +1030,22 @@ let rec infer (env : env) (tparams : string list)
             unify ta_ty tb_ty;
             (match prune ta_ty with
              | TyInt | TyBool -> ()
-             | TyMeta _ -> unify ta_ty TyInt   (* default to int *)
+             | TyApp ("byte", []) -> ()
+             | TyApp ("float", []) -> ()
+             | TyMeta _ -> unify ta_ty TyInt
              | t ->
                  raise (Type_error
                    (Printf.sprintf
-                      "%s requires int or bool operands, got %s"
+                      "%s requires int, bool, byte, or float operands, got %s"
                       (show_binop op) (show_ty (zonk t)))));
+            TyBool
+        | OpNumeric ->
+            unify ta_ty tb_ty;
+            require_numeric_operand ta_ty;
+            ta_ty
+        | OpComparison ->
+            unify ta_ty tb_ty;
+            require_numeric_operand ta_ty;
             TyBool
       in
       (T.TEBinop (op, ta, tb, result_ty), result_ty)
@@ -735,7 +1058,7 @@ let rec infer (env : env) (tparams : string list)
 
   | EVar x ->
       (match List.assoc_opt x vars with
-       | Some t -> (T.TEVar (x, t), t)
+       | Some (t, _) -> (T.TEVar (x, t), t)
        | None ->
            (match List.assoc_opt x env.fns with
             | Some (fn_tparams, (params, ret)) ->
@@ -773,6 +1096,11 @@ let rec infer (env : env) (tparams : string list)
       let typed_args =
         check_args env tparams vars callee_label arg_tys args
       in
+      (match tc with
+       | T.TEFnRef (_, metas, _) ->
+           check_instantiation
+             (Printf.sprintf "call to %S" callee_label) metas
+       | _ -> ());
       (T.TECall (tc, typed_args, ret_ty), ret_ty)
 
   | ECtor (c, args) ->
@@ -789,6 +1117,7 @@ let rec infer (env : env) (tparams : string list)
       in
       let result_ty = TyApp (info.ctor_owner, owner_tys) in
       let typed_args = check_args env tparams vars c arg_tys args in
+      check_instantiation (Printf.sprintf "constructor %S" c) metas;
       (T.TECtor (c, metas, typed_args, result_ty), result_ty)
 
   | ERecord (name, elems) ->
@@ -863,6 +1192,7 @@ let rec infer (env : env) (tparams : string list)
         List.map (fun (fname, _) ->
           (fname, Hashtbl.find field_map fname)) declared_fields
       in
+      check_instantiation (Printf.sprintf "record %S literal" name) metas;
       let record_expr =
         T.TERecord (name, metas, typed_fields, result_ty)
       in
@@ -907,60 +1237,201 @@ let rec infer (env : env) (tparams : string list)
       unify tt_ty te_ty;
       (T.TEIf (tc, tt, te, tt_ty), tt_ty)
 
-  | ELet (x, ascription, value, body) ->
+  | ELet (x, is_mut, ascription, value, body) ->
       if x <> "_" then check_not_c_reserved "let-binding" x;
       let (tv, tv_ty) = infer env tparams vars value in
+      if is_region_ty tv_ty then
+        raise (Type_error
+          (Printf.sprintf
+             "regions are bound with `arena`, not `let` \
+              (write `arena %s = ...`). A region is a scope-anchored \
+              resource, not a copyable value." x));
       (match ascription with
        | None -> ()
        | Some t ->
            let t = validate_ty_for_ascription env tparams t in
            unify tv_ty t);
-      (* `let _ = expr` for a linear-typed value means "consume and
-         immediately drop". Rename `_` to a fresh `_drop_N` so the
-         binding carries auto_drop=true and produces a visible free in
-         emit. Copyable values keep `_` as a side-effect discard. *)
+      (* Linear types (Region, user `linear` structs/enums) cannot be
+         `mut` — reassigning would silently leak the previous value. *)
+      if is_mut && is_linear_ty tv_ty then
+        raise (Type_error
+          (Printf.sprintf
+             "let mut %s : %s is forbidden — \
+              reassigning a linear binding would leak the previous value. \
+              Create a fresh let-binding instead."
+             x (show_ty (zonk tv_ty))));
+      (* Linear values cannot be aliased. `let y = x` where x is linear
+         would silently create two owners of the same resource. *)
+      (match tv, prune tv_ty with
+       | T.TEVar (src, _), t when is_linear_ty t ->
+           raise (Type_error
+             (Printf.sprintf
+                "cannot bind one linear variable to another \
+                 (let %s = %s): linear values must come from a fresh \
+                 constructor or function call"
+                x src))
+       | _ -> ());
+      (* Field access of a linear container is also aliasing — it would
+         create a binding that owns the same underlying resource. *)
+      (match tv, prune tv_ty with
+       | T.TEField (_, fname, _), t when is_linear_ty t ->
+           raise (Type_error
+             (Printf.sprintf
+                "cannot bind a linear field to a new name \
+                 (let %s = ....%s): consume it directly with drop(...) \
+                 or pass it to a function instead"
+                x fname))
+       | _ -> ());
+      (* `_ = <diverging-expr>` (break/continue/return) — value type is
+         unresolved TyMeta with nothing to constrain it. Default to int
+         so zonk doesn't fail. *)
+      if x = "_" then
+        (match prune tv_ty with
+         | TyMeta _ -> unify tv_ty TyInt
+         | _ -> ());
+      (* Stage 3 §8.1: an unbound (`_`) Task[T] is detach, not drop —
+         the spawned worker keeps running and frees its slot itself.
+         Don't synthesise a _drop_N for it. Stream[T] follows the
+         same rule (fire-and-forget multishot source). *)
+      let is_task_or_stream =
+        match prune tv_ty with
+        | TyApp ("Task", _) | TyApp ("Stream", _) -> true
+        | _ -> false
+      in
       let x_actual =
-        if x = "_" then
-          (match prune tv_ty with
-           | TyApp ("Region", _) ->
-               incr drop_name_counter;
-               Printf.sprintf "_drop_%d" !drop_name_counter
-           | _ -> x)
-        else x
+        if x = "_" && is_linear_ty tv_ty && not is_task_or_stream then begin
+          incr drop_name_counter;
+          Printf.sprintf "_drop_%d" !drop_name_counter
+        end else x
       in
       let body_vars =
-        if x_actual = "_" then vars else (x_actual, tv_ty) :: vars
+        if x_actual = "_" then vars
+        else (x_actual, (tv_ty, is_mut)) :: vars
       in
       let (tb, tb_ty) = infer env tparams body_vars body in
       let auto_drop =
         if x_actual = "_" then false
-        else
-          (match prune tv_ty with
-           | TyApp ("Region", _) ->
-               not (is_consumed env x_actual tb)
-           | _ -> false)
+        else is_linear_ty tv_ty
       in
       (T.TELet (x_actual, tv_ty, tv, tb, tb_ty, auto_drop), tb_ty)
+
+  | EArena (x, value, body) ->
+      check_not_c_reserved "arena-binding" x;
+      let (tv, tv_ty) = infer env tparams vars value in
+      if not (is_region_ty tv_ty) then
+        raise (Type_error
+          (Printf.sprintf
+             "`arena %s = ...` requires a region value (region(...), \
+              stack_region(...), or aligned_region(...)), got %s"
+             x (show_ty (zonk tv_ty))));
+      (* Reuse the linear-binding machinery: a region is linear, so
+         `arena s = r` (aliasing an existing region) is rejected the
+         same way `let s = r` would be — the value must be a fresh
+         region constructor, not a bare variable / field. *)
+      (match tv with
+       | T.TEVar (src, _) ->
+           raise (Type_error
+             (Printf.sprintf
+                "cannot bind one region to another (arena %s = %s): \
+                 a region must come from a fresh region(...) call"
+                x src))
+       | T.TEField (_, fname, _) ->
+           raise (Type_error
+             (Printf.sprintf
+                "cannot bind a region field to a new name \
+                 (arena %s = ....%s)" x fname))
+       | _ -> ());
+      let body_vars = (x, (tv_ty, false)) :: vars in
+      let (tb, tb_ty) = infer env tparams body_vars body in
+      (* Lower to a linear let with auto_drop — mono/emit never see
+         EArena. The region frees at this scope's end. *)
+      (T.TELet (x, tv_ty, tv, tb, tb_ty, true), tb_ty)
+
+  | EAssign (x, value) ->
+      let (tv, tv_ty) = infer env tparams vars value in
+      (match List.assoc_opt x vars with
+       | Some (xt, true) ->
+           (try unify xt tv_ty
+            with Type_error _ ->
+              raise (Type_error
+                (Printf.sprintf
+                   "assignment to %S: variable has type %s, value has type %s"
+                   x (show_ty (zonk xt)) (show_ty (zonk tv_ty)))));
+           (T.TEAssign (x, tv, xt), TyInt)
+       | Some (_, false) ->
+           raise (Type_error
+             (Printf.sprintf
+                "cannot assign to %S — declared without `mut`. \
+                 Use `let mut %s = ...` to make it reassignable."
+                x x))
+       | None ->
+           raise (Type_error
+             (Printf.sprintf "assignment to unknown variable %S" x)))
+
+  | EWhile (cond, body) ->
+      let (tc, tc_ty) = infer env tparams vars cond in
+      (try unify tc_ty TyBool
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "while condition must be bool, got %s"
+              (show_ty (zonk tc_ty)))));
+      incr loop_depth;
+      let (tb, _tb_ty) = infer env tparams vars body in
+      decr loop_depth;
+      (* while never produces a real value; we use int 0 as placeholder
+         for "unit" same as a[i] := v. *)
+      (T.TEWhile (tc, tb), TyInt)
+
+  | EBreak ->
+      if !loop_depth = 0 then
+        raise (Type_error "break used outside of a while loop");
+      (T.TEBreak, TyMeta (fresh_meta ()))
+
+  | EContinue ->
+      if !loop_depth = 0 then
+        raise (Type_error "continue used outside of a while loop");
+      (T.TEContinue, TyMeta (fresh_meta ()))
+
+  | EReturn v_e ->
+      let (tv, tv_ty) = infer env tparams vars v_e in
+      let ret_ty =
+        match !current_return_ty with
+        | Some t -> t
+        | None -> failwith "check: EReturn outside of a function body"
+      in
+      (try unify tv_ty ret_ty
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "return: expression has type %s, function returns %s"
+              (show_ty (zonk tv_ty)) (show_ty (zonk ret_ty)))));
+      (T.TEReturn (tv, ret_ty), TyMeta (fresh_meta ()))
 
   | EMatch (scrut, arms) ->
       if arms = [] then
         raise (Type_error "match must have at least one arm");
       let (tscrut, tscrut_ty) = infer env tparams vars scrut in
-      let scrut_ty_now = prune tscrut_ty in
-      let type_name =
-        match scrut_ty_now with
-        | TyApp (n, _) when List.mem_assoc n env.types -> n
-        | _ ->
-            raise (Type_error
-              (Printf.sprintf
-                 "match scrutinee must have an ADT type, got %s"
-                 (show_ty (zonk tscrut_ty))))
-      in
-      check_match_arms_structure env type_name arms;
-      let typed_arms = List.map (fun (pat, body) ->
+      let kind = scrutinee_kind env tscrut_ty in
+      check_match_arms_structure env kind arms;
+      (* v1 restriction: guards are only allowed on non-ADT match.
+         For ADT match, the same effect is available by writing the
+         `if` inside the arm body. *)
+      (match kind with
+       | SK_Adt _ ->
+           List.iter (fun (_, g, _) ->
+             if g <> None then
+               raise (Type_error
+                 "match guards are not yet supported in ADT match; \
+                  put the `if` inside the arm body instead")) arms
+       | _ -> ());
+      let typed_arms = List.map (fun (pat, guard, body) ->
         let body_vars =
           match pat with
-          | PWild -> vars
+          | PBind "_" -> vars
+          | PBind x ->
+              check_not_c_reserved "pattern bind" x;
+              (x, (tscrut_ty, false)) :: vars
           | PCtor (c, vs) ->
               let info = List.assoc c env.ctors in
               if List.length vs <> List.length info.ctor_args then
@@ -981,11 +1452,71 @@ let rec infer (env : env) (tparams : string list)
               let inst_result = TyApp (info.ctor_owner, owner_args) in
               unify inst_result tscrut_ty;
               List.fold_left2 (fun acc v t ->
-                if v = "_" then acc else (v, t) :: acc)
+                if v = "_" then acc else (v, (t, false)) :: acc)
                 vars vs arg_tys
+          | POr pats ->
+              (match pats with
+               | PCtor (c, _) :: _ ->
+                   let info = List.assoc c env.ctors in
+                   let (subst, _) =
+                     make_instantiation info.ctor_owner_params
+                   in
+                   let owner_args =
+                     List.map (subst_ty subst)
+                       (List.map (fun p -> TyVar p) info.ctor_owner_params)
+                   in
+                   let inst_result = TyApp (info.ctor_owner, owner_args) in
+                   unify inst_result tscrut_ty
+               | _ -> ());
+              vars
+          | PInt _ | PBool _ | PStr _ -> vars
+          | PTuple ps ->
+              let comp_tys = match prune tscrut_ty with
+                | TyTuple ts when List.length ts = List.length ps -> ts
+                | _ ->
+                    raise (Type_error
+                      (Printf.sprintf
+                         "tuple pattern has %d component(s); scrutinee is %s"
+                         (List.length ps) (show_ty (zonk tscrut_ty))))
+              in
+              (* Recursively bind sub-patterns. v1 supports nested
+                 PBind / wildcards; nested PCtor / PInt etc. would
+                 require restructuring this whole arm-typing into a
+                 recursive walker — out of scope for now. *)
+              let rec bind acc p t =
+                match p with
+                | PBind "_" -> acc
+                | PBind x ->
+                    check_not_c_reserved "pattern bind" x;
+                    (x, (t, false)) :: acc
+                | PTuple sub_ps ->
+                    let sub_ts = match prune t with
+                      | TyTuple ts when List.length ts = List.length sub_ps -> ts
+                      | _ ->
+                          raise (Type_error
+                            "nested tuple pattern: scrutinee component is not a tuple of matching arity")
+                    in
+                    List.fold_left2 bind acc sub_ps sub_ts
+                | _ ->
+                    raise (Type_error
+                      "tuple sub-pattern: only `_`, bind, and nested tuple are supported for now")
+              in
+              List.fold_left2 bind vars ps comp_tys
+        in
+        let typed_guard = match guard with
+          | None -> None
+          | Some g ->
+              let (tg, tg_ty) = infer env tparams body_vars g in
+              (try unify tg_ty TyBool
+               with Type_error _ ->
+                 raise (Type_error
+                   (Printf.sprintf
+                      "match guard must be bool, got %s"
+                      (show_ty (zonk tg_ty)))));
+              Some tg
         in
         let (tbody, tbody_ty) = infer env tparams body_vars body in
-        ((pat, tbody), tbody_ty)) arms
+        ((pat, typed_guard, tbody), tbody_ty)) arms
       in
       let first_ty = snd (List.hd typed_arms) in
       List.iter (fun (_, t) -> unify first_ty t) typed_arms;
@@ -1011,7 +1542,7 @@ let rec infer (env : env) (tparams : string list)
               "array(_, N, _) : size must be int, got %s"
               (show_ty (zonk tn_ty)))));
       let (tv, tv_ty) = infer env tparams vars init_e in
-      if ty_contains_own (zonk tv_ty) then
+      if ty_contains_linear (zonk tv_ty) then
         raise (Type_error
           (Printf.sprintf
              "array(_, _, v) : element type cannot contain a linear type (%s)"
@@ -1043,59 +1574,16 @@ let rec infer (env : env) (tparams : string list)
                 "array literal elements must all have the same type: \
                  expected %s, got %s"
                 (show_ty (zonk elem_ty)) (show_ty (zonk t)))))) typed_elems;
-      if ty_contains_own (zonk elem_ty) then
-        raise (Type_error
-          (Printf.sprintf
-             "array literal element type cannot contain a linear type (%s)"
-             (show_ty (zonk elem_ty))));
+      (* Linear element types are allowed in array literals — each
+         element value is moved into its slot exactly once, and the
+         array itself is then linear (induced linearity, phase 3).
+         By contrast `array(r, N, init)` would copy `init` N times,
+         which is forbidden for linear types. *)
       let result_ty = TyApp ("Array", [elem_ty]) in
       (T.TEArrayLit (tr, List.map fst typed_elems, result_ty), result_ty)
 
-  | EBuf (size_e, init_e) ->
-      (* buf(N, init) : (int_literal, T) → Buf[T]. Stack-allocated.
-         N must be an int literal (parser already enforced). *)
-      let (tn, tn_ty) = infer env tparams vars size_e in
-      (try unify tn_ty TyInt
-       with Type_error _ ->
-         raise (Type_error
-           (Printf.sprintf
-              "buf(N, _) : size must be int, got %s"
-              (show_ty (zonk tn_ty)))));
-      let (tv, tv_ty) = infer env tparams vars init_e in
-      if ty_contains_own (zonk tv_ty) then
-        raise (Type_error
-          (Printf.sprintf
-             "buf(_, v) : element type cannot contain a linear type (%s)"
-             (show_ty (zonk tv_ty))));
-      let result_ty = TyApp ("Buf", [tv_ty]) in
-      (T.TEBuf (tn, tv, result_ty), result_ty)
-
-  | EBufLit elems ->
-      (* [v0, ..., vN-1] : stack array literal → Buf[T]. *)
-      if elems = [] then
-        raise (Type_error
-          "empty array literal `[]` has no inferable type — \
-           use buf(0, default) for an empty buffer");
-      let typed_elems = List.map (infer env tparams vars) elems in
-      let elem_ty = snd (List.hd typed_elems) in
-      List.iter (fun (_, t) ->
-        (try unify elem_ty t
-         with Type_error _ ->
-           raise (Type_error
-             (Printf.sprintf
-                "array literal elements must all have the same type: \
-                 expected %s, got %s"
-                (show_ty (zonk elem_ty)) (show_ty (zonk t)))))) typed_elems;
-      if ty_contains_own (zonk elem_ty) then
-        raise (Type_error
-          (Printf.sprintf
-             "array literal element type cannot contain a linear type (%s)"
-             (show_ty (zonk elem_ty))));
-      let result_ty = TyApp ("Buf", [elem_ty]) in
-      (T.TEBufLit (List.map fst typed_elems, result_ty), result_ty)
-
   | ERegion size_e ->
-      (* region(N) : int → Region. Owned arena of N bytes. Linear. *)
+      (* region(N) : int → Region. Heap arena. Linear. *)
       let (tn, tn_ty) = infer env tparams vars size_e in
       (try unify tn_ty TyInt
        with Type_error _ ->
@@ -1106,53 +1594,98 @@ let rec infer (env : env) (tparams : string list)
       let result_ty = TyApp ("Region", []) in
       (T.TERegion (tn, result_ty), result_ty)
 
+  | EStackRegion size_e ->
+      (* stack_region(N) : int → Region. Allocated as a C99 VLA in
+         the current function's stack frame; N can be any runtime
+         int. Goes out of scope with the function. *)
+      let (tn, tn_ty) = infer env tparams vars size_e in
+      (try unify tn_ty TyInt
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "stack_region(N) : size must be int, got %s"
+              (show_ty (zonk tn_ty)))));
+      let result_ty = TyApp ("Region", []) in
+      (T.TEStackRegion (tn, result_ty), result_ty)
+
+  | EAlignedRegion (size_e, align_e) ->
+      (* aligned_region(N, A) : int * int → Region. Heap arena with
+         the block aligned to A bytes (for mmap, GPU, DMA). A must be
+         a positive power-of-two literal (parser already enforced). *)
+      let (tn, tn_ty) = infer env tparams vars size_e in
+      (try unify tn_ty TyInt
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "aligned_region(N, _) : size must be int, got %s"
+              (show_ty (zonk tn_ty)))));
+      let (ta, ta_ty) = infer env tparams vars align_e in
+      (try unify ta_ty TyInt
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "aligned_region(_, A) : alignment must be int, got %s"
+              (show_ty (zonk ta_ty)))));
+      let result_ty = TyApp ("Region", []) in
+      (T.TEAlignedRegion (tn, ta, result_ty), result_ty)
+
   | EIndex (arr_e, idx_e) ->
-      (* a[i] : (Array[T] or Buf[T]), int → T.
-         Read element. Both are copyable handles, no consume. *)
+      (* a[i] : Array[T] or *T, int → T. For Array, the read does a
+         gen+bounds check; for raw *T it's a plain C subscript. *)
       let (ta, ta_ty) = infer env tparams vars arr_e in
-      let elem = TyMeta (fresh_meta ()) in
-      let ok =
-        try unify ta_ty (TyApp ("Array", [elem])); true
-        with Type_error _ ->
-          (try unify ta_ty (TyApp ("Buf", [elem])); true
-           with Type_error _ -> false)
+      let elem =
+        match prune ta_ty with
+        | TyPtr inner -> inner
+        | _ ->
+            let elem = TyMeta (fresh_meta ()) in
+            (try unify ta_ty (TyApp ("Array", [elem]))
+             with Type_error _ ->
+               raise (Type_error
+                 (Printf.sprintf
+                    "indexing expects Array[T] or *T, got %s"
+                    (show_ty (zonk ta_ty)))));
+            elem
       in
-      if not ok then
-        raise (Type_error
-          (Printf.sprintf
-             "indexing expects Array[T] or Buf[T], got %s"
-             (show_ty (zonk ta_ty))));
       let (ti, ti_ty) = infer env tparams vars idx_e in
       (try unify ti_ty TyInt
        with Type_error _ ->
          raise (Type_error
            (Printf.sprintf
-              "array index must be int, got %s"
+              "index must be int, got %s"
               (show_ty (zonk ti_ty)))));
+      (* Reading from an Array[Linear] would copy a linear value out
+         of its slot, leaving two owners. Forbid it — the elements
+         can only be consumed when the whole Array is dropped. *)
+      if is_linear_ty (zonk elem) then
+        raise (Type_error
+          (Printf.sprintf
+             "cannot read element of Array[%s] — that would copy a \
+              linear value out of its slot. Elements are only consumed \
+              when the whole array is dropped."
+             (show_ty (zonk elem))));
       (T.TEIndex (ta, ti, elem), elem)
 
   | EAssignIdx (arr_e, idx_e, val_e) ->
-      (* a[i] := v : (Array[T] or Buf[T]), int, T → int.
-         Result is 0 (placeholder for unit). *)
       let (ta, ta_ty) = infer env tparams vars arr_e in
-      let elem = TyMeta (fresh_meta ()) in
-      let ok =
-        try unify ta_ty (TyApp ("Array", [elem])); true
-        with Type_error _ ->
-          (try unify ta_ty (TyApp ("Buf", [elem])); true
-           with Type_error _ -> false)
+      let elem =
+        match prune ta_ty with
+        | TyPtr inner -> inner
+        | _ ->
+            let elem = TyMeta (fresh_meta ()) in
+            (try unify ta_ty (TyApp ("Array", [elem]))
+             with Type_error _ ->
+               raise (Type_error
+                 (Printf.sprintf
+                    "index-assignment expects Array[T] or *T, got %s"
+                    (show_ty (zonk ta_ty)))));
+            elem
       in
-      if not ok then
-        raise (Type_error
-          (Printf.sprintf
-             "array index-assignment expects Array[T] or Buf[T], got %s"
-             (show_ty (zonk ta_ty))));
       let (ti, ti_ty) = infer env tparams vars idx_e in
       (try unify ti_ty TyInt
        with Type_error _ ->
          raise (Type_error
            (Printf.sprintf
-              "array index must be int, got %s"
+              "index must be int, got %s"
               (show_ty (zonk ti_ty)))));
       let (tv, tv_ty) = infer env tparams vars val_e in
       (try unify tv_ty elem
@@ -1161,24 +1694,464 @@ let rec infer (env : env) (tparams : string list)
            (Printf.sprintf
               "type mismatch in a[i] := v: element is %s, value is %s"
               (show_ty (zonk elem)) (show_ty (zonk tv_ty)))));
+      (* Writing to a slot of Array[Linear] would either drop the old
+         element or leak it. Both need machinery we don't have yet —
+         forbid until phase 5/6 if ever. *)
+      if is_linear_ty (zonk elem) then
+        raise (Type_error
+          (Printf.sprintf
+             "cannot assign element of Array[%s] — overwriting would \
+              either drop or leak the old linear value."
+             (show_ty (zonk elem))));
       (T.TEAssignIdx (ta, ti, tv, TyInt), TyInt)
 
   | ELen arr_e ->
-      (* len(a) : (Array[T] or Buf[T]) → int. *)
+      (* len(a) : Array[T] → int. *)
       let (ta, ta_ty) = infer env tparams vars arr_e in
       let elem = TyMeta (fresh_meta ()) in
-      let ok =
-        try unify ta_ty (TyApp ("Array", [elem])); true
-        with Type_error _ ->
-          (try unify ta_ty (TyApp ("Buf", [elem])); true
-           with Type_error _ -> false)
-      in
-      if not ok then
+      (try unify ta_ty (TyApp ("Array", [elem]))
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "len expects Array[T], got %s"
+              (show_ty (zonk ta_ty)))));
+      (T.TELen (ta, TyInt), TyInt)
+
+  | ESlice (arr_e, lo_e, hi_e) ->
+      (* slice(a, lo, hi) : Array[T], int, int → Array[T]. New handle
+         pointing at the same region, with offset += lo and len = hi - lo.
+         Same gen, same slot — slice dies with the original region. *)
+      let (ta, ta_ty) = infer env tparams vars arr_e in
+      let elem = TyMeta (fresh_meta ()) in
+      (try unify ta_ty (TyApp ("Array", [elem]))
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "slice expects Array[T], got %s"
+              (show_ty (zonk ta_ty)))));
+      let (tlo, tlo_ty) = infer env tparams vars lo_e in
+      (try unify tlo_ty TyInt
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "slice(_, lo, _) : lo must be int, got %s"
+              (show_ty (zonk tlo_ty)))));
+      let (thi, thi_ty) = infer env tparams vars hi_e in
+      (try unify thi_ty TyInt
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "slice(_, _, hi) : hi must be int, got %s"
+              (show_ty (zonk thi_ty)))));
+      (* Slicing an Array[Linear] would produce a second linear handle
+         viewing the same elements — two owners. Forbid. *)
+      if is_linear_ty (zonk elem) then
         raise (Type_error
           (Printf.sprintf
-             "len expects Array[T] or Buf[T], got %s"
-             (show_ty (zonk ta_ty))));
-      (T.TELen (ta, TyInt), TyInt)
+             "cannot slice Array[%s] — would create a second linear \
+              handle over the same elements."
+             (show_ty (zonk elem))));
+      let result_ty = TyApp ("Array", [elem]) in
+      (T.TESlice (ta, tlo, thi, result_ty), result_ty)
+
+  | EToInt sub_e ->
+      let (ts, ts_ty) = infer env tparams vars sub_e in
+      (match prune ts_ty with
+       | TyApp ("byte", []) -> (T.TEToInt ts, TyInt)
+       | TyApp ("u16",  []) -> (T.TEToInt ts, TyInt)
+       | TyApp ("u32",  []) -> (T.TEToInt ts, TyInt)
+       | TyApp ("u64",  []) -> (T.TEToInt ts, TyInt)
+       | TyApp ("float", []) -> (T.TEToIntFromFloat ts, TyInt)
+       | TyMeta _ ->
+           unify ts_ty (TyApp ("byte", []));
+           (T.TEToInt ts, TyInt)
+       | t ->
+           raise (Type_error
+             (Printf.sprintf
+                "to_int expects byte/u16/u32/u64/float, got %s"
+                (show_ty (zonk t)))))
+
+  | EToByte sub_e ->
+      let (ts, ts_ty) = infer env tparams vars sub_e in
+      (try unify ts_ty TyInt
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "to_byte expects int, got %s"
+              (show_ty (zonk ts_ty)))));
+      (T.TEToByte ts, TyApp ("byte", []))
+
+  | EToU16 sub_e ->
+      let (ts, ts_ty) = infer env tparams vars sub_e in
+      (try unify ts_ty TyInt
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "to_u16 expects int, got %s" (show_ty (zonk ts_ty)))));
+      (T.TEToU16 ts, TyApp ("u16", []))
+
+  | EToU32 sub_e ->
+      let (ts, ts_ty) = infer env tparams vars sub_e in
+      (try unify ts_ty TyInt
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "to_u32 expects int, got %s" (show_ty (zonk ts_ty)))));
+      (T.TEToU32 ts, TyApp ("u32", []))
+
+  | EToU64 sub_e ->
+      let (ts, ts_ty) = infer env tparams vars sub_e in
+      (try unify ts_ty TyInt
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "to_u64 expects int, got %s" (show_ty (zonk ts_ty)))));
+      (T.TEToU64 ts, TyApp ("u64", []))
+
+  | EToFloat sub_e ->
+      let (ts, ts_ty) = infer env tparams vars sub_e in
+      (try unify ts_ty TyInt
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "to_float expects int, got %s"
+              (show_ty (zonk ts_ty)))));
+      (T.TEToFloat ts, TyApp ("float", []))
+
+  | ECAlloc (elem_t, n_e) ->
+      let elem_t = validate_ty_for_ascription env tparams elem_t in
+      if ty_contains_linear elem_t then
+        raise (Type_error
+          (Printf.sprintf
+             "c_alloc[T](_) : T cannot contain a linear type (%s)"
+             (show_ty (zonk elem_t))));
+      let (tn, tn_ty) = infer env tparams vars n_e in
+      (try unify tn_ty TyInt
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "c_alloc[_](N) : N must be int, got %s"
+              (show_ty (zonk tn_ty)))));
+      let result_ty = TyPtr elem_t in
+      (T.TECAlloc (elem_t, tn, result_ty), result_ty)
+
+  | ECFree p_e ->
+      let (tp, tp_ty) = infer env tparams vars p_e in
+      (match prune tp_ty with
+       | TyPtr _ -> ()
+       | TyMeta _ ->
+           let elem = TyMeta (fresh_meta ()) in
+           unify tp_ty (TyPtr elem)
+       | _ ->
+           raise (Type_error
+             (Printf.sprintf
+                "c_free expects a raw pointer, got %s"
+                (show_ty (zonk tp_ty)))));
+      (T.TECFree tp, TyInt)
+
+  | ENullPtr elem_t ->
+      let elem_t = validate_ty_for_ascription env tparams elem_t in
+      let result_ty = TyPtr elem_t in
+      (T.TENullPtr result_ty, result_ty)
+
+  | EIsNull p_e ->
+      let (tp, tp_ty) = infer env tparams vars p_e in
+      (match prune tp_ty with
+       | TyPtr _ -> ()
+       | TyMeta _ ->
+           let elem = TyMeta (fresh_meta ()) in
+           unify tp_ty (TyPtr elem)
+       | _ ->
+           raise (Type_error
+             (Printf.sprintf
+                "is_null expects a raw pointer, got %s"
+                (show_ty (zonk tp_ty)))));
+      (T.TEIsNull tp, TyBool)
+
+  | EArrayData a_e ->
+      let (ta, ta_ty) = infer env tparams vars a_e in
+      let elem = TyMeta (fresh_meta ()) in
+      (try unify ta_ty (TyApp ("Array", [elem]))
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "array_data expects Array[T], got %s"
+              (show_ty (zonk ta_ty)))));
+      let result_ty = TyPtr elem in
+      (T.TEArrayData (ta, result_ty), result_ty)
+
+  | EDeref p_e ->
+      let (tp, tp_ty) = infer env tparams vars p_e in
+      let elem = TyMeta (fresh_meta ()) in
+      (try unify tp_ty (TyPtr elem)
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "*p expects a raw pointer, got %s"
+              (show_ty (zonk tp_ty)))));
+      (T.TEDeref (tp, elem), elem)
+
+  | ETryAt (a_e, i_e) ->
+      let (ta, ta_ty) = infer env tparams vars a_e in
+      let elem = TyMeta (fresh_meta ()) in
+      (try unify ta_ty (TyApp ("Array", [elem]))
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "try_at expects Array[T], got %s"
+              (show_ty (zonk ta_ty)))));
+      let (ti, ti_ty) = infer env tparams vars i_e in
+      (try unify ti_ty TyInt
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "try_at(_, i): i must be int, got %s"
+              (show_ty (zonk ti_ty)))));
+      let result_ty = TyApp ("Option", [elem]) in
+      (T.TETryAt (ta, ti, result_ty), result_ty)
+
+  | EDrop x_e ->
+      let (tx, tx_ty) = infer env tparams vars x_e in
+      if not (is_linear_ty tx_ty) then
+        raise (Type_error
+          (Printf.sprintf
+             "drop() requires a linear value (Region or a user `linear` \
+              type), got %s"
+             (show_ty (zonk tx_ty))));
+      (T.TEDrop (tx, tx_ty), TyInt)
+
+  (* Stage 3 — concurrency. Phase 2 wires up types for the three
+     fundamentals (await / spawn / yield); phases 4+ generate the
+     state machine and runtime. await all { … } needs tuples; the
+     dynamic form Array[Task[T]] needs phase-3 induced linearity on
+     Array — both stay rejected for now. *)
+  | EAwait inner ->
+      let (ti, ti_ty) = infer env tparams vars inner in
+      let elem = TyMeta (fresh_meta ()) in
+      let try_task =
+        try unify ti_ty (TyApp ("Task", [elem])); true
+        with Type_error _ -> false
+      in
+      if not try_task then begin
+        let stream_elem = TyMeta (fresh_meta ()) in
+        (try unify ti_ty (TyApp ("Stream", [stream_elem]))
+         with Type_error _ ->
+           raise (Type_error
+             (Printf.sprintf
+                "`await e` expects e : Task[T] or Stream[T], got %s"
+                (show_ty (zonk ti_ty)))));
+        (* Stream-side await: leave raw, no Result wrap. The for-in form
+           is the real consumer; per-event Result allocation would be
+           pure cost. See STAGE3_ASYNC §10. *)
+        let result_ty = stream_elem in
+        (T.TEAwait (ti, result_ty, stream_elem), result_ty)
+      end else
+        (* Phase 7: wrap the awaited Task result in Result[T]. CQE-style
+           failures (negative res from io_uring) surface as Err(errno);
+           successful completions yield Ok(value). Callers must `match`
+           the result — e.g. `match r { Ok(n) => ..., Err(e) => ... }`. *)
+        let wrapped = TyApp ("Result", [elem]) in
+        (T.TEAwait (ti, wrapped, elem), wrapped)
+
+  | ESpawn inner ->
+      (* The body of `spawn` should be a function call — it's what
+         names the work to do. We type-check it as an ordinary call
+         and wrap the result type in Task[..]. *)
+      (match inner with
+       | ECall _ -> ()
+       | _ ->
+           raise (Type_error
+             "`spawn` expects a function call: `spawn f(args)`"));
+      let (ti, ti_ty) = infer env tparams vars inner in
+      let result_ty = TyApp ("Task", [ti_ty]) in
+      (T.TESpawn (ti, result_ty), result_ty)
+
+  | EAwaitAll branches ->
+      (* Static await-all: every branch must be a call expression that
+         names an awaitable operation (either an `extern async fn` or
+         `spawn worker(args)` or a call to an async function). The
+         visible result is a tuple of per-branch Result[T_i]. *)
+      if List.length branches < 2 then
+        raise (Type_error
+          "`await all { ... }` requires at least 2 branches");
+      let typed_branches_and_tys =
+        List.mapi (fun i b ->
+          let is_call = match b with
+            | ECall _ -> true
+            | ESpawn (ECall _) -> true
+            | _ -> false
+          in
+          if not is_call then
+            raise (Type_error
+              (Printf.sprintf
+                 "`await all { ... }` branch #%d: each branch must be a \
+                  function call (either `f(args)`, `spawn f(args)`, or \
+                  an async-extern call)"
+                 (i + 1)));
+          let (tb, tb_ty) = infer env tparams vars b in
+          (* Each branch should produce a Task[T_i]. spawn already
+             types as Task; extern async calls type as Task; a plain
+             call to an async orto function also types as its return
+             type (int, etc.) — we wrap that case ourselves. *)
+          let elem = TyMeta (fresh_meta ()) in
+          (try unify tb_ty (TyApp ("Task", [elem]))
+           with Type_error _ ->
+             raise (Type_error
+               (Printf.sprintf
+                  "`await all { ... }` branch #%d: expected a Task-producing \
+                   call, got %s"
+                  (i + 1) (show_ty (zonk tb_ty)))));
+          (tb, elem))
+          branches
+      in
+      let typed_branches = List.map fst typed_branches_and_tys in
+      let elem_tys = List.map snd typed_branches_and_tys in
+      let result_tys = List.map (fun t -> TyApp ("Result", [t])) elem_tys in
+      let result_ty = TyTuple result_tys in
+      (T.TEAwaitAll (typed_branches, result_ty, elem_tys), result_ty)
+
+  | ETuple es ->
+      if List.length es < 2 then
+        raise (Type_error
+          "tuple literal needs at least 2 elements");
+      let typed = List.map (fun e -> infer env tparams vars e) es in
+      let result_ty = TyTuple (List.map snd typed) in
+      (T.TETuple (List.map fst typed, result_ty), result_ty)
+
+  | ETupleIdx (e, i) ->
+      let (te, te_ty) = infer env tparams vars e in
+      (match prune te_ty with
+       | TyTuple ts ->
+           if i < 0 || i >= List.length ts then
+             raise (Type_error
+               (Printf.sprintf
+                  "tuple index %d out of range for %s"
+                  i (show_ty (zonk te_ty))));
+           let comp_ty = List.nth ts i in
+           (T.TETupleIdx (te, i, comp_ty), comp_ty)
+       | _ ->
+           raise (Type_error
+             (Printf.sprintf
+                "`.%d` requires a tuple, got %s"
+                i (show_ty (zonk te_ty)))))
+
+  | ELetTuple (names, value, body) ->
+      List.iter (fun n ->
+        if n <> "_" then check_not_c_reserved "let-binding" n) names;
+      let (tv, tv_ty) = infer env tparams vars value in
+      let elem_metas =
+        List.map (fun _ -> TyMeta (fresh_meta ())) names
+      in
+      let expected = TyTuple elem_metas in
+      (try unify tv_ty expected
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "`let (...) = e`: expected a %d-tuple, got %s"
+              (List.length names) (show_ty (zonk tv_ty)))));
+      (* Each named (non-underscore) binder enters the body scope. *)
+      let binders = List.combine names elem_metas in
+      let body_vars =
+        List.fold_left (fun acc (n, t) ->
+          if n = "_" then acc else (n, (t, false)) :: acc)
+          vars binders
+      in
+      let (tb, tb_ty) = infer env tparams body_vars body in
+      (* Per-binder auto_drop: a linear component takes ownership of its
+         slot, so when the let scope ends we drop each that's still
+         live.  Underscore components are dropped immediately (well —
+         a linear component bound to `_` would silently leak; the move
+         check below allocates a fresh `_drop_N` name for it). *)
+      let auto_drops =
+        List.map (fun (n, t) ->
+          if n = "_" then false else is_linear_ty t)
+          binders
+      in
+      let names_actual =
+        List.map (fun (n, t) ->
+          if n = "_" && is_linear_ty t then begin
+            incr drop_name_counter;
+            Printf.sprintf "_tuple_drop_%d" !drop_name_counter
+          end else n)
+          binders
+      in
+      (T.TELetTuple (names_actual, tv_ty, tv, tb, tb_ty, auto_drops), tb_ty)
+
+  | EForStream (x, src_e, body_e) ->
+      if x <> "_" then check_not_c_reserved "for-binder" x;
+      let (tsrc, tsrc_ty) = infer env tparams vars src_e in
+      let elem = TyMeta (fresh_meta ()) in
+      (try unify tsrc_ty (TyApp ("Stream", [elem]))
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "`for %s in <expr>`: stream source must be Stream[T], got %s"
+              x (show_ty (zonk tsrc_ty)))));
+      let body_vars =
+        if x = "_" then vars else (x, (elem, false)) :: vars
+      in
+      (* The for-stream body is a loop body — break/continue are
+         allowed inside it. Track depth so the checker accepts them. *)
+      incr loop_depth;
+      let (tbody, _tbody_ty) = infer env tparams body_vars body_e in
+      decr loop_depth;
+      (* Body is statement-shaped — its value is discarded each
+         iteration. We don't unify with int because users may write
+         `break;` or other ints. The whole `for` returns int 0. *)
+      (T.TEForStream (x, elem, tsrc, tbody), TyInt)
+
+  | EPrint (nl, inner) -> infer_print env tparams vars nl inner
+
+  | EAwaitAllDyn coll_e ->
+      (* `await all coll` requires coll : Array[Task[T]], returns
+         Array[Result[T]] — each Task is awaited, each result wrapped
+         in Result the same way `await Task[T]` would. The original
+         array is consumed (linear) by the join. *)
+      let (tc, tc_ty) = infer env tparams vars coll_e in
+      let elem = TyMeta (fresh_meta ()) in
+      (try unify tc_ty (TyApp ("Array", [TyApp ("Task", [elem])]))
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "`await all <coll>` expects coll : Array[Task[T]], got %s"
+              (show_ty (zonk tc_ty)))));
+      let wrapped = TyApp ("Result", [elem]) in
+      let result_ty = TyApp ("Array", [wrapped]) in
+      (T.TEAwait (tc, result_ty, elem), result_ty)
+
+and is_printable_ty (t : ty) : bool =
+  match zonk t with
+  | TyInt | TyBool -> true
+  | TyApp ("byte", []) | TyApp ("u16", []) | TyApp ("u32", [])
+  | TyApp ("u64", []) | TyApp ("float", []) -> true
+  | TyApp ("Array", [TyApp ("byte", [])]) -> true
+  | _ -> false
+
+and infer_print env tparams vars nl inner =
+  (* println/print accepts either a tuple literal `(e1, e2, ..., en)`
+     where each component is a printable type, or a single printable
+     scalar.  We flatten to a parallel (exprs, tys) pair so emit can
+     just walk one list. *)
+  let parts =
+    match inner with
+    | ETuple es -> es
+    | other     -> [other]
+  in
+  if parts = [] then
+    raise (Type_error "print/println: empty tuple is not allowed");
+  let texprs_tys = List.map (fun e ->
+    let (te, t) = infer env tparams vars e in
+    let zt = zonk t in
+    if not (is_printable_ty zt) then
+      raise (Type_error
+        (Printf.sprintf
+           "print/println: component of type %s is not printable. \
+            Allowed: int, bool, byte, u16, u32, u64, float, Array[byte]"
+           (show_ty zt)));
+    (te, zt)) parts
+  in
+  let texprs, tys = List.split texprs_tys in
+  (T.TEPrint (nl, texprs, tys), TyInt)
 
 and check_args env tparams vars callee_name param_tys args : T.expr list =
   let n_expected = List.length param_tys in
@@ -1199,80 +2172,15 @@ and check_args env tparams vars callee_name param_tys args : T.expr list =
 
 and validate_ty_for_ascription
   (env : env) (tparams : string list) (t : ty) : ty =
-  match t with
-  | TyInt | TyBool -> t
-  | TyVar _ -> t
-  | TyMeta _ -> t
-  | TyApp (n, args) ->
-      let args = List.map (validate_ty_for_ascription env tparams) args in
-      List.iter (fun arg ->
-        if ty_contains_own arg then
-          raise (Type_error
-            (Printf.sprintf
-               "Own[_] is not allowed as a type argument of %S — \
-                Own must be a top-level type of a name, not nested in data"
-               n))) args;
-      if List.mem n tparams then begin
-        if args <> [] then
-          raise (Type_error
-            (Printf.sprintf
-               "type parameter %S cannot take type arguments" n));
-        TyVar n
-      end else if n = "Array" then begin
-        if List.length args <> 1 then
-          raise (Type_error
-            (Printf.sprintf
-               "Array expects exactly 1 type argument, got %d"
-               (List.length args)));
-        TyApp ("Array", args)
-      end else if n = "Buf" then begin
-        if List.length args <> 1 then
-          raise (Type_error
-            (Printf.sprintf
-               "Buf expects exactly 1 type argument, got %d"
-               (List.length args)));
-        TyApp ("Buf", args)
-      end else if n = "Region" then begin
-        if List.length args <> 0 then
-          raise (Type_error
-            (Printf.sprintf
-               "Region takes no type arguments, got %d"
-               (List.length args)));
-        TyApp ("Region", [])
-      end else
-        (match List.assoc_opt n env.types with
-         | Some td ->
-             let expected = List.length td.type_params in
-             let got = List.length args in
-             if expected <> got then
-               raise (Type_error
-                 (Printf.sprintf
-                    "type %S expects %d type argument(s), got %d"
-                    n expected got));
-             TyApp (n, args)
-         | None ->
-             (match List.assoc_opt n env.records with
-              | Some rd ->
-                  let expected = List.length rd.rec_type_params in
-                  let got = List.length args in
-                  if expected <> got then
-                    raise (Type_error
-                      (Printf.sprintf
-                         "type %S expects %d type argument(s), got %d"
-                         n expected got));
-                  TyApp (n, args)
-              | None ->
-                  raise (Type_error
-                    (Printf.sprintf "unknown type %S" n))))
-  | TyFun (args, ret) ->
-      TyFun (List.map (validate_ty_for_ascription env tparams) args,
-             validate_ty_for_ascription env tparams ret)
+  (* Same validation as during build_env, just routed through the env
+     record (which already holds type_env and record_env). *)
+  validate_ty env.types env.records tparams t
 
 (* ---------- zonk the typed AST ---------- *)
 
 let rec zonk_expr (e : T.expr) : T.expr =
   match e with
-  | T.TEInt _ | T.TEBool _ -> e
+  | T.TEInt _ | T.TEFloat _ | T.TEBool _ | T.TEStringLit _ -> e
   | T.TEVar (x, t) -> T.TEVar (x, zonk_expect t)
   | T.TEFnRef (name, ts, fn_ty) ->
       T.TEFnRef (name, List.map zonk_expect ts, zonk_expect fn_ty)
@@ -1298,23 +2206,67 @@ let rec zonk_expr (e : T.expr) : T.expr =
       T.TELet (x, zonk_expect vt, zonk_expr v,
                zonk_expr b, zonk_expect bt, ad)
   | T.TEMatch (s, st, arms, rt) ->
-      let arms = List.map (fun (p, b) -> (p, zonk_expr b)) arms in
+      let arms = List.map (fun (p, g, b) ->
+        (p, Option.map zonk_expr g, zonk_expr b)) arms
+      in
       T.TEMatch (zonk_expr s, zonk_expect st, arms, zonk_expect rt)
   | T.TEArray (r, n, v, t) ->
       T.TEArray (zonk_expr r, zonk_expr n, zonk_expr v, zonk_expect t)
   | T.TEArrayLit (r, elems, t) ->
       T.TEArrayLit (zonk_expr r, List.map zonk_expr elems, zonk_expect t)
-  | T.TEBuf (n, v, t) ->
-      T.TEBuf (zonk_expr n, zonk_expr v, zonk_expect t)
-  | T.TEBufLit (elems, t) ->
-      T.TEBufLit (List.map zonk_expr elems, zonk_expect t)
   | T.TERegion (n, t) -> T.TERegion (zonk_expr n, zonk_expect t)
+  | T.TEStackRegion (n, t) ->
+      T.TEStackRegion (zonk_expr n, zonk_expect t)
+  | T.TEAlignedRegion (n, a, t) ->
+      T.TEAlignedRegion (zonk_expr n, zonk_expr a, zonk_expect t)
   | T.TEIndex (a, i, t) ->
       T.TEIndex (zonk_expr a, zonk_expr i, zonk_expect t)
   | T.TEAssignIdx (a, i, v, t) ->
       T.TEAssignIdx (zonk_expr a, zonk_expr i, zonk_expr v, zonk_expect t)
   | T.TELen (e, t) ->
       T.TELen (zonk_expr e, zonk_expect t)
+  | T.TESlice (a, lo, hi, t) ->
+      T.TESlice (zonk_expr a, zonk_expr lo, zonk_expr hi, zonk_expect t)
+  | T.TEToInt e  -> T.TEToInt (zonk_expr e)
+  | T.TEToByte e -> T.TEToByte (zonk_expr e)
+  | T.TEToU16 e  -> T.TEToU16 (zonk_expr e)
+  | T.TEToU32 e  -> T.TEToU32 (zonk_expr e)
+  | T.TEToU64 e  -> T.TEToU64 (zonk_expr e)
+  | T.TEToFloat e -> T.TEToFloat (zonk_expr e)
+  | T.TEToIntFromFloat e -> T.TEToIntFromFloat (zonk_expr e)
+  | T.TECAlloc (et, n, rt) ->
+      T.TECAlloc (zonk_expect et, zonk_expr n, zonk_expect rt)
+  | T.TECFree e -> T.TECFree (zonk_expr e)
+  | T.TENullPtr t -> T.TENullPtr (zonk_expect t)
+  | T.TEIsNull e -> T.TEIsNull (zonk_expr e)
+  | T.TEArrayData (a, t) -> T.TEArrayData (zonk_expr a, zonk_expect t)
+  | T.TEDeref (p, t) -> T.TEDeref (zonk_expr p, zonk_expect t)
+  | T.TEAssign (x, v, t) -> T.TEAssign (x, zonk_expr v, zonk_expect t)
+  | T.TEWhile (c, b) -> T.TEWhile (zonk_expr c, zonk_expr b)
+  | T.TEBreak | T.TEContinue -> e
+  | T.TEReturn (v, t) -> T.TEReturn (zonk_expr v, zonk_expect t)
+  | T.TETryAt (a, i, t) ->
+      T.TETryAt (zonk_expr a, zonk_expr i, zonk_expect t)
+  | T.TEDrop (e, t) ->
+      T.TEDrop (zonk_expr e, zonk_expect t)
+  | T.TEAwait (e, t, p) ->
+      T.TEAwait (zonk_expr e, zonk_expect t, zonk_expect p)
+  | T.TESpawn (e, t) ->
+      T.TESpawn (zonk_expr e, zonk_expect t)
+  | T.TEForStream (x, et, s, b) ->
+      T.TEForStream (x, zonk_expect et, zonk_expr s, zonk_expr b)
+  | T.TETuple (es, t) ->
+      T.TETuple (List.map zonk_expr es, zonk_expect t)
+  | T.TETupleIdx (e, i, t) ->
+      T.TETupleIdx (zonk_expr e, i, zonk_expect t)
+  | T.TELetTuple (ns, vt, v, b, bt, ads) ->
+      T.TELetTuple (ns, zonk_expect vt, zonk_expr v,
+                    zonk_expr b, zonk_expect bt, ads)
+  | T.TEAwaitAll (bs, t, ptys) ->
+      T.TEAwaitAll (List.map zonk_expr bs, zonk_expect t,
+                    List.map zonk_expect ptys)
+  | T.TEPrint (nl, es, ts) ->
+      T.TEPrint (nl, List.map zonk_expr es, List.map zonk_expect ts)
 
 and zonk_expect (t : ty) : ty =
   let t = zonk t in
@@ -1323,6 +2275,8 @@ and zonk_expect (t : ty) : ty =
     | TyApp (_, args) -> List.exists has_unresolved args
     | TyFun (args, ret) ->
         List.exists has_unresolved args || has_unresolved ret
+    | TyPtr inner -> has_unresolved inner
+    | TyTuple ts -> List.exists has_unresolved ts
     | TyMeta _ -> true
   in
   if has_unresolved t then
@@ -1352,7 +2306,7 @@ module SM = Map.Make (String)
 let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.expr)
   : T.expr * ty SM.t =
   match e with
-  | T.TEInt _ | T.TEBool _ | T.TEFnRef _ -> (e, live)
+  | T.TEInt _ | T.TEFloat _ | T.TEBool _ | T.TEStringLit _ | T.TEFnRef _ -> (e, live)
 
   | T.TEVar (x, t) ->
       if not (SM.mem x live) then
@@ -1361,7 +2315,7 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
              "use of moved name %S — its ownership was transferred earlier"
              x));
       let live' =
-        if in_tail && not (is_copyable env t) then SM.remove x live
+        if in_tail && is_linear_ty t then SM.remove x live
         else live
       in
       (e, live')
@@ -1391,21 +2345,21 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
   | T.TECall (callee, args, ty) ->
       let (callee', live) = check_moves_expr env live false callee in
       let (args_rev, live) = List.fold_left (fun (acc, live) a ->
-        let (a', live) = consume_arg env live a in
+        let (a', live) = check_moves_expr env live false a in
         (a' :: acc, live)) ([], live) args
       in
       (T.TECall (callee', List.rev args_rev, ty), live)
 
   | T.TECtor (c, ts, args, ty) ->
       let (args_rev, live) = List.fold_left (fun (acc, live) a ->
-        let (a', live) = consume_arg env live a in
+        let (a', live) = check_moves_expr env live false a in
         (a' :: acc, live)) ([], live) args
       in
       (T.TECtor (c, ts, List.rev args_rev, ty), live)
 
   | T.TERecord (n, ts, fields, ty) ->
       let (fields_rev, live) = List.fold_left (fun (acc, live) (f, e) ->
-        let (e', live) = consume_arg env live e in
+        let (e', live) = check_moves_expr env live false e in
         ((f, e') :: acc, live)) ([], live) fields
       in
       (T.TERecord (n, ts, List.rev fields_rev, ty), live)
@@ -1427,7 +2381,7 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       (T.TEIf (cond', t', el', ty), live_t)
 
   | T.TELet (x, vt, v, b, bt, ad) ->
-      let (v', live) = consume_arg env live v in
+      let (v', live) = check_moves_expr env live false v in
       if x = "_" then
         let (b', live) = check_moves_expr env live in_tail b in
         (T.TELet ("_", vt, v', b', bt, ad), live)
@@ -1435,19 +2389,26 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
         let outer_had = SM.find_opt x live in
         let live_inner = SM.add x vt live in
         let (b', live_after) = check_moves_expr env live_inner in_tail b in
+        (* If x was consumed somewhere in the body (drop, tail-return),
+           it's no longer in live_after — skip the scope-end auto-drop
+           to avoid double-free. *)
+        let ad' = if ad && not (SM.mem x live_after) then false else ad in
         let live_final = match outer_had with
           | Some t -> SM.add x t live_after
           | None -> SM.remove x live_after
         in
-        (T.TELet (x, vt, v', b', bt, ad), live_final)
+        (T.TELet (x, vt, v', b', bt, ad'), live_final)
 
   | T.TEMatch (scrut, scrut_ty, arms, ty) ->
       let (scrut', live) = check_moves_expr env live false scrut in
       (* Compute binding types for each pattern by substituting the
          scrutinee's concrete type arguments into the ctor's arg types. *)
-      let arm_data = List.map (fun (pat, body) ->
+      let arm_data = List.map (fun (pat, guard, body) ->
         let names_tys = match pat with
-          | PWild -> []
+          | POr _ -> []
+          | PInt _ | PBool _ | PStr _ -> []
+          | PBind "_" -> []
+          | PBind x -> [(x, scrut_ty)]
           | PCtor (c, vs) ->
               let info = List.assoc c env.ctors in
               let scrut_now = prune scrut_ty in
@@ -1461,6 +2422,23 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
               in
               List.filter (fun (v, _) -> v <> "_")
                 (List.combine vs arg_tys)
+          | PTuple ps ->
+              let comp_tys = match prune scrut_ty with
+                | TyTuple ts -> ts
+                | _ -> []
+              in
+              let rec collect acc p t =
+                match p with
+                | PBind "_" -> acc
+                | PBind x -> (x, t) :: acc
+                | PTuple sub_ps ->
+                    let sub_ts = match prune t with
+                      | TyTuple ts -> ts | _ -> []
+                    in
+                    List.fold_left2 collect acc sub_ps sub_ts
+                | _ -> acc
+              in
+              List.fold_left2 collect [] ps comp_tys
         in
         let outer_had =
           List.map (fun (v, _) -> (v, SM.find_opt v live)) names_tys
@@ -1468,20 +2446,26 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
         let live_arm =
           List.fold_left (fun l (v, t) -> SM.add v t l) live names_tys
         in
+        let (guard', live_after_guard) = match guard with
+          | None -> (None, live_arm)
+          | Some g ->
+              let (g', live') = check_moves_expr env live_arm false g in
+              (Some g', live')
+        in
         let (body', live_after) =
-          check_moves_expr env live_arm in_tail body
+          check_moves_expr env live_after_guard in_tail body
         in
         let live_after_restore = List.fold_left (fun l (v, prev) ->
           match prev with
           | Some t -> SM.add v t l
           | None -> SM.remove v l) live_after outer_had
         in
-        (pat, body', live_after_restore)
+        (pat, guard', body', live_after_restore)
       ) arms in
       (match arm_data with
        | [] -> (T.TEMatch (scrut', scrut_ty, [], ty), live)
-       | (_, _, first_live) :: rest ->
-           List.iteri (fun i (_, _, l) ->
+       | (_, _, _, first_live) :: rest ->
+           List.iteri (fun i (_, _, _, l) ->
              if not (SM.equal (fun _ _ -> true) first_live l) then
                raise (Type_error
                  (Printf.sprintf
@@ -1492,7 +2476,7 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
                     (i + 2)
                     (String.concat ", " (List.map fst (SM.bindings l))))))
              rest;
-           let arms' = List.map (fun (p, b, _) -> (p, b)) arm_data in
+           let arms' = List.map (fun (p, g, b, _) -> (p, g, b)) arm_data in
            (T.TEMatch (scrut', scrut_ty, arms', ty), first_live))
 
   | T.TEArray (r, n, v, ty) ->
@@ -1509,21 +2493,18 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       in
       (T.TEArrayLit (r', List.rev elems_rev, ty), live)
 
-  | T.TEBuf (n, v, ty) ->
-      let (n', live) = check_moves_expr env live false n in
-      let (v', live) = check_moves_expr env live false v in
-      (T.TEBuf (n', v', ty), live)
-
-  | T.TEBufLit (elems, ty) ->
-      let (elems_rev, live) = List.fold_left (fun (acc, l) e ->
-        let (e', l) = check_moves_expr env l false e in
-        (e' :: acc, l)) ([], live) elems
-      in
-      (T.TEBufLit (List.rev elems_rev, ty), live)
-
   | T.TERegion (n, ty) ->
       let (n', live) = check_moves_expr env live false n in
       (T.TERegion (n', ty), live)
+
+  | T.TEStackRegion (n, ty) ->
+      let (n', live) = check_moves_expr env live false n in
+      (T.TEStackRegion (n', ty), live)
+
+  | T.TEAlignedRegion (n, a, ty) ->
+      let (n', live) = check_moves_expr env live false n in
+      let (a', live) = check_moves_expr env live false a in
+      (T.TEAlignedRegion (n', a', ty), live)
 
   | T.TEIndex (a, i, ty) ->
       let (a', live) = check_moves_expr env live false a in
@@ -1533,27 +2514,286 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
   | T.TEAssignIdx (a, i, v, ty) ->
       let (a', live) = check_moves_expr env live false a in
       let (i', live) = check_moves_expr env live false i in
-      let (v', live) = consume_arg env live v in
+      let (v', live) = check_moves_expr env live false v in
       (T.TEAssignIdx (a', i', v', ty), live)
 
   | T.TELen (sub, ty) ->
       let (sub', live) = check_moves_expr env live false sub in
       (T.TELen (sub', ty), live)
 
-and consume_arg (env : env) (live : ty SM.t) (e : T.expr)
-  : T.expr * ty SM.t =
-  let (e', live) = check_moves_expr env live false e in
-  match e' with
-  | T.TEVar (x, t) when not (is_copyable env t) -> (e', SM.remove x live)
-  | _ -> (e', live)
+  | T.TESlice (a, lo, hi, ty) ->
+      let (a', live)  = check_moves_expr env live false a in
+      let (lo', live) = check_moves_expr env live false lo in
+      let (hi', live) = check_moves_expr env live false hi in
+      (T.TESlice (a', lo', hi', ty), live)
+
+  | T.TEToInt sub ->
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TEToInt sub', live)
+
+  | T.TEToByte sub ->
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TEToByte sub', live)
+
+  | T.TEToU16 sub ->
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TEToU16 sub', live)
+
+  | T.TEToU32 sub ->
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TEToU32 sub', live)
+
+  | T.TEToU64 sub ->
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TEToU64 sub', live)
+
+  | T.TEToFloat sub ->
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TEToFloat sub', live)
+
+  | T.TEToIntFromFloat sub ->
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TEToIntFromFloat sub', live)
+
+  | T.TECAlloc (et, n, rt) ->
+      let (n', live) = check_moves_expr env live false n in
+      (T.TECAlloc (et, n', rt), live)
+
+  | T.TECFree p ->
+      let (p', live) = check_moves_expr env live false p in
+      (T.TECFree p', live)
+
+  | T.TENullPtr _ -> (e, live)
+
+  | T.TEIsNull p ->
+      let (p', live) = check_moves_expr env live false p in
+      (T.TEIsNull p', live)
+
+  | T.TEArrayData (a, t) ->
+      let (a', live) = check_moves_expr env live false a in
+      (T.TEArrayData (a', t), live)
+
+  | T.TEDeref (p, t) ->
+      let (p', live) = check_moves_expr env live false p in
+      (T.TEDeref (p', t), live)
+
+  | T.TEAssign (x, v, t) ->
+      let (v', live) = check_moves_expr env live false v in
+      (T.TEAssign (x, v', t), live)
+
+  | T.TEWhile (c, b) ->
+      let (c', live) = check_moves_expr env live false c in
+      let (b', live) = check_moves_expr env live false b in
+      (T.TEWhile (c', b'), live)
+
+  | T.TEBreak | T.TEContinue -> (e, live)
+
+  | T.TEReturn (v, t) ->
+      let (v', live) = check_moves_expr env live false v in
+      (T.TEReturn (v', t), live)
+
+  | T.TETryAt (a, i, t) ->
+      let (a', live) = check_moves_expr env live false a in
+      let (i', live) = check_moves_expr env live false i in
+      (T.TETryAt (a', i', t), live)
+
+  | T.TEDrop (sub, t) ->
+      let (sub', live) = check_moves_expr env live false sub in
+      (* Explicit drop of a bare variable consumes it. After drop, the
+         name is no longer live (use-after-drop is a compile error). *)
+      let live = match sub' with
+        | T.TEVar (x, _) when is_linear_ty t -> SM.remove x live
+        | _ -> live
+      in
+      (T.TEDrop (sub', t), live)
+
+  | T.TEAwait (sub, t, p) ->
+      (* await consumes the Task/Stream-shaped operand: if the inner
+         expression is a bare linear name, retire it (await-after-await
+         on the same handle is a compile error). For Stream the inner
+         handle stays live across multiple awaits — but the phase-2
+         surface only types it; multishot semantics arrive with
+         `for x in stream` in phase 6. Treat both uniformly: consume. *)
+      let (sub', live) = check_moves_expr env live false sub in
+      let live = match sub' with
+        | T.TEVar (x, vt) when is_linear_ty vt -> SM.remove x live
+        | _ -> live
+      in
+      (T.TEAwait (sub', t, p), live)
+
+  | T.TESpawn (sub, t) ->
+      (* spawn evaluates its inner call — any owned values flowing in
+         are consumed by the call as usual. The resulting Task[T] is
+         freshly created here. *)
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TESpawn (sub', t), live)
+
+  | T.TEForStream (x, et, src, body) ->
+      (* The stream source is consumed by the loop: a bare linear
+         name passed in is retired (like await on a Task). The binder
+         is in scope only for the body. *)
+      let (src', live) = check_moves_expr env live false src in
+      let live = match src' with
+        | T.TEVar (sx, vt) when is_linear_ty vt -> SM.remove sx live
+        | _ -> live
+      in
+      let outer_had = if x = "_" then None else SM.find_opt x live in
+      let live_body =
+        if x = "_" then live else SM.add x et live
+      in
+      let (body', live_after) =
+        check_moves_expr env live_body false body
+      in
+      let live_after =
+        if x = "_" then live_after
+        else
+          match outer_had with
+          | Some t -> SM.add x t live_after
+          | None -> SM.remove x live_after
+      in
+      (T.TEForStream (x, et, src', body'), live_after)
+
+  | T.TETuple (es, ty) ->
+      let (es_rev, live) = List.fold_left (fun (acc, l) e ->
+        let (e', l) = check_moves_expr env l false e in
+        (e' :: acc, l)) ([], live) es
+      in
+      (T.TETuple (List.rev es_rev, ty), live)
+
+  | T.TETupleIdx (sub, i, ty) ->
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TETupleIdx (sub', i, ty), live)
+
+  | T.TELetTuple (names, vt, v, b, bt, ads) ->
+      let (v', live) = check_moves_expr env live false v in
+      (* Each named binder enters scope; track outer-shadow so we
+         restore on scope exit. Underscores aren't tracked. *)
+      let outer_had =
+        List.map (fun n -> (n, SM.find_opt n live)) names
+      in
+      let comp_tys = match prune vt with
+        | TyTuple ts -> ts
+        | _ -> failwith "check_moves_expr TELetTuple: value not TyTuple"
+      in
+      let live_inner =
+        List.fold_left2 (fun acc n t ->
+          if n = "_" then acc else SM.add n t acc) live names comp_tys
+      in
+      let (b', live_after) = check_moves_expr env live_inner in_tail b in
+      let ads' =
+        List.map2 (fun (n, ad) _ ->
+          if ad && n <> "_" && not (SM.mem n live_after) then false else ad)
+          (List.combine names ads) comp_tys
+      in
+      let live_final = List.fold_left (fun acc (n, prev) ->
+        match prev with
+        | Some t -> SM.add n t acc
+        | None -> SM.remove n acc) live_after outer_had
+      in
+      (T.TELetTuple (names, vt, v', b', bt, ads'), live_final)
+
+  | T.TEAwaitAll (branches, t, ptys) ->
+      let (bs_rev, live) = List.fold_left (fun (acc, l) e ->
+        let (e', l) = check_moves_expr env l false e in
+        (e' :: acc, l)) ([], live) branches
+      in
+      (T.TEAwaitAll (List.rev bs_rev, t, ptys), live)
+
+  | T.TEPrint (nl, es, ts) ->
+      let (es_rev, live) = List.fold_left (fun (acc, l) e ->
+        let (e', l) = check_moves_expr env l false e in
+        (e' :: acc, l)) ([], live) es
+      in
+      (T.TEPrint (nl, List.rev es_rev, ts), live)
 
 (* ---------- check a function ---------- *)
 
+(* True if the typed body contains an `await` or `yield` reachable
+   directly — i.e. NOT inside a nested `spawn`. spawn establishes a
+   new frame whose body is its own state machine; its internal
+   await/yield don't promote the surrounding function to async.
+
+   The walk only inspects child nodes that share the same frame —
+   it stops at TESpawn boundaries. *)
+let rec body_has_suspension (e : T.expr) : bool =
+  let open T in
+  match e with
+  | TEAwait _ -> true
+  | TEForStream _ -> true
+  | TESpawn _ -> false
+  | TEInt _ | TEFloat _ | TEBool _ | TEStringLit _
+  | TEVar _ | TEFnRef _ | TEBreak | TEContinue -> false
+  | TENullPtr _ -> false
+  | TECall (f, args, _) ->
+      body_has_suspension f || List.exists body_has_suspension args
+  | TEBinop (_, a, b, _) ->
+      body_has_suspension a || body_has_suspension b
+  | TEUnop (_, a, _) -> body_has_suspension a
+  | TECtor (_, _, args, _) -> List.exists body_has_suspension args
+  | TERecord (_, _, fields, _) ->
+      List.exists (fun (_, e) -> body_has_suspension e) fields
+  | TEField (e, _, _) -> body_has_suspension e
+  | TEIf (c, t, e, _) ->
+      body_has_suspension c
+      || body_has_suspension t || body_has_suspension e
+  | TELet (_, _, v, b, _, _) ->
+      body_has_suspension v || body_has_suspension b
+  | TEMatch (s, _, arms, _) ->
+      body_has_suspension s
+      || List.exists (fun (_, g, b) ->
+           (match g with None -> false | Some g -> body_has_suspension g)
+           || body_has_suspension b) arms
+  | TEArray (r, n, v, _) ->
+      body_has_suspension r
+      || body_has_suspension n || body_has_suspension v
+  | TEArrayLit (r, es, _) ->
+      body_has_suspension r || List.exists body_has_suspension es
+  | TERegion (n, _) -> body_has_suspension n
+  | TEStackRegion (n, _) -> body_has_suspension n
+  | TEAlignedRegion (n, a, _) ->
+      body_has_suspension n || body_has_suspension a
+  | TEIndex (a, i, _) ->
+      body_has_suspension a || body_has_suspension i
+  | TEAssignIdx (a, i, v, _) ->
+      body_has_suspension a
+      || body_has_suspension i || body_has_suspension v
+  | TELen (e, _) -> body_has_suspension e
+  | TESlice (a, lo, hi, _) ->
+      body_has_suspension a
+      || body_has_suspension lo || body_has_suspension hi
+  | TEToInt e | TEToByte e | TEToFloat e | TEToIntFromFloat e
+  | TEToU16 e | TEToU32 e | TEToU64 e ->
+      body_has_suspension e
+  | TECAlloc (_, n, _) -> body_has_suspension n
+  | TECFree e -> body_has_suspension e
+  | TEIsNull e -> body_has_suspension e
+  | TEArrayData (a, _) -> body_has_suspension a
+  | TEDeref (p, _) -> body_has_suspension p
+  | TEAssign (_, v, _) -> body_has_suspension v
+  | TEWhile (c, b) ->
+      body_has_suspension c || body_has_suspension b
+  | TEReturn (v, _) -> body_has_suspension v
+  | TETryAt (a, i, _) ->
+      body_has_suspension a || body_has_suspension i
+  | TEDrop (e, _) -> body_has_suspension e
+  | TETuple (es, _) -> List.exists body_has_suspension es
+  | TETupleIdx (e, _, _) -> body_has_suspension e
+  | TELetTuple (_, _, v, b, _, _) ->
+      body_has_suspension v || body_has_suspension b
+  | TEAwaitAll _ -> true
+  | TEPrint (_, es, _) -> List.exists body_has_suspension es
+
 let check_func (env : env) (f : func) : T.func =
   let (_, (param_tys, ret_ty)) = List.assoc f.name env.fns in
-  let vars = List.combine (List.map fst f.params) param_tys in
+  loop_depth := 0;
+  current_return_ty := Some ret_ty;
+  let vars =
+    List.combine (List.map fst f.params)
+      (List.map (fun t -> (t, false)) param_tys)
+  in
   let tparams = f.type_params in
   let (tbody, tbody_ty) = infer env tparams vars f.body in
+  current_return_ty := None;
   (try unify ret_ty tbody_ty
    with Type_error _ ->
      raise (Type_error
@@ -1561,39 +2801,25 @@ let check_func (env : env) (f : func) : T.func =
           "function %S: body has type %s, declared return type is %s"
           f.name (show_ty (zonk tbody_ty)) (show_ty (zonk ret_ty)))));
   let tbody = zonk_expr tbody in
-  (* A parameter of type Own[T] has its scope = the whole body. If the
-     body doesn't move ownership out, the cell must be freed before
-     the function returns. We express this by wrapping the body in a
-     `let p = p; body` for each such parameter — the outer TELet's
-     auto_drop flag reuses the ordinary let-binding drop machinery.
-     fold_right keeps the first parameter outermost, giving LIFO drop
-     order. Alpha-rename later gives the inner p a fresh C name. *)
-  let tbody_ty = zonk tbody_ty in
   let param_tys = List.map zonk param_tys in
-  let body_with_drops =
-    List.fold_right (fun (pname, pty) acc ->
-      match prune pty with
-      | TyApp ("Region", _)
-        when not (is_consumed env pname acc) ->
-          T.TELet (pname, pty, T.TEVar (pname, pty),
-                   acc, tbody_ty, true)
-      | _ -> acc)
-      (List.combine (List.map fst f.params) param_tys)
-      tbody
-  in
+  (* Linear params (Region and user `linear` types) are borrowed from
+     the caller — caller's creating scope frees them. Callees never
+     drop received linear values, so there is no per-param drop logic
+     in the typed AST. *)
   let initial_live =
     List.fold_left2 (fun m (p, _) t -> SM.add p t m)
       SM.empty f.params param_tys
   in
   let (body_with_moves, _final_live) =
-    check_moves_expr env initial_live true body_with_drops
+    check_moves_expr env initial_live true tbody
   in
   { T.name = f.name;
     T.type_params = f.type_params;
     T.params = List.combine
       (List.map fst f.params) param_tys;
     T.return_ty = ret_ty;
-    T.body = body_with_moves }
+    T.body = body_with_moves;
+    T.is_async = body_has_suspension body_with_moves }
 
 (* ---------- top-level entry ---------- *)
 
@@ -1608,21 +2834,48 @@ let builtin_option_decl : type_decl = {
     { ctor_name = "Some"; arg_tys = [TyVar "T"] };
     { ctor_name = "None"; arg_tys = [] };
   ];
+  is_linear = false;
+}
+
+(* Built-in Result[T] — privileged. Phase 7 of Stage 3 wraps every
+   `await Task[T]` in this so CQE errors surface as Err(errno) rather
+   than a magic negative payload. Users can declare neither `Result`
+   nor `Ok`/`Err`. Err carries int (errno); Ok carries T. *)
+let builtin_result_decl : type_decl = {
+  type_name   = "Result";
+  type_params = ["T"];
+  variants = [
+    { ctor_name = "Ok";  arg_tys = [TyVar "T"] };
+    { ctor_name = "Err"; arg_tys = [TyInt] };
+  ];
+  is_linear = false;
+}
+
+(* `yield` parses to `await orto_nop()`. orto_nop is injected as a
+   builtin extern returning Task[int] so every program can use yield
+   without an explicit import. The C-side implementation lives in
+   the async runtime block we emit (see emit.ml). *)
+let builtin_orto_nop_decl : extern_decl = {
+  ext_name      = "orto_nop";
+  ext_params    = [];
+  ext_return_ty = TyApp ("Task", [TyInt]);
 }
 
 let check (prog : program) : T.program =
   meta_counter := 0;
   drop_name_counter := 0;
-  let (types, records, funcs, externs) = split_program prog in
+  let (types, records, funcs, externs, tests) = split_program prog in
   (* Reject any user attempt to redeclare reserved built-in names. *)
   List.iter (fun (td : type_decl) ->
-    if td.type_name = "Option" || td.type_name = "Ref" then
+    if td.type_name = "Option" || td.type_name = "Ref"
+       || td.type_name = "Result" then
       raise (Type_error
         (Printf.sprintf
            "%S is a reserved built-in type and cannot be redeclared"
            td.type_name))) types;
   List.iter (fun (rd : record_decl) ->
-    if rd.rec_name = "Option" || rd.rec_name = "Ref" then
+    if rd.rec_name = "Option" || rd.rec_name = "Ref"
+       || rd.rec_name = "Result" then
       raise (Type_error
         (Printf.sprintf
            "%S is a reserved built-in type and cannot be redeclared"
@@ -1633,21 +2886,44 @@ let check (prog : program) : T.program =
         raise (Type_error
           (Printf.sprintf
              "%S is a built-in Option constructor and cannot be redeclared"
+             v.ctor_name));
+      if v.ctor_name = "Ok" || v.ctor_name = "Err" then
+        raise (Type_error
+          (Printf.sprintf
+             "%S is a built-in Result constructor and cannot be redeclared"
              v.ctor_name))) td.variants) types;
-  let types = builtin_option_decl :: types in
+  let types = builtin_option_decl :: builtin_result_decl :: types in
+  (* Reject user redeclaration of reserved extern names. *)
+  List.iter (fun (e : extern_decl) ->
+    if e.ext_name = "orto_nop" then
+      raise (Type_error
+        "\"orto_nop\" is a reserved built-in extern (used by `yield`) \
+         and cannot be redeclared")) externs;
+  let externs = builtin_orto_nop_decl :: externs in
   let env = build_env types records funcs externs in
   check_no_recursive_types env.types env.records;
   let typed_funcs = List.map (check_func env) funcs in
   let typed_externs =
     List.map (fun (e : extern_decl) ->
       let (_, (param_tys, ret_ty)) = List.assoc e.ext_name env.fns in
+      (* The calling-convention flags now derive from the declared
+         return type: Task[T] / Stream[T] mean SQE-prep, anything
+         else is an ordinary sync FFI call. *)
+      let is_async = match ret_ty with
+        | TyApp ("Task", _) -> true | _ -> false in
+      let is_stream = match ret_ty with
+        | TyApp ("Stream", _) -> true | _ -> false in
       { T.name = e.ext_name;
         T.params = List.combine (List.map fst e.ext_params) param_tys;
-        T.return_ty = ret_ty }) externs
+        T.return_ty = ret_ty;
+        T.is_async; T.is_stream }) externs
   in
   let resolved_types   = List.map snd env.types in
   let resolved_records = List.map snd env.records in
   (match List.find_opt (fun (f : T.func) -> f.name = "main") typed_funcs with
+   | None when tests <> [] ->
+       ()  (* test-only programs don't need main; driver --test
+              generates a runner main *)
    | None ->
        raise (Type_error "program must define `fn main() -> int`")
    | Some f ->
@@ -1657,7 +2933,30 @@ let check (prog : program) : T.program =
          raise (Type_error "`main` must take no parameters");
        if f.T.return_ty <> TyInt then
          raise (Type_error "`main` must return int"));
+  (* Stage 3 phase 4e: non-main async functions are allowed; they
+     get lowered into a Frame + step + sync wrapper just like main
+     and are reachable via `spawn` (or a direct sync call, which
+     drains the dispatcher locally). *)
+  (* Type-check each test body. Tests must return int — 0 = pass,
+     non-zero = fail with that code as detail. *)
+  let typed_tests =
+    List.map (fun (td : test_decl) ->
+      loop_depth := 0;
+      current_return_ty := Some TyInt;
+      let (tbody, tbody_ty) = infer env [] [] td.test_body in
+      current_return_ty := None;
+      (try unify TyInt tbody_ty
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf
+              "test %S body must return int (0 = pass, !=0 = fail), got %s"
+              td.test_name (show_ty (zonk tbody_ty)))));
+      let tbody = zonk_expr tbody in
+      let (tbody, _) = check_moves_expr env SM.empty true tbody in
+      { T.name = td.test_name; T.body = tbody }) tests
+  in
   { T.types   = resolved_types;
     T.records = resolved_records;
     T.funcs   = typed_funcs;
-    T.externs = typed_externs }
+    T.externs = typed_externs;
+    T.tests   = typed_tests }

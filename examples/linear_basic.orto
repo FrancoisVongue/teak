@@ -1,0 +1,37 @@
+// Tiny test of `linear struct` + drop functions.
+//
+// Pretend Socket — fd is an int but we treat the struct as a resource:
+// alias forbidden, scope-exit drop, all reads explicit.
+
+extern fn putchar(c: int) -> int
+
+linear struct Socket { fd: int }
+
+// Required: every `linear` type must have a matching drop fn in the
+// same module. Compiler errors at the type-decl site if absent.
+fn drop_Socket(s: Socket) -> int {
+    // In a real driver this would call libc close(s.fd).
+    // Here we just print a marker so we can see drop ran.
+    putchar(68);   // 'D'
+    putchar(10 + s.fd - s.fd);   // newline; touch s.fd so the field is used
+    0
+}
+
+fn open_fake() -> Socket {
+    Socket { fd: 7 }
+}
+
+fn use_socket(s: Socket) -> int {
+    putchar(85);             // 'U'
+    putchar(48 + s.fd);      // '7'
+    putchar(10);
+    0
+}
+
+fn main() -> int {
+    let s = open_fake();
+    use_socket(s);           // not consumed — borrow-like
+    use_socket(s);           // still alive — can use again
+    // implicit drop_Socket(s) here at scope exit
+    0
+}

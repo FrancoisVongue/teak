@@ -1,0 +1,60 @@
+// Domain layer on top of db_driver — turns Row tuples into typed
+// Person records, exposes find/search queries used by the app.
+
+use db_driver::{Row, run_query};
+use str::{parse_int, contains_substr};
+
+struct Person {
+    id:    int,
+    name:  Array[byte],
+    email: Array[byte],
+    age:   int,
+}
+
+fn row_to_person(row: Row) -> Person {
+    Person {
+        id:    parse_int(row.cells[0]),
+        name:  row.cells[1],
+        email: row.cells[2],
+        age:   parse_int(row.cells[3]),
+    }
+}
+
+// Load all users from the DB into the given region.
+fn all_users(r: Region) -> Array[Person] {
+    let rows = run_query(r, "SELECT id, name, email, age FROM users");
+    let result = array(r, len(rows),
+        Person { id: 0, name: "", email: "", age: 0 });
+    for i in 0..len(rows) {
+        result[i] := row_to_person(rows[i]);
+    }
+    result
+}
+
+// Linear scan by id. No allocation — returns a copy of the Person
+// record (it's all copyable handles).
+fn find_by_id(users: Array[Person], id: int) -> Option[Person] {
+    for i in 0..len(users) {
+        if users[i].id == id { return Some(users[i]) }
+    }
+    None
+}
+
+// Filter by substring of name. Two-pass: count first, then
+// allocate exactly the right size, then fill.
+fn search_by_name(r: Region, users: Array[Person], needle: Array[byte]) -> Array[Person] {
+    let mut count = 0;
+    for i in 0..len(users) {
+        if contains_substr(users[i].name, needle) { count := count + 1; }
+    }
+    let result = array(r, count,
+        Person { id: 0, name: "", email: "", age: 0 });
+    let mut k = 0;
+    for j in 0..len(users) {
+        if contains_substr(users[j].name, needle) {
+            result[k] := users[j];
+            k := k + 1;
+        }
+    }
+    result
+}

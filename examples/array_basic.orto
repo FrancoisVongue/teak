@@ -2,7 +2,7 @@
 // Регион — это owned arena. Array — копируемая ручка в буфер региона.
 // Когда регион уходит из scope, free buffer одной операцией.
 fn main() -> int {
-    let r = region(1024);
+    arena r = region(1024);
     let a = array(r, [1, 2, 3, 4]);   // массив на 4 int в r
     a[0] + a[1] + a[2] + a[3] + len(a)
     // 1 + 2 + 3 + 4 + 4 = 14

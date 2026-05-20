@@ -1,0 +1,63 @@
+// Side-by-side: Region и user `linear struct Connection` ведут себя
+// одинаково. Все правила про "как файлы" — один владелец, нельзя
+// скопировать, drops at scope-end — применяются единообразно.
+
+extern fn putchar(c: int) -> int
+
+// ---------- user-defined linear, exactly like a file descriptor ----------
+
+linear struct Connection { fd: int }
+
+fn drop_Connection(c: Connection) -> int {
+    // In a real driver: close(c.fd)
+    putchar(67); putchar(10);   // 'C\n' — marker that Connection was dropped
+    0
+}
+
+fn open_db(host: int) -> Connection {
+    Connection { fd: host }
+}
+
+fn query(c: Connection, q: int) -> int {
+    // Borrows c — doesn't consume. Caller still owns.
+    putchar(81); putchar(48 + c.fd); putchar(48 + q); putchar(10);
+    0
+}
+
+// ---------- the same rules apply to Region ----------
+
+fn allocate_some(r: Region) -> int {
+    // Borrows r — doesn't consume. Caller still owns.
+    let a = array(r, [10, 20, 30]);
+    a[0] + a[1] + a[2]
+}
+
+// ---------- demo: both styles, same shape ----------
+
+fn main() -> int {
+    // 1) user linear — Connection behaves like a file descriptor.
+    let c = open_db(7);
+    query(c, 1);     // borrow
+    query(c, 2);     // borrow again — fine
+    // Scope-exit drop fires here for `c` → drop_Connection prints "C\n"
+
+    // 2) Region — exactly the same shape.
+    arena r = region(1024);
+    let sum1 = allocate_some(r);   // borrow
+    let sum2 = allocate_some(r);   // borrow again — fine
+    // Scope-exit drop fires here for `r` → its slab slot returns to free list
+
+    sum1 + sum2 + 0   // 60 + 60 = 120
+}
+
+// What's identical (compiler rejects all of these at compile time
+// for BOTH Region and Connection):
+//
+//   let r2 = r;                  // alias → error
+//   let mut r = ...; r := ...;   // mut → error
+//   struct Wrap { r: Region }    // in data position → error
+//   if cond { drop(r) }          // diverging drop → error
+//
+// In short: "если ты хочешь чем-то работать, то это должно быть у тебя
+// в одном месте на твоем стеке". Yes. Both Region и Connection — exactly
+// one place on your stack.

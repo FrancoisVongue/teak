@@ -1,0 +1,70 @@
+// Float (IEEE 754 double) — basic numeric type for когда нужна
+// дробная часть. В большинстве кода — лучше int. Для физики,
+// геометрии, статистики — float.
+//
+// NaN / Infinity ведут себя по IEEE: NaN не равен сам себе,
+// сравнения с NaN всегда false. Проверка `f != f` ловит NaN
+// (стандартный C-trick).
+
+extern fn putchar(c: int) -> int
+
+fn print_int(n: int) -> int {
+    if n < 0 {
+        putchar(45);   // '-'
+        print_int(0 - n)
+    } else if n < 10 {
+        putchar(48 + n)
+    } else {
+        print_int(n / 10);
+        putchar(48 + (n % 10))
+    }
+}
+
+fn area_of_circle(r: float) -> float {
+    3.14159265 * r * r
+}
+
+// `match` на float запрещён (NaN/zero edge cases). Используем if.
+fn classify(x: float) -> int {
+    if x != x { 0 - 1 }            // NaN check
+    else if x < 0.0 { 0 }
+    else if x == 0.0 { 1 }
+    else if x < 1.0 { 2 }
+    else { 3 }
+}
+
+// Mixing int and float requires explicit conversion.
+fn average(xs: Array[int]) -> float {
+    let mut sum = 0;
+    for i in 0..len(xs) {
+        sum := sum + xs[i];
+    }
+    to_float(sum) / to_float(len(xs))
+}
+
+fn main() -> int {
+    arena r = region(1024);
+
+    // Geometry
+    let a = area_of_circle(2.0);   // ≈ 12.566
+    print_int(to_int(a));
+    putchar(10);                    // newline
+
+    // Mean of [1, 2, 3, 4, 5] = 3.0
+    let xs = array(r, [1, 2, 3, 4, 5]);
+    let m = average(xs);
+    print_int(to_int(m));           // 3
+    putchar(10);
+
+    // NaN handling
+    let bad = 0.0 / 0.0;
+    print_int(classify(bad));      // -1
+    putchar(10);
+
+    // Inf handling — comparisons still work
+    let inf = 1.0 / 0.0;
+    print_int(classify(inf));      // 3 (it's > 1.0)
+    putchar(10);
+
+    0
+}

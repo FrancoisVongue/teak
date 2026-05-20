@@ -9,10 +9,11 @@ struct Bag {
     flag:  bool,
 }
 
-// Records inside an ADT — exercises the cross-product.
-enum Result[T] {
-    Ok(T),
-    Err(Point),
+// Records inside an ADT — exercises the cross-product. Named Either
+// (not Result) since Result[T] is a built-in since Stage 3 phase 7.
+enum Either[T] {
+    This(T),
+    That(Point),
 }
 
 fn dist_sq(p: Point) -> int {
@@ -23,10 +24,10 @@ fn swap[A, B](p: Pair[A, B]) -> Pair[B, A] {
     Pair { fst: p.snd, snd: p.fst }
 }
 
-fn pick(r: Result[Pair[int, int]]) -> int {
+fn pick(r: Either[Pair[int, int]]) -> int {
     match r {
-        Ok(p)  => p.fst + p.snd,
-        Err(q) => q.x + q.y,
+        This(p) => p.fst + p.snd,
+        That(q) => q.x + q.y,
     }
 }
 
@@ -38,8 +39,8 @@ fn main() -> int {
     let sw = swap(pq);
     let a = if sw.fst { sw.snd } else { 0 };  // 7
 
-    let r1 : Result[Pair[int, int]] = Ok(Pair { fst: 10, snd: 20 });
-    let r2 : Result[Pair[int, int]] = Err(Point { x: 1, y: 2 });
+    let r1 : Either[Pair[int, int]] = This(Pair { fst: 10, snd: 20 });
+    let r2 : Either[Pair[int, int]] = That(Point { x: 1, y: 2 });
     let b = pick(r1);                    // 30
     let c = pick(r2);                    // 3
 
