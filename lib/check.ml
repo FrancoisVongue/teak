@@ -1039,6 +1039,15 @@ let rec infer (env : env) (tparams : string list)
         "internal: lambda not lifted before type-checking (compiler bug)")
 
   | EClosure (region_e, params, ret, body) ->
+      (* Validate the lambda's own type annotations against the type
+         params in scope — turns `TyApp("T",[])` into the rigid
+         `TyVar "T"` and checks user type names exist. Without this the
+         lambda's T would never unify with the enclosing scope's T. *)
+      let params =
+        List.map (fun (n, t) ->
+          (n, validate_ty_for_ascription env tparams t)) params
+      in
+      let ret = validate_ty_for_ascription env tparams ret in
       let (tregion, treg_ty) = infer env tparams vars region_e in
       (try unify treg_ty (TyApp ("Region", []))
        with Type_error _ ->
@@ -2914,7 +2923,11 @@ let check_func (env : env) (f : func) : T.func =
            parameter, return and captured types must be concrete"))
       (param_tys @ caps @ [("", ret)]);
     List.iter (fun (n, t) ->
-      if is_linear_ty t then
+      (* A Region handle is a gen-checked observer: capturing a copy is
+         safe because calling the closure after the region is dropped
+         aborts on the generation check, exactly like a stale array
+         handle. Other linear values have no such guard and no copy. *)
+      if is_linear_ty t && not (is_region_ty t) then
         raise (Type_error (Printf.sprintf
           "closure cannot capture %S: it has linear type %s, which has no \
            copy operation (closures capture by copy)" n (show_ty t))))
