@@ -26,23 +26,6 @@ fn each[T](s: Map[T, ()], f: fn(T) -> ()) -> () {
     }
 }
 
-// Print as {a, b, c}. No region — element printer injected (sealed box).
-fn show[T](s: Map[T, ()], show_elem: fn(T) -> ()) -> () {
-    print("{");
-    let mut first = true;
-    let mut i = 0;
-    while i < s.cap {
-        let e = s.slots[i];
-        if e.state == 1 {
-            if !first { print(", "); }
-            show_elem(e.key);
-            first := false;
-        }
-        i := i + 1;
-    }
-    print("}");
-}
-
 // All elements of a, then all of b.
 fn union[T](r: Region, a: Map[T, ()], b: Map[T, ()]) -> Map[T, ()] {
     let zt = a.ze.key;

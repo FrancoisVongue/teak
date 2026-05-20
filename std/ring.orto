@@ -48,15 +48,3 @@ fn each[T](rg: Ring[T], f: fn(T) -> ()) -> () {
         i := i + 1;
     }
 }
-
-// Print as [a, b, c], oldest-first. No region — element printer injected.
-fn show[T](rg: Ring[T], show_elem: fn(T) -> ()) -> () {
-    print("[");
-    let mut i = 0;
-    while i < rg.count {
-        if i > 0 { print(", "); }
-        show_elem(rg.data[(rg.head + i) % rg.cap]);
-        i := i + 1;
-    }
-    print("]");
-}
