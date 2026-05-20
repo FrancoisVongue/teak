@@ -191,3 +191,20 @@ fn index_of[T](v: Vec[T], x: T, eq: fn(T, T) -> bool) -> int {
 fn contains[T](v: Vec[T], x: T, eq: fn(T, T) -> bool) -> bool {
     index_of(v, x, eq) >= 0
 }
+
+// ---------- output ----------
+
+// Print as [e0, e1, ...]. Takes no region: the intrinsic renders scalars
+// on the stack, and `show_elem` writes one element directly. Because T is
+// a sealed box, the per-element printer is injected (same reason cmp/eq
+// are) — there is no automatic Display. No trailing newline, so it nests.
+fn show[T](v: Vec[T], show_elem: fn(T) -> ()) -> () {
+    print("[");
+    let mut i = 0;
+    while i < v.count {
+        if i > 0 { print(", "); }
+        show_elem(v.data[i]);
+        i := i + 1;
+    }
+    print("]");
+}

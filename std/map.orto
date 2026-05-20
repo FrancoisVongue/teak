@@ -172,3 +172,23 @@ fn values[K, V](m: Map[K, V], r: Region, zv: V) -> Vec[V] {
     }
     out
 }
+
+// Print as {k0: v0, k1: v1, ...}. No region — see vec::show. Key and
+// value printers are injected because K and V are sealed boxes.
+fn show[K, V](m: Map[K, V], show_k: fn(K) -> (), show_v: fn(V) -> ()) -> () {
+    print("{");
+    let mut first = true;
+    let mut i = 0;
+    while i < m.cap {
+        let e = m.slots[i];
+        if e.state == 1 {
+            if !first { print(", "); }
+            show_k(e.key);
+            print(": ");
+            show_v(e.val);
+            first := false;
+        }
+        i := i + 1;
+    }
+    print("}");
+}
