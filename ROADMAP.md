@@ -42,6 +42,7 @@
 
 **Типы:**
 - `int`, `bool`, `byte`, `float`, `struct`, `enum`, `fn(...) -> ...`.
+- `()` — unit (пустой кортеж), значение «ничего». Эффекты (`:=`, `while`, `for`, `print`, `if` без `else`) возвращают `()`.
 - `float` — IEEE 754 double (C `double`). NaN/Infinity по IEEE: `x != x` ловит NaN.
 - Generics с параметрами `[T, U, ...]`.
 - Параметрический полиморфизм, monomorphization.
@@ -96,7 +97,7 @@
 - Ветки `if`/`match` обязаны сходиться в одном live-set.
 - Tail-position consume — bare имя в хвосте функции = move.
 - `else if` цепочки без вложенных скобок.
-- `if cond { ... }` без else допустим (implicit else = int 0).
+- `if cond { ... }` без else — statement: выполняет тело ради эффекта, отбрасывает его значение, возвращает `()`.
 - `while cond { body }` — циклы. `break` / `continue` внутри.
 - `for i in lo..hi { ... }` — числовой диапазон (сахар над while).
 - `for x in <ref> { ... }` — обход ячеек `Ref`/слайса по индексу (сахар над while, zero-cost). `for x in <stream>` — drain потока.

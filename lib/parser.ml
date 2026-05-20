@@ -51,8 +51,12 @@ let rec parse_ty st =
   | TU64Ty        -> TyApp ("u64", [])
   | TFloatTy      -> TyApp ("float", [])
   | TLParen       ->
-      (* Tuple type: (T1, T2, ..., Tn) for n >= 2.  A single `(T)` is
-         not supported — drop the parens. *)
+      (* `()` — the unit type (empty tuple). Otherwise a parenthesised
+         type or a tuple type (n >= 2). *)
+      if peek st = TRParen then begin
+        advance st;
+        TyTuple []
+      end else
       let first = parse_ty st in
       (match peek st with
        | TComma ->
@@ -443,8 +447,11 @@ and parse_atom_consume st =
            (e1, e2, ...) — tuple literal, n >= 2 (trailing comma allowed)
          A bare (e,) is rejected — singleton tuples don't add anything
          orthogonal here, and we'd rather grow that later if we need it. *)
-      if peek st = TRParen then
-        raise (Parse_error "`()` is not a valid expression — use a value or 0 for placeholder");
+      if peek st = TRParen then begin
+        (* `()` — the unit value (the empty tuple). *)
+        advance st;
+        ETuple []
+      end else
       let first = parse_expr st in
       (match peek st with
        | TRParen -> advance st; first
@@ -757,11 +764,12 @@ and parse_atom_consume st =
 and parse_if_after_kw st =
   let cond = parse_expr st in
   let then_b = parse_block st in
-  (* `else` is optional. When absent, the implicit else is int 0 —
-     both branches must then unify to int. This is the form used
-     inside loops: `if cond { break }`. *)
+  (* `else` is optional. Without it, `if c { body }` is a conditional
+     statement: it runs body for effect, discards body's value, and the
+     whole thing evaluates to unit `()` — the value of "nothing", which
+     is exactly what the missing else produces. Both branches are unit. *)
   if peek st <> TElse then
-    EIf (cond, then_b, EInt 0)
+    EIf (cond, ELet ("_", false, None, then_b, ETuple []), ETuple [])
   else begin
     advance st;
     (* Support `else if ... { ... }` as sugar for nested if. *)
@@ -978,8 +986,8 @@ and parse_block_body st =
         advance st;
         if peek st = TRBrace then
           (* Trailing `;` discards the last expression's value; the
-             block's result becomes int 0 (placeholder for unit). *)
-          ELet ("_", false, None, e, EInt 0)
+             block's result is unit `()`. *)
+          ELet ("_", false, None, e, ETuple [])
         else
           let rest = parse_block_body st in
           ELet ("_", false, None, e, rest)

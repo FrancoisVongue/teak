@@ -28,6 +28,7 @@ let rec mangle_ty (t : ty) : string =
       in
       String.concat "_" parts
   | TyPtr inner -> "ptr_" ^ mangle_ty inner
+  | TyTuple [] -> "unit"
   | TyTuple ts ->
       "Tuple_" ^ String.concat "_" (List.map mangle_ty ts)
   | TyMeta _ -> failwith "mono: TyMeta after check"

@@ -214,6 +214,7 @@ let rec collect_ty (t : ty) : unit =
   | TyApp (_, []) -> ()
   | TyApp (n, _) ->
       failwith (Printf.sprintf "emit collect_ty: %S still has args" n)
+  | TyTuple [] -> ()   (* unit — represented as C int, no typedef *)
   | TyTuple ts ->
       List.iter collect_ty ts;
       register_tuple (Mono.mangle_ty t) ts
@@ -435,6 +436,7 @@ let rec c_type (t : ty) : string =
   | TyApp (n, []) -> n
   | TyFun _ -> Mono.mangle_ty t
   | TyPtr inner -> c_type inner ^ "*"
+  | TyTuple [] -> "int"   (* unit *)
   | TyTuple _ -> Mono.mangle_ty t
   | TyApp (n, _) ->
       failwith (Printf.sprintf "emit: %S still has type args" n)
@@ -981,21 +983,21 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TEIsNull _ -> TyBool
   | Check.T.TEArrayData (_, t) -> t
   | Check.T.TEDeref (_, t) -> t
-  | Check.T.TEAssign (_, _, _) -> TyInt
-  | Check.T.TEAssignField (_, _, _) -> TyInt
-  | Check.T.TEWhile (_, _) -> TyInt
+  | Check.T.TEAssign (_, _, _) -> TyTuple []
+  | Check.T.TEAssignField (_, _, _) -> TyTuple []
+  | Check.T.TEWhile (_, _) -> TyTuple []
   | Check.T.TEBreak | Check.T.TEContinue -> TyInt
   | Check.T.TEReturn (_, _) -> TyInt
   | Check.T.TETryAt (_, _, t) -> t
-  | Check.T.TEDrop (_, _) -> TyInt
+  | Check.T.TEDrop (_, _) -> TyTuple []
   | Check.T.TEAwait (_, t, _) -> t
   | Check.T.TESpawn (_, t) -> t
-  | Check.T.TEForStream _ -> TyInt
+  | Check.T.TEForStream _ -> TyTuple []
   | Check.T.TETuple (_, t) -> t
   | Check.T.TETupleIdx (_, _, t) -> t
   | Check.T.TELetTuple (_, _, _, _, t, _) -> t
   | Check.T.TEAwaitAll (_, t, _) -> t
-  | Check.T.TEPrint _ -> TyInt
+  | Check.T.TEPrint _ -> TyTuple []
   | Check.T.TEMakeClosure (_, _, _, _, fn_ty) -> fn_ty
 
 (* C name of a lifted closure's environment struct. *)
@@ -1888,6 +1890,10 @@ let rec emit_expr
       failwith "emit TEForStream: `for x in stream { ... }` only \
                 compiles inside an async function — it requires the \
                 state-machine lowering."
+
+  | Check.T.TETuple ([], _) ->
+      (* unit value — represented as C int 0 *)
+      { stmts = []; value = "0" }
 
   | Check.T.TETuple (es, result_ty) ->
       let elem_codes = List.map (emit_expr ctor_map) es in

@@ -622,10 +622,9 @@ let rec validate_ty
   | TyPtr inner ->
       TyPtr (validate_ty type_env record_env in_scope inner)
   | TyTuple ts ->
-      if List.length ts < 2 then
-        raise (Type_error
-          (Printf.sprintf
-             "tuple type needs at least 2 components, got %d" (List.length ts)));
+      if List.length ts = 1 then
+        raise (Type_error "1-component tuple type is not a thing — drop the parens");
+      (* [] is unit `()`; >= 2 is a real tuple. *)
       TyTuple (List.map (validate_ty type_env record_env in_scope) ts)
 
 (* ---------- building environment ---------- *)
@@ -1460,7 +1459,7 @@ let rec infer (env : env) (tparams : string list)
                 (Printf.sprintf
                    "assignment to %S: variable has type %s, value has type %s"
                    x (show_ty (zonk xt)) (show_ty (zonk tv_ty)))));
-           (T.TEAssign (x, tv, xt), TyInt)
+           (T.TEAssign (x, tv, xt), TyTuple [])
        | Some (_, false) ->
            raise (Type_error
              (Printf.sprintf
@@ -1512,7 +1511,7 @@ let rec infer (env : env) (tparams : string list)
                              without `mut`. Use `let mut %s = ...`." rv rv))
                    | None -> ())
               | None -> ());
-           (T.TEAssignField (tplace, fname, tv), TyInt)
+           (T.TEAssignField (tplace, fname, tv), TyTuple [])
        | _ ->
            raise (Type_error
              (Printf.sprintf
@@ -1532,7 +1531,7 @@ let rec infer (env : env) (tparams : string list)
       decr loop_depth;
       (* while never produces a real value; we use int 0 as placeholder
          for "unit" same as a[i] := v. *)
-      (T.TEWhile (tc, tb), TyInt)
+      (T.TEWhile (tc, tb), TyTuple [])
 
   | EBreak ->
       if !loop_depth = 0 then
@@ -1854,7 +1853,7 @@ let rec infer (env : env) (tparams : string list)
              "cannot assign element of Array[%s] — overwriting would \
               either drop or leak the old linear value."
              (show_ty (zonk elem))));
-      (T.TEAssignIdx (ta, ti, tv, TyInt), TyInt)
+      (T.TEAssignIdx (ta, ti, tv, TyTuple []), TyTuple [])
 
   | ELen arr_e ->
       (* len(a) : Array[T] → int. *)
@@ -2069,7 +2068,7 @@ let rec infer (env : env) (tparams : string list)
              "drop() requires a linear value (Region or a user `linear` \
               type), got %s"
              (show_ty (zonk tx_ty))));
-      (T.TEDrop (tx, tx_ty), TyInt)
+      (T.TEDrop (tx, tx_ty), TyTuple [])
 
   (* Stage 3 — concurrency. Phase 2 wires up types for the three
      fundamentals (await / spawn / yield); phases 4+ generate the
@@ -2162,9 +2161,10 @@ let rec infer (env : env) (tparams : string list)
       (T.TEAwaitAll (typed_branches, result_ty, elem_tys), result_ty)
 
   | ETuple es ->
-      if List.length es < 2 then
+      if List.length es = 1 then
         raise (Type_error
-          "tuple literal needs at least 2 elements");
+          "1-element tuple is not a thing — drop the parens");
+      (* [] is the unit value `()`; >= 2 is a real tuple. *)
       let typed = List.map (fun e -> infer env tparams vars e) es in
       let result_ty = TyTuple (List.map snd typed) in
       (T.TETuple (List.map fst typed, result_ty), result_ty)
@@ -2282,7 +2282,7 @@ let rec infer (env : env) (tparams : string list)
            incr loop_depth;
            let (tbody, _tbody_ty) = infer env tparams body_vars body_e in
            decr loop_depth;
-           (T.TEForStream (x, elem, tsrc, tbody), TyInt))
+           (T.TEForStream (x, elem, tsrc, tbody), TyTuple []))
 
   | EPrint (nl, inner) -> infer_print env tparams vars nl inner
 
@@ -2335,7 +2335,7 @@ and infer_print env tparams vars nl inner =
     (te, zt)) parts
   in
   let texprs, tys = List.split texprs_tys in
-  (T.TEPrint (nl, texprs, tys), TyInt)
+  (T.TEPrint (nl, texprs, tys), TyTuple [])
 
 and check_args env tparams vars callee_name param_tys args : T.expr list =
   let n_expected = List.length param_tys in
