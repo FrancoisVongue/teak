@@ -98,7 +98,10 @@
 - `else if` цепочки без вложенных скобок.
 - `if cond { ... }` без else допустим (implicit else = int 0).
 - `while cond { body }` — циклы. `break` / `continue` внутри.
+- `for i in lo..hi { ... }` — числовой диапазон (сахар над while).
+- `for x in <ref> { ... }` — обход ячеек `Ref`/слайса по индексу (сахар над while, zero-cost). `for x in <stream>` — drain потока.
 - `let mut x = ...; x := v;` — изменяемые биндинги. Запрещён `mut` для Region (избегаем утечек через reassign).
+- Присваивание по пути: `x := v`, `a[i] := v`, `s.f := v`, `r[i].f := v`.
 - Trailing `;` перед `}` отбрасывает значение выражения, блок возвращает int 0.
 
 **Модули:**

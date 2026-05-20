@@ -249,6 +249,7 @@ let check_not_c_reserved (kind : string) (name : string) : unit =
 let meta_counter = ref 0
 let drop_name_counter = ref 0
 let lambda_counter = ref 0
+let for_counter = ref 0
 
 (* Closures discovered during inference of the current function. Each is
    finalized (zonked, move-checked) at the end of check_func and turned
@@ -2224,25 +2225,58 @@ let rec infer (env : env) (tparams : string list)
   | EForStream (x, src_e, body_e) ->
       if x <> "_" then check_not_c_reserved "for-binder" x;
       let (tsrc, tsrc_ty) = infer env tparams vars src_e in
-      let elem = TyMeta (fresh_meta ()) in
-      (try unify tsrc_ty (TyApp ("Stream", [elem]))
-       with Type_error _ ->
-         raise (Type_error
-           (Printf.sprintf
-              "`for %s in <expr>`: stream source must be Stream[T], got %s"
-              x (show_ty (zonk tsrc_ty)))));
-      let body_vars =
-        if x = "_" then vars else (x, (elem, false)) :: vars
-      in
-      (* The for-stream body is a loop body — break/continue are
-         allowed inside it. Track depth so the checker accepts them. *)
-      incr loop_depth;
-      let (tbody, _tbody_ty) = infer env tparams body_vars body_e in
-      decr loop_depth;
-      (* Body is statement-shaped — its value is discarded each
-         iteration. We don't unify with int because users may write
-         `break;` or other ints. The whole `for` returns int 0. *)
-      (T.TEForStream (x, elem, tsrc, tbody), TyInt)
+      (match prune tsrc_ty with
+       | TyApp ("Ref", [elem]) ->
+           (* `for x in <ref> { body }` — iterate the segment by index.
+              Lowered here to a plain while loop over existing nodes, so
+              every later pass (async detection, moves, emit) treats it
+              as the ordinary loop it is. *)
+           let body_vars =
+             if x = "_" then vars else (x, (elem, false)) :: vars in
+           incr loop_depth;
+           let (tbody, tbody_ty) = infer env tparams body_vars body_e in
+           decr loop_depth;
+           let n = !for_counter in incr for_counter;
+           let src_name = Printf.sprintf "_for_src_%d" n in
+           let i_name   = Printf.sprintf "_for_i_%d" n in
+           let src_ty = TyApp ("Ref", [elem]) in
+           let i_var = T.TEVar (i_name, TyInt) in
+           let src_var = T.TEVar (src_name, src_ty) in
+           let elem_e = T.TEIndex (src_var, i_var, elem) in
+           let inc =
+             T.TEAssign (i_name,
+               T.TEBinop (OpAdd, i_var, T.TEInt 1, TyInt), TyInt) in
+           (* bind x = src[i]; run body (value discarded); then i := i+1 *)
+           let body_then_inc =
+             T.TELet ("_", tbody_ty, tbody, inc, TyInt, false) in
+           let loop_body =
+             T.TELet (x, elem, elem_e, body_then_inc, TyInt, false) in
+           let loop =
+             T.TEWhile (
+               T.TEBinop (OpLt, i_var,
+                 T.TELen (src_var, TyInt), TyBool),
+               loop_body) in
+           let lowered =
+             T.TELet (src_name, src_ty, tsrc,
+               T.TELet (i_name, TyInt, T.TEInt 0, loop, TyInt, false),
+               TyInt, false) in
+           (lowered, TyInt)
+       | _ ->
+           let elem = TyMeta (fresh_meta ()) in
+           (try unify tsrc_ty (TyApp ("Stream", [elem]))
+            with Type_error _ ->
+              raise (Type_error
+                (Printf.sprintf
+                   "`for %s in <expr>`: source must be Ref[T] or Stream[T], \
+                    got %s"
+                   x (show_ty (zonk tsrc_ty)))));
+           let body_vars =
+             if x = "_" then vars else (x, (elem, false)) :: vars
+           in
+           incr loop_depth;
+           let (tbody, _tbody_ty) = infer env tparams body_vars body_e in
+           decr loop_depth;
+           (T.TEForStream (x, elem, tsrc, tbody), TyInt))
 
   | EPrint (nl, inner) -> infer_print env tparams vars nl inner
 

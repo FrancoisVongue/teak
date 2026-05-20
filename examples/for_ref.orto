@@ -1,0 +1,27 @@
+// `for x in <ref>` — iterate the cells of a Ref by index. Works over a
+// whole buffer or a slice (a slice is just a narrower Ref). Pure sugar:
+// lowered to a while-loop over len/index, zero overhead, no iterator.
+
+fn main() -> int {
+    arena r = region(1024);
+    let xs = ref(r, [10, 20, 30, 40]);
+
+    let mut sum = 0;
+    for x in xs {
+        sum := sum + x;
+    }
+
+    // A slice is the same Ref type, so `for` works over it too.
+    let mid = slice(xs, 1, 3);   // [20, 30]
+    for y in mid {
+        sum := sum + y;
+    }
+
+    // break works like in any loop.
+    for x in xs {
+        if x > 30 { break; }
+        sum := sum + x;
+    }
+
+    sum   // 100 + 50 + 60 = 210
+}

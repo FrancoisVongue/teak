@@ -12,6 +12,7 @@ file_io GCCFAIL
 file_io_uring GCCFAIL
 first RUN 41
 float_basic RUN 0
+for_ref RUN 210
 handler RUN 101
 hello_putchar RUN 0
 higher_order RUN 157
