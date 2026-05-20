@@ -1,0 +1,56 @@
+// std/sort.orto — in-place sort of a Ref[T] (or slice) with an explicit
+// comparator. cmp(a, b) < 0 means a comes before b, 0 equal, > 0 after.
+// Quicksort (Lomuto partition). The comparator is injected — no ordering
+// is baked into any type.
+
+fn swap[T](xs: Ref[T], i: int, j: int) -> () {
+    let t = xs[i];
+    xs[i] := xs[j];
+    xs[j] := t;
+}
+
+fn partition[T](xs: Ref[T], lo: int, hi: int, cmp: fn(T, T) -> int) -> int {
+    let pivot = xs[hi];
+    let mut i = lo - 1;
+    let mut j = lo;
+    while j < hi {
+        if cmp(xs[j], pivot) <= 0 {
+            i := i + 1;
+            swap(xs, i, j);
+        }
+        j := j + 1;
+    }
+    swap(xs, i + 1, hi);
+    i + 1
+}
+
+fn qsort[T](xs: Ref[T], lo: int, hi: int, cmp: fn(T, T) -> int) -> () {
+    if lo < hi {
+        let p = partition(xs, lo, hi, cmp);
+        qsort(xs, lo, p - 1, cmp);
+        qsort(xs, p + 1, hi, cmp);
+    }
+}
+
+fn sort[T](xs: Ref[T], cmp: fn(T, T) -> int) -> () {
+    qsort(xs, 0, len(xs) - 1, cmp);
+}
+
+// Binary search in a sorted Ref. Returns the index of a matching element,
+// or -1 if absent. cmp is the same ordering used to sort.
+fn bsearch[T](xs: Ref[T], key: T, cmp: fn(T, T) -> int) -> int {
+    let mut lo = 0;
+    let mut hi = len(xs) - 1;
+    let mut found = -1;
+    while lo <= hi {
+        let mid = lo + (hi - lo) / 2;
+        let c = cmp(xs[mid], key);
+        if c == 0 {
+            found := mid;
+            lo := hi + 1;          // stop
+        } else {
+            if c < 0 { lo := mid + 1; } else { hi := mid - 1; }
+        }
+    }
+    found
+}

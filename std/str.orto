@@ -1,0 +1,62 @@
+// std/str.orto — operations over Ref[byte] (the one string type).
+// Strings are just byte buffers in a region; these are ordinary
+// functions that take the region when they allocate.
+
+fn eq(a: Ref[byte], b: Ref[byte]) -> bool {
+    if len(a) != len(b) {
+        false
+    } else {
+        let mut i = 0;
+        let mut same = true;
+        while i < len(a) {
+            if to_int(a[i]) != to_int(b[i]) { same := false; }
+            i := i + 1;
+        }
+        same
+    }
+}
+
+fn concat(r: Region, a: Ref[byte], b: Ref[byte]) -> Ref[byte] {
+    let la = len(a);
+    let lb = len(b);
+    let out = ref(r, la + lb, to_byte(0));
+    let mut i = 0;
+    while i < la { out[i] := a[i]; i := i + 1; }
+    let mut j = 0;
+    while j < lb { out[la + j] := b[j]; j := j + 1; }
+    out
+}
+
+// Render an int to its decimal byte string.
+fn from_int(r: Region, n: int) -> Ref[byte] {
+    if n == 0 {
+        ref(r, [to_byte(48)])          // "0"
+    } else {
+        let neg = n < 0;
+        let mut m = if neg { 0 - n } else { n };
+        let mut ndig = 0;
+        let mut t = m;
+        while t > 0 { ndig := ndig + 1; t := t / 10; }
+        let total = if neg { ndig + 1 } else { ndig };
+        let buf = ref(r, total, to_byte(0));
+        let mut i = total - 1;
+        while m > 0 {
+            buf[i] := to_byte(48 + m % 10);   // '0' + digit
+            m := m / 10;
+            i := i - 1;
+        }
+        if neg { buf[0] := to_byte(45); }      // '-'
+        buf
+    }
+}
+
+// Index of the first occurrence of byte c, or -1.
+fn index_of(s: Ref[byte], c: int) -> int {
+    let mut i = 0;
+    let mut found = -1;
+    while i < len(s) {
+        if to_int(s[i]) == c { found := i; i := len(s); }
+        i := i + 1;
+    }
+    found
+}

@@ -259,7 +259,14 @@ let build_resolution_map
 let resolve_name
     (map : (string * string) list) (locals : string list) (name : string)
   : string =
-  if List.mem name locals then name
+  if String.contains name ':' then
+    (* Qualified `mod::item` — mangle to `mod__item`, the same form a
+       module's own decls take. Absolute, so the local resolution map is
+       not consulted. *)
+    String.split_on_char ':' name
+    |> List.filter (fun s -> s <> "")
+    |> String.concat "__"
+  else if List.mem name locals then name
   else if is_builtin name then name
   else
     match List.assoc_opt name map with

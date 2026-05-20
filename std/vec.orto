@@ -1,0 +1,56 @@
+// std/vec.orto — a growable buffer backed by a Ref in a region.
+//
+// Vec is a value (a small handle struct). Allocating operations take the
+// region explicitly and RETURN the updated Vec — like Go's append:
+//     v := vec::push(v, r, x);
+// `zero` is a sample value of T, used to fill freshly grown backing cells
+// (a generic T has no implicit default, so the caller provides one once).
+
+struct Vec[T] { data: Ref[T], count: int, cap: int, zero: T }
+
+fn new[T](r: Region, cap: int, zero: T) -> Vec[T] {
+    let c = if cap < 1 { 1 } else { cap };
+    Vec { data: ref(r, c, zero), count: 0, cap: c, zero: zero }
+}
+
+fn push[T](v: Vec[T], r: Region, x: T) -> Vec[T] {
+    if v.count < v.cap {
+        v.data[v.count] := x;
+        Vec { ..v, count: v.count + 1 }
+    } else {
+        let newcap = v.cap * 2;
+        let nd = ref(r, newcap, v.zero);
+        let mut i = 0;
+        while i < v.count {
+            nd[i] := v.data[i];
+            i := i + 1;
+        }
+        nd[v.count] := x;
+        Vec { data: nd, count: v.count + 1, cap: newcap, zero: v.zero }
+    }
+}
+
+fn get[T](v: Vec[T], i: int) -> T { v.data[i] }
+
+fn set[T](v: Vec[T], i: int, x: T) -> () { v.data[i] := x; }
+
+// A view over the live elements (a slice of the backing). Cheap, shares memory.
+fn slice_of[T](v: Vec[T]) -> Ref[T] { slice(v.data, 0, v.count) }
+
+fn each[T](v: Vec[T], f: fn(T) -> ()) -> () {
+    let mut i = 0;
+    while i < v.count {
+        f(v.data[i]);
+        i := i + 1;
+    }
+}
+
+fn fold[A, T](v: Vec[T], init: A, step: fn(A, T) -> A) -> A {
+    let mut acc = init;
+    let mut i = 0;
+    while i < v.count {
+        acc := step(acc, v.data[i]);
+        i := i + 1;
+    }
+    acc
+}

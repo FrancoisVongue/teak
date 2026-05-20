@@ -1,0 +1,30 @@
+// std/math.orto — basic integer math. Pure, no allocation.
+
+fn min(a: int, b: int) -> int { if a < b { a } else { b } }
+fn max(a: int, b: int) -> int { if a > b { a } else { b } }
+fn abs(a: int) -> int { if a < 0 { 0 - a } else { a } }
+
+fn clamp(x: int, lo: int, hi: int) -> int {
+    if x < lo { lo } else { if x > hi { hi } else { x } }
+}
+
+fn pow(base: int, exp: int) -> int {
+    let mut acc = 1;
+    let mut i = 0;
+    while i < exp {
+        acc := acc * base;
+        i := i + 1;
+    }
+    acc
+}
+
+fn gcd(a: int, b: int) -> int {
+    let mut x = if a < 0 { 0 - a } else { a };
+    let mut y = if b < 0 { 0 - b } else { b };
+    while y != 0 {
+        let t = y;
+        y := x % y;
+        x := t;
+    }
+    x
+}

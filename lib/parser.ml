@@ -478,7 +478,20 @@ and parse_atom_consume st =
        | t -> raise (Parse_error
            (Printf.sprintf "expected `)` or `,` after parenthesised expression, got %s"
               (Token.show t))))
-  | TIdent name -> EVar name
+  | TIdent name ->
+      (* Qualified reference `mod::name` (e.g. `vec::push`) — let modules
+         share short verb names (new/push/get) without import clashes.
+         The path is kept as "a::b" and mangled to "a__b" in resolve. *)
+      let rec path acc =
+        if peek st = TColonCol then begin
+          advance st;
+          match eat st with
+          | TIdent s | TCtorIdent s -> path (acc ^ "::" ^ s)
+          | t -> raise (Parse_error
+              (Printf.sprintf "expected name after `::`, got %s" (Token.show t)))
+        end else acc
+      in
+      EVar (path name)
   | TCtorIdent name ->
       (match peek st with
        | TLParen ->

@@ -502,6 +502,14 @@ let emit_task_forwards () : string list =
    only when one tuple type appears as a field type of another; we emit
    in reverse-insertion order (deepest child first), same trick as the
    array typedefs. *)
+(* Forward declarations for every tuple type, emitted early so that fn
+   typedefs (and anything else) can name a tuple before its full body is
+   given. Mirrors how ADT/record structs are forward-declared. *)
+let emit_tuple_fwd_decls () : string list =
+  List.rev_map (fun (mangled, _) ->
+    Printf.sprintf "typedef struct %s %s;" mangled mangled)
+    !tuple_types_order
+
 let emit_tuple_forwards () : string list =
   List.rev_map (fun (mangled, ts) ->
     let fields =
@@ -509,7 +517,7 @@ let emit_tuple_forwards () : string list =
         (List.mapi (fun i ty ->
           Printf.sprintf "%s f%d;" (c_type ty) i) ts)
     in
-    Printf.sprintf "typedef struct { %s } %s;" fields mangled)
+    Printf.sprintf "struct %s { %s };" mangled fields)
     !tuple_types_order
 
 (* drop_<TupleX> for every tuple shape that contains a linear component.
@@ -3675,6 +3683,7 @@ let emit ?(slots=1024) ?(cores=1) ?(ring_entries=64) ?(test_mode=false) (prog : 
   let rec_forwards = List.map emit_record_forward prog.records in
   let array_forwards = emit_array_forwards () in
   let task_forwards = emit_task_forwards () in
+  let tuple_fwd_decls = emit_tuple_fwd_decls () in
   let tuple_forwards = emit_tuple_forwards () in
   let tuple_drop_forwards = emit_tuple_drop_forwards () in
   let tuple_drop_defs = emit_tuple_drop_defs () in
@@ -4050,6 +4059,7 @@ let emit ?(slots=1024) ?(cores=1) ?(ring_entries=64) ?(test_mode=false) (prog : 
     ([header]
      @ adt_forwards
      @ rec_forwards
+     @ tuple_fwd_decls
      @ array_forwards
      @ task_forwards
      @ fn_typedefs

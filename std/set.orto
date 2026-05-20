@@ -1,0 +1,17 @@
+// std/set.orto — a set is just a map with no values: Map[T, ()].
+// Thin layer over `map`; behaviour (hash/eq) injected the same way.
+
+use map::{Map, new, insert, contains};
+
+fn make[T](r: Region, cap: int, zt: T,
+           hash: fn(T) -> int, eq: fn(T, T) -> bool) -> Map[T, ()] {
+    new(r, cap, zt, (), hash, eq)
+}
+
+fn add[T](s: Map[T, ()], r: Region, x: T) -> Map[T, ()] {
+    insert(s, r, x, ())
+}
+
+fn has[T](s: Map[T, ()], x: T) -> bool {
+    contains(s, x)
+}

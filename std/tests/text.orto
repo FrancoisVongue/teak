@@ -1,0 +1,14 @@
+use str::{from_int, concat, eq, index_of};
+use fmt::{format};
+
+fn main() -> int {
+    arena r = region(8192);
+    let a  = from_int(r, 12345);                 // "12345"
+    let b  = from_int(r, -9);                     // "-9"
+    let ab = concat(r, a, b);                     // "12345-9"  len 7
+    let same = if eq(a, from_int(r, 12345)) { 1 } else { 0 };   // 1
+    let idx = index_of(ab, 45);                   // '-' at index 5
+    let parts = ref(r, [from_int(r, 7), concat(r, a, b)]);
+    let s = format(r, "[{}|{}]", parts);          // "[7|12345-9]" len 11
+    len(ab) + same + idx + len(s) + to_int(s[0])  // 7+1+5+11+91 = 115
+}

@@ -1,0 +1,96 @@
+// std/map.orto — an open-addressing hash map (linear probing), grown and
+// rehashed automatically at ~75% load. Behaviour is injected, not baked
+// into types: the map stores its own `hash` and `eq` as closures (the
+// explicit version of a type-class dictionary — visible, per-map). Keys
+// and values are copied in. `zk`/`zv` are sample zero values used to fill
+// backing slots (a generic T has no implicit default).
+
+struct Entry[K, V] { used: bool, key: K, val: V }
+
+struct Map[K, V] {
+    slots : Ref[Entry[K, V]],
+    cap   : int,
+    count : int,
+    hash  : fn(K) -> int,
+    eq    : fn(K, K) -> bool,
+    ze    : Entry[K, V]
+}
+
+fn imod(h: int, cap: int) -> int { (h % cap + cap) % cap }   // non-negative
+
+fn new[K, V](r: Region, cap: int, zk: K, zv: V,
+             hash: fn(K) -> int, eq: fn(K, K) -> bool) -> Map[K, V] {
+    let c = if cap < 4 { 4 } else { cap };
+    let ze = Entry { used: false, key: zk, val: zv };
+    Map { slots: ref(r, c, ze), cap: c, count: 0, hash: hash, eq: eq, ze: ze }
+}
+
+fn grow[K, V](m: Map[K, V], r: Region) -> Map[K, V] {
+    let newcap = m.cap * 2;
+    let mut nm = Map { slots: ref(r, newcap, m.ze), cap: newcap, count: 0,
+                       hash: m.hash, eq: m.eq, ze: m.ze };
+    let mut i = 0;
+    while i < m.cap {
+        let e = m.slots[i];
+        if e.used { nm := insert(nm, r, e.key, e.val); }
+        i := i + 1;
+    }
+    nm
+}
+
+fn insert[K, V](m0: Map[K, V], r: Region, k: K, v: V) -> Map[K, V] {
+    let m = if (m0.count + 1) * 4 >= m0.cap * 3 { grow(m0, r) } else { m0 };
+    let mut i = imod((m.hash)(k), m.cap);
+    let mut placed = 0;
+    let mut newcount = m.count;
+    while placed == 0 {
+        let e = m.slots[i];
+        if e.used {
+            if (m.eq)(e.key, k) {
+                m.slots[i] := Entry { used: true, key: k, val: v };   // overwrite
+                placed := 1;
+            } else {
+                i := imod(i + 1, m.cap);
+            }
+        } else {
+            m.slots[i] := Entry { used: true, key: k, val: v };
+            newcount := m.count + 1;
+            placed := 1;
+        }
+    }
+    Map { ..m, count: newcount }
+}
+
+fn get[K, V](m: Map[K, V], k: K) -> Option[V] {
+    let mut i = imod((m.hash)(k), m.cap);
+    let mut result: Option[V] = None;
+    let mut steps = 0;
+    let mut done = 0;
+    while done == 0 {
+        if steps >= m.cap {
+            done := 1;
+        } else {
+            let e = m.slots[i];
+            if e.used {
+                if (m.eq)(e.key, k) { result := Some(e.val); done := 1; }
+                else { i := imod(i + 1, m.cap); steps := steps + 1; }
+            } else {
+                done := 1;
+            }
+        }
+    }
+    result
+}
+
+fn contains[K, V](m: Map[K, V], k: K) -> bool {
+    match get(m, k) { Some(_) => true, None => false }
+}
+
+fn each[K, V](m: Map[K, V], f: fn(K, V) -> ()) -> () {
+    let mut i = 0;
+    while i < m.cap {
+        let e = m.slots[i];
+        if e.used { f(e.key, e.val); }
+        i := i + 1;
+    }
+}
