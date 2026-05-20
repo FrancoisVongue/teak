@@ -30,7 +30,7 @@ open Ast
 exception Resolve_error of string
 
 let builtin_names = [
-  "Array"; "Region"; "Option"; "byte";
+  "Ref"; "Region"; "Option"; "byte";
   "Some"; "None";
   "Result"; "Ok"; "Err";
 ]

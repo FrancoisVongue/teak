@@ -317,7 +317,7 @@ let rec prune (t : ty) : ty =
 
 let rec is_linear_ty (t : ty) : bool =
   match prune t with
-  | TyApp ("Array", [inner]) ->
+  | TyApp ("Ref", [inner]) ->
       (* Induced linearity: an Array of a linear element type is itself
          linear — its drop frees the elements first. Builtin containers
          propagate; nominal user types do not (they declare linearity
@@ -499,7 +499,7 @@ let rec validate_ty
          "induced linearity" — the full version (Array[T] when T is
          linear) lands in phase 3. *)
       let propagates_linearity =
-        (n = "Task" || n = "Stream" || n = "Array") in
+        (n = "Task" || n = "Stream" || n = "Ref") in
       if not propagates_linearity then
         List.iter (fun arg ->
           if ty_contains_linear arg then
@@ -514,7 +514,7 @@ let rec validate_ty
             (Printf.sprintf
                "type parameter %S cannot take type arguments" n));
         TyVar n
-      end else if n = "Array" then begin
+      end else if n = "Ref" then begin
         (* Array[T] is a built-in unary type constructor — handle to a
            region-allocated buffer. The wrapper is copyable. *)
         if List.length args <> 1 then
@@ -522,7 +522,7 @@ let rec validate_ty
             (Printf.sprintf
                "Array expects exactly 1 type argument, got %d"
                (List.length args)));
-        TyApp ("Array", args)
+        TyApp ("Ref", args)
       end else if n = "Region" then begin
         (* Region is a built-in nullary type — owned arena. Linear. *)
         if List.length args <> 0 then
@@ -812,8 +812,8 @@ let check_no_recursive_types
   in
   let rec deps_in_ty acc = function
     | TyInt | TyBool | TyVar _ | TyMeta _ -> acc
-    | TyApp ("Ref", _) | TyApp ("Own", _) | TyApp ("Array", _) ->
-        (* Ref, Own and Array are all fixed-size handles into a region —
+    | TyApp ("Ref", _) | TyApp ("Own", _) ->
+        (* Ref (and legacy Own) are fixed-size region handles —
            pointer-sized regardless of what they point at, so they break
            by-value size cycles (the pointed-at values live in the
            region, not inline). *)
@@ -879,7 +879,7 @@ let scrutinee_kind (env : env) (t : ty) : scrut_kind =
         "match on float is not supported — NaN / signed-zero edge cases \
          break exhaustivity. Use `if`/`else if` chain or a bind pattern \
          with a guard (`x if x > 0.5 => ...`).")
-  | TyApp ("Array", [inner]) ->
+  | TyApp ("Ref", [inner]) ->
       (match prune inner with
        | TyApp ("byte", []) -> SK_Bytes
        | _ ->
@@ -1084,7 +1084,7 @@ let rec infer (env : env) (tparams : string list)
   | EStringLit s ->
       (* "..." : Array[byte] — bytes live in the static region forever.
          The handle is copyable, the gen tag will always match. *)
-      let result_ty = TyApp ("Array", [TyApp ("byte", [])]) in
+      let result_ty = TyApp ("Ref", [TyApp ("byte", [])]) in
       (T.TEStringLit s, result_ty)
 
   | EBinop (op, a, b) ->
@@ -1628,7 +1628,7 @@ let rec infer (env : env) (tparams : string list)
           (Printf.sprintf
              "array(_, _, v) : element type cannot contain a linear type (%s)"
              (show_ty (zonk tv_ty))));
-      let result_ty = TyApp ("Array", [tv_ty]) in
+      let result_ty = TyApp ("Ref", [tv_ty]) in
       (T.TEArray (tr, tn, tv, result_ty), result_ty)
 
   | EArrayLit (region_e, elems) ->
@@ -1660,7 +1660,7 @@ let rec infer (env : env) (tparams : string list)
          array itself is then linear (induced linearity, phase 3).
          By contrast `array(r, N, init)` would copy `init` N times,
          which is forbidden for linear types. *)
-      let result_ty = TyApp ("Array", [elem_ty]) in
+      let result_ty = TyApp ("Ref", [elem_ty]) in
       (T.TEArrayLit (tr, List.map fst typed_elems, result_ty), result_ty)
 
   | ERegion size_e ->
@@ -1719,7 +1719,7 @@ let rec infer (env : env) (tparams : string list)
         | TyPtr inner -> inner
         | _ ->
             let elem = TyMeta (fresh_meta ()) in
-            (try unify ta_ty (TyApp ("Array", [elem]))
+            (try unify ta_ty (TyApp ("Ref", [elem]))
              with Type_error _ ->
                raise (Type_error
                  (Printf.sprintf
@@ -1753,7 +1753,7 @@ let rec infer (env : env) (tparams : string list)
         | TyPtr inner -> inner
         | _ ->
             let elem = TyMeta (fresh_meta ()) in
-            (try unify ta_ty (TyApp ("Array", [elem]))
+            (try unify ta_ty (TyApp ("Ref", [elem]))
              with Type_error _ ->
                raise (Type_error
                  (Printf.sprintf
@@ -1790,7 +1790,7 @@ let rec infer (env : env) (tparams : string list)
       (* len(a) : Array[T] → int. *)
       let (ta, ta_ty) = infer env tparams vars arr_e in
       let elem = TyMeta (fresh_meta ()) in
-      (try unify ta_ty (TyApp ("Array", [elem]))
+      (try unify ta_ty (TyApp ("Ref", [elem]))
        with Type_error _ ->
          raise (Type_error
            (Printf.sprintf
@@ -1804,7 +1804,7 @@ let rec infer (env : env) (tparams : string list)
          Same gen, same slot — slice dies with the original region. *)
       let (ta, ta_ty) = infer env tparams vars arr_e in
       let elem = TyMeta (fresh_meta ()) in
-      (try unify ta_ty (TyApp ("Array", [elem]))
+      (try unify ta_ty (TyApp ("Ref", [elem]))
        with Type_error _ ->
          raise (Type_error
            (Printf.sprintf
@@ -1832,7 +1832,7 @@ let rec infer (env : env) (tparams : string list)
              "cannot slice Array[%s] — would create a second linear \
               handle over the same elements."
              (show_ty (zonk elem))));
-      let result_ty = TyApp ("Array", [elem]) in
+      let result_ty = TyApp ("Ref", [elem]) in
       (T.TESlice (ta, tlo, thi, result_ty), result_ty)
 
   | EToInt sub_e ->
@@ -1952,7 +1952,7 @@ let rec infer (env : env) (tparams : string list)
   | EArrayData a_e ->
       let (ta, ta_ty) = infer env tparams vars a_e in
       let elem = TyMeta (fresh_meta ()) in
-      (try unify ta_ty (TyApp ("Array", [elem]))
+      (try unify ta_ty (TyApp ("Ref", [elem]))
        with Type_error _ ->
          raise (Type_error
            (Printf.sprintf
@@ -1975,7 +1975,7 @@ let rec infer (env : env) (tparams : string list)
   | ETryAt (a_e, i_e) ->
       let (ta, ta_ty) = infer env tparams vars a_e in
       let elem = TyMeta (fresh_meta ()) in
-      (try unify ta_ty (TyApp ("Array", [elem]))
+      (try unify ta_ty (TyApp ("Ref", [elem]))
        with Type_error _ ->
          raise (Type_error
            (Printf.sprintf
@@ -2190,14 +2190,14 @@ let rec infer (env : env) (tparams : string list)
          array is consumed (linear) by the join. *)
       let (tc, tc_ty) = infer env tparams vars coll_e in
       let elem = TyMeta (fresh_meta ()) in
-      (try unify tc_ty (TyApp ("Array", [TyApp ("Task", [elem])]))
+      (try unify tc_ty (TyApp ("Ref", [TyApp ("Task", [elem])]))
        with Type_error _ ->
          raise (Type_error
            (Printf.sprintf
               "`await all <coll>` expects coll : Array[Task[T]], got %s"
               (show_ty (zonk tc_ty)))));
       let wrapped = TyApp ("Result", [elem]) in
-      let result_ty = TyApp ("Array", [wrapped]) in
+      let result_ty = TyApp ("Ref", [wrapped]) in
       (T.TEAwait (tc, result_ty, elem), result_ty)
 
 and is_printable_ty (t : ty) : bool =
@@ -2205,7 +2205,7 @@ and is_printable_ty (t : ty) : bool =
   | TyInt | TyBool -> true
   | TyApp ("byte", []) | TyApp ("u16", []) | TyApp ("u32", [])
   | TyApp ("u64", []) | TyApp ("float", []) -> true
-  | TyApp ("Array", [TyApp ("byte", [])]) -> true
+  | TyApp ("Ref", [TyApp ("byte", [])]) -> true
   | _ -> false
 
 and infer_print env tparams vars nl inner =

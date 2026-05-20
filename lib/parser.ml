@@ -96,13 +96,10 @@ let rec parse_ty st =
       let ret = parse_ty st in
       TyFun (args, ret)
   | TCtorIdent s  ->
-      (* `Ref[T]` is the surface name for a gen-checked reference to
-         cell(s) in a region; it is tagged "Array" internally. The bare
-         old name `Array` is no longer a valid surface type. *)
+      (* The reference type is `Ref[T]`. The old name `Array` is gone. *)
       if s = "Array" then
         raise (Parse_error
           "the reference type is `Ref[T]` now (it replaced `Array[T]`)");
-      let s = if s = "Ref" then "Array" else s in
       if peek st = TLBracket then begin
         advance st;
         let args = parse_ty_list st in
