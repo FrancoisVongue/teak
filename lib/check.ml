@@ -92,6 +92,9 @@ module T = struct
     | TEDeref  of expr * ty
                   (* p deref — second field is element type T *)
     | TEAssign of string * expr * ty
+    | TEAssignField of expr * string * expr
+                  (* place.f := v — write the field f of a place
+                     (var/field/index chain). Result is int (unit). *)
                   (* x := v — third field is the type of x *)
     | TEWhile  of expr * expr
                   (* while cond { body } — always int 0 *)
@@ -314,6 +317,18 @@ let rec prune (t : ty) : ty =
       m.resolved <- Some r;
       r
   | _ -> t
+
+(* A place is a var / field / index chain. These walk the untyped form. *)
+let rec place_has_index = function
+  | EIndex _ -> true
+  | EField (p, _) -> place_has_index p
+  | _ -> false
+
+let rec place_root_var = function
+  | EVar x -> Some x
+  | EField (p, _) -> place_root_var p
+  | EIndex (a, _) -> place_root_var a
+  | _ -> None
 
 let rec is_linear_ty (t : ty) : bool =
   match prune t with
@@ -1449,6 +1464,54 @@ let rec infer (env : env) (tparams : string list)
            raise (Type_error
              (Printf.sprintf "assignment to unknown variable %S" x)))
 
+  | EAssignField (place, fname, value) ->
+      let (tplace, place_ty) = infer env tparams vars place in
+      (match prune place_ty with
+       | TyApp (n, args) when List.mem_assoc n env.records ->
+           let rd = List.assoc n env.records in
+           let decl_field_ty =
+             try List.assoc fname rd.rec_fields
+             with Not_found ->
+               raise (Type_error
+                 (Printf.sprintf "record %S has no field %S" n fname))
+           in
+           let subst = List.combine rd.rec_type_params args in
+           let field_ty = subst_ty subst decl_field_ty in
+           let (tv, tv_ty) = infer env tparams vars value in
+           (try unify field_ty tv_ty
+            with Type_error _ ->
+              raise (Type_error
+                (Printf.sprintf
+                   "assignment to field %S: field has type %s, value has type %s"
+                   fname (show_ty (zonk field_ty)) (show_ty (zonk tv_ty)))));
+           (* Overwriting a linear value would leak it — forbid. *)
+           if is_linear_ty (zonk field_ty) then
+             raise (Type_error
+               (Printf.sprintf
+                  "cannot assign to linear field %S — overwriting a linear \
+                   value would leak it (consume it explicitly first)" fname));
+           (* A pure field/var path (no index) mutates a local, so its root
+              must be `mut`. A path through an index writes region memory
+              (through a copyable handle) and needs no `mut`. *)
+           if not (place_has_index place) then
+             (match place_root_var place with
+              | Some rv ->
+                  (match List.assoc_opt rv vars with
+                   | Some (_, true) -> ()
+                   | Some (_, false) ->
+                       raise (Type_error
+                         (Printf.sprintf
+                            "cannot assign to a field of %S — it is declared \
+                             without `mut`. Use `let mut %s = ...`." rv rv))
+                   | None -> ())
+              | None -> ());
+           (T.TEAssignField (tplace, fname, tv), TyInt)
+       | _ ->
+           raise (Type_error
+             (Printf.sprintf
+                "field assignment on non-record: expected a record, got %s"
+                (show_ty (zonk place_ty)))))
+
   | EWhile (cond, body) ->
       let (tc, tc_ty) = infer env tparams vars cond in
       (try unify tc_ty TyBool
@@ -2323,6 +2386,8 @@ let rec zonk_expr (e : T.expr) : T.expr =
   | T.TEArrayData (a, t) -> T.TEArrayData (zonk_expr a, zonk_expect t)
   | T.TEDeref (p, t) -> T.TEDeref (zonk_expr p, zonk_expect t)
   | T.TEAssign (x, v, t) -> T.TEAssign (x, zonk_expr v, zonk_expect t)
+  | T.TEAssignField (p, f, v) ->
+      T.TEAssignField (zonk_expr p, f, zonk_expr v)
   | T.TEWhile (c, b) -> T.TEWhile (zonk_expr c, zonk_expr b)
   | T.TEBreak | T.TEContinue -> e
   | T.TEReturn (v, t) -> T.TEReturn (zonk_expr v, zonk_expect t)
@@ -2666,6 +2731,11 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       let (v', live) = check_moves_expr env live false v in
       (T.TEAssign (x, v', t), live)
 
+  | T.TEAssignField (p, f, v) ->
+      let (p', live) = check_moves_expr env live false p in
+      let (v', live) = check_moves_expr env live false v in
+      (T.TEAssignField (p', f, v'), live)
+
   | T.TEWhile (c, b) ->
       let (c', live) = check_moves_expr env live false c in
       let (b', live) = check_moves_expr env live false b in
@@ -2861,6 +2931,8 @@ let rec body_has_suspension (e : T.expr) : bool =
   | TEArrayData (a, _) -> body_has_suspension a
   | TEDeref (p, _) -> body_has_suspension p
   | TEAssign (_, v, _) -> body_has_suspension v
+  | TEAssignField (p, _, v) ->
+      body_has_suspension p || body_has_suspension v
   | TEWhile (c, b) ->
       body_has_suspension c || body_has_suspension b
   | TEReturn (v, _) -> body_has_suspension v

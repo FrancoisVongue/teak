@@ -163,9 +163,9 @@ let parse_binop_chain st (ops : (token * binop) list) lower =
 
 let rec parse_expr st = parse_assign st
 
-(* `:=` is allowed in two shapes:
-     `a[i] := v` — array slot assignment (always allowed)
-     `x := v`    — variable reassignment (requires `let mut x = ...`) *)
+(* `:=` is allowed on a place: a variable, an array slot, or a field
+   of a place. Examples: `x := v` (needs `let mut x`), `a[i] := v`,
+   `s.f := v`, `r[i].f := v`, `s.f.g := v`. *)
 and parse_assign st =
   let lhs = parse_pipe st in
   if peek st = TColonEq then begin
@@ -174,8 +174,10 @@ and parse_assign st =
     match lhs with
     | EIndex (arr, idx) -> EAssignIdx (arr, idx, rhs)
     | EVar x -> EAssign (x, rhs)
+    | EField (place, fname) -> EAssignField (place, fname, rhs)
     | _ -> raise (Parse_error
-        "`:=` requires a variable name or array indexing on the left")
+        "`:=` requires a place on the left: a variable, an array slot \
+         `a[i]`, or a field `s.f` / `r[i].f`")
   end else lhs
 
 (* Pipeline: `x |> f` rewrites to `f(x)`. `x |> f(a, b)` rewrites to

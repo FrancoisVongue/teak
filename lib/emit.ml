@@ -292,6 +292,7 @@ let rec collect_expr (e : Check.T.expr) : unit =
   | Check.T.TEArrayData (a, t) -> collect_expr a; collect_ty t
   | Check.T.TEDeref (p, t) -> collect_expr p; collect_ty t
   | Check.T.TEAssign (_, v, t) -> collect_expr v; collect_ty t
+  | Check.T.TEAssignField (p, _, v) -> collect_expr p; collect_expr v
   | Check.T.TEWhile (c, b) -> collect_expr c; collect_expr b
   | Check.T.TEBreak | Check.T.TEContinue -> ()
   | Check.T.TEReturn (v, t) -> collect_expr v; collect_ty t
@@ -354,6 +355,7 @@ let rec scan_fnvals (e : Check.T.expr) : unit =
   | TEArrayData (a, _) -> scan_fnvals a
   | TEDeref (p, _) -> scan_fnvals p
   | TEAssign (_, v, _) -> scan_fnvals v
+  | TEAssignField (p, _, v) -> scan_fnvals p; scan_fnvals v
   | TEWhile (c, b) -> scan_fnvals c; scan_fnvals b
   | TEReturn (v, _) -> scan_fnvals v
   | TETryAt (a, i, _) -> scan_fnvals a; scan_fnvals i
@@ -784,6 +786,7 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
     | TEAssign (x, v, t) ->
         let x' = try List.assoc x env with Not_found -> x in
         TEAssign (x', rn env v, t)
+    | TEAssignField (p, f, v) -> TEAssignField (rn env p, f, rn env v)
     | TEWhile (c, b) -> TEWhile (rn env c, rn env b)
     | TEBreak | TEContinue -> e
     | TEReturn (v, t) -> TEReturn (rn env v, t)
@@ -979,6 +982,7 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TEArrayData (_, t) -> t
   | Check.T.TEDeref (_, t) -> t
   | Check.T.TEAssign (_, _, _) -> TyInt
+  | Check.T.TEAssignField (_, _, _) -> TyInt
   | Check.T.TEWhile (_, _) -> TyInt
   | Check.T.TEBreak | Check.T.TEContinue -> TyInt
   | Check.T.TEReturn (_, _) -> TyInt
@@ -1595,6 +1599,17 @@ let rec emit_expr
       ] in
       { stmts; value = "0" }
 
+  | Check.T.TEAssignField (place, fname, val_e) ->
+      (* Write a field through a place path. The place becomes a C
+         lvalue (index steps emit their gen/bounds checks); the final
+         field write goes straight to it — no whole-struct copy. *)
+      let (pstmts, lvalue) = emit_place ctor_map place in
+      let cv = emit_expr ctor_map val_e in
+      let stmts = pstmts @ cv.stmts @ [
+        Printf.sprintf "(%s).%s = %s;" lvalue fname cv.value
+      ] in
+      { stmts; value = "0" }
+
   | Check.T.TELen (arr_e, _) ->
       let ca = emit_expr ctor_map arr_e in
       let value = match arr_e with
@@ -2099,6 +2114,30 @@ and index_setup ctor_map arr_e idx_e elem_c =
       failwith (Printf.sprintf
         "emit: indexing on non-indexable type %s" (Ast.show_ty t))
 
+(* Emit a place (var / field / index chain) as a C lvalue. Returns the
+   setup statements (gen/bounds checks for any index steps) and the
+   lvalue expression. Used by field assignment to write in place. *)
+and emit_place ctor_map (e : Check.T.expr) : string list * string =
+  match e with
+  | Check.T.TEVar (x, _) -> ([], x)
+  | Check.T.TEField (p, f, _) ->
+      let (s, lv) = emit_place ctor_map p in
+      (s, Printf.sprintf "(%s).%s" lv f)
+  | Check.T.TEIndex (arr_e, idx_e, elem_ty) ->
+      let (ca, ci, a_var, i_var, arr_c, checks, slot_expr) =
+        index_setup ctor_map arr_e idx_e (c_type elem_ty)
+      in
+      let stmts = ca.stmts @ ci.stmts @ [
+        Printf.sprintf "%s %s = %s;" arr_c a_var ca.value;
+        Printf.sprintf "int %s = %s;" i_var ci.value;
+      ] @ checks in
+      (stmts, slot_expr)
+  | other ->
+      (* Not a syntactic place — parser/check restrict to the above, but
+         fall back to the value form just in case. *)
+      let c = emit_expr ctor_map other in
+      (c.stmts, c.value)
+
 (* ---------- function emission ---------- *)
 
 let emit_extern_decl (e : Check.T.extern) : string =
@@ -2317,6 +2356,7 @@ let async_collect_locals (body : Check.T.expr) : (string * ty) list =
     | TEArrayData (a, _) -> go a
     | TEDeref (p, _) -> go p
     | TEAssign (_, v, _) -> go v
+    | TEAssignField (p, _, v) -> go p; go v
     | TEWhile (c, b) -> go c; go b
     | TEReturn (v, _) -> go v
     | TETryAt (a, i, _) -> go a; go i
@@ -2404,6 +2444,7 @@ let async_rewrite_to_frame
     | TEArrayData (a, t) -> TEArrayData (go a, t)
     | TEDeref (p, t) -> TEDeref (go p, t)
     | TEAssign (x, v, t) -> TEAssign (rename x, go v, t)
+    | TEAssignField (p, f, v) -> TEAssignField (go p, f, go v)
     | TEWhile (c, b) -> TEWhile (go c, go b)
     | TEReturn (v, t) -> TEReturn (go v, t)
     | TETryAt (a, i, t) -> TETryAt (go a, go i, t)
@@ -2482,6 +2523,8 @@ let rec emit_has_suspension (e : Check.T.expr) : bool =
   | TEArrayData (a, _) -> emit_has_suspension a
   | TEDeref (p, _) -> emit_has_suspension p
   | TEAssign (_, v, _) -> emit_has_suspension v
+  | TEAssignField (p, _, v) ->
+      emit_has_suspension p || emit_has_suspension v
   | TEWhile (c, b) -> emit_has_suspension c || emit_has_suspension b
   | TEReturn (v, _) -> emit_has_suspension v
   | TETryAt (a, i, _) -> emit_has_suspension a || emit_has_suspension i
@@ -2551,6 +2594,7 @@ let allocate_await_all_locals_in_body (body : Check.T.expr) : Check.T.expr =
     | TEArrayData (a, t) -> TEArrayData (go a, t)
     | TEDeref (p, t) -> TEDeref (go p, t)
     | TEAssign (x, v, t) -> TEAssign (x, go v, t)
+    | TEAssignField (p, f, v) -> TEAssignField (go p, f, go v)
     | TEWhile (c, b) -> TEWhile (go c, go b)
     | TEReturn (v, t) -> TEReturn (go v, t)
     | TETryAt (a, i, t) -> TETryAt (go a, go i, t)
@@ -2662,6 +2706,7 @@ let rec desugar_let_tuples (e : Check.T.expr) : Check.T.expr =
   | TEArrayData (a, t) -> TEArrayData (r a, t)
   | TEDeref (p, t) -> TEDeref (r p, t)
   | TEAssign (x, v, t) -> TEAssign (x, r v, t)
+  | TEAssignField (p, f, v) -> TEAssignField (r p, f, r v)
   | TEWhile (c, b) -> TEWhile (r c, r b)
   | TEReturn (v, t) -> TEReturn (r v, t)
   | TETryAt (a, i, t) -> TETryAt (r a, r i, t)

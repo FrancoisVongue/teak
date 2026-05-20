@@ -27,6 +27,7 @@ loops_basic RUN 55
 netlink_msg RUN 0
 ops RUN 100
 option_result RUN 11
+place_assign RUN 126
 poly_adt RUN 117
 poly_id RUN 42
 raw_pointers GCCFAIL

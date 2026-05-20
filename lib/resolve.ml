@@ -311,6 +311,7 @@ let rec resolve_expr
       let body' = resolve_expr map new_locals body in
       EArena (x, v', body')
   | EAssign (x, v) -> EAssign (resolve_name map locals x, r v)
+  | EAssignField (p, f, v) -> EAssignField (r p, f, r v)
   | EWhile (c, b) -> EWhile (r c, r b)
   | EBreak | EContinue -> e
   | EReturn v -> EReturn (r v)
@@ -501,6 +502,7 @@ let expand_in_expr (aliases : (string * ty) list) (e : expr) : expr =
     | ELet (x, m, asc, v, b) -> ELet (x, m, Option.map xt asc, ex v, ex b)
     | EArena (x, v, b) -> EArena (x, ex v, ex b)
     | EAssign (x, v) -> EAssign (x, ex v)
+    | EAssignField (p, f, v) -> EAssignField (ex p, f, ex v)
     | EWhile (c, b) -> EWhile (ex c, ex b)
     | EReturn v -> EReturn (ex v)
     | EMatch (s, arms) ->

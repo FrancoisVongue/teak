@@ -52,6 +52,7 @@ let rec free_vars (e : expr) : SS.t =
   | ELet (x, _, _, v, body) ->
       SS.union (free_vars v) (SS.remove x (free_vars body))
   | EAssign (x, v) -> SS.add x (free_vars v)
+  | EAssignField (p, _, v) -> SS.union (free_vars p) (free_vars v)
   | EWhile (c, b) -> SS.union (free_vars c) (free_vars b)
   | EBreak | EContinue -> SS.empty
   | EReturn e -> free_vars e
@@ -146,6 +147,7 @@ let lift (prog : program) : program =
     | EIf (c, t, el) -> EIf (xform c, xform t, xform el)
     | ELet (x, m, asc, v, body) -> ELet (x, m, asc, xform v, xform body)
     | EAssign (x, v) -> EAssign (x, xform v)
+    | EAssignField (p, f, v) -> EAssignField (xform p, f, xform v)
     | EWhile (c, b) -> EWhile (xform c, xform b)
     | EReturn e -> EReturn (xform e)
     | EMatch (s, arms) ->

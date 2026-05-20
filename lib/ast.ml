@@ -74,6 +74,8 @@ type expr =
   | ELet    of string * bool * ty option * expr * expr
                                           (* name, mut?, optional ascription, value, body *)
   | EAssign of string * expr              (* x := v — requires x to be mut *)
+  | EAssignField of expr * string * expr  (* place.f := v — write a field of a
+                                             place (var/field/index chain). *)
   | EWhile  of expr * expr                (* while cond { body } — result is int 0 *)
   | EBreak                                (* break;    — valid only inside while *)
   | EContinue                             (* continue; — valid only inside while *)
@@ -311,6 +313,8 @@ let rec show_expr = function
       Printf.sprintf "let %s%s: %s = %s; %s"
         (if m then "mut " else "") x (show_ty ty) (show_expr v) (show_expr b)
   | EAssign (x, v) -> Printf.sprintf "(%s := %s)" x (show_expr v)
+  | EAssignField (p, f, v) ->
+      Printf.sprintf "(%s.%s := %s)" (show_expr p) f (show_expr v)
   | EWhile (c, b) -> Printf.sprintf "while %s { %s }" (show_expr c) (show_expr b)
   | EBreak    -> "break"
   | EContinue -> "continue"
