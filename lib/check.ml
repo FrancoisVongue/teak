@@ -832,11 +832,10 @@ let check_no_recursive_types
   in
   let rec deps_in_ty acc = function
     | TyInt | TyBool | TyVar _ | TyMeta _ -> acc
-    | TyApp ("Ref", _) | TyApp ("Own", _) ->
-        (* Ref (and legacy Own) are fixed-size region handles —
-           pointer-sized regardless of what they point at, so they break
-           by-value size cycles (the pointed-at values live in the
-           region, not inline). *)
+    | TyApp ("Ref", _) ->
+        (* Ref is a fixed-size region handle — pointer-sized regardless
+           of what it points at, so it breaks by-value size cycles (the
+           pointed-at values live in the region, not inline). *)
         acc
     | TyApp (n, args) ->
         let acc = if is_known n then n :: acc else acc in

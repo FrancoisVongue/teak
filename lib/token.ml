@@ -37,7 +37,6 @@ type token =
   | TLinear        (* linear — marks a struct/enum as move-only with user drop *)
   | TDrop          (* drop(x) — consume and run the type's destructor *)
   | TUse           (* use mod::item; — selective import *)
-  | TArray        (* array — sized buffer allocated in a region *)
   | TLen          (* len — array length *)
   | TSlice        (* slice(a, lo, hi) — sub-handle into the same region *)
   | TToInt        (* to_int(b) — widen byte to int *)
@@ -66,9 +65,7 @@ type token =
   | TPrintln      (* println(expr)  — same, plus trailing '\n' *)
   | TArena        (* arena r = region(N); — scope-bound region binding *)
   | TClosure      (* closure(r, fn...) — capturing lambda, env in region r *)
-  | TRef          (* ref(r, v) — allocate one value in region r, return Ref[T] *)
-  | TGet          (* get(rf) — read the value a Ref points at *)
-  | TSet          (* set(rf, v) — write through a Ref *)
+  | TRef          (* ref(r, v) — allocate cell(s) in region r, return Ref[T] *)
   (* punctuation *)
   | TLParen
   | TRParen
@@ -144,7 +141,6 @@ let show = function
   | TLinear       -> "LINEAR"
   | TDrop         -> "DROP"
   | TUse          -> "USE"
-  | TArray        -> "ARRAY"
   | TLen          -> "LEN"
   | TSlice        -> "SLICE"
   | TToInt        -> "TO_INT"
@@ -174,8 +170,6 @@ let show = function
   | TArena        -> "ARENA"
   | TClosure      -> "CLOSURE"
   | TRef          -> "REF"
-  | TGet          -> "GET"
-  | TSet          -> "SET"
   | TLParen       -> "("
   | TRParen       -> ")"
   | TLBrace       -> "{"
