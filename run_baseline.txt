@@ -1,0 +1,43 @@
+address_book RUN 0
+array_basic RUN 14
+bin NOMAIN_OR_ERR
+builtin_values RUN 100
+closures RUN 147
+closures_generic RUN 125
+db NOMAIN_OR_ERR
+db_driver NOMAIN_OR_ERR
+fact RUN 176
+file_handle GCCFAIL
+file_io GCCFAIL
+file_io_uring GCCFAIL
+first RUN 41
+float_basic RUN 0
+handler RUN 101
+hello_putchar RUN 0
+higher_order RUN 157
+histogram RUN 3
+io NOMAIN_OR_ERR
+iouring NOMAIN_OR_ERR
+iouring_batch GCCFAIL
+lambda RUN 42
+linear_basic RUN 0
+log_format RUN 29
+loops_basic RUN 55
+netlink_msg RUN 0
+ops RUN 100
+option_result RUN 11
+poly_adt RUN 117
+poly_id RUN 42
+raw_pointers GCCFAIL
+records RUN 73
+region_as_file RUN 120
+regions RUN 116
+shapes RUN 123
+stackcalc RUN 42
+str NOMAIN_OR_ERR
+strings_advanced RUN 66
+strings_basic RUN 5
+strings_print RUN 0
+strings_real RUN 29
+strings_slice RUN 119
+sys NOMAIN_OR_ERR

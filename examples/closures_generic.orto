@@ -1,0 +1,29 @@
+// Generic closures, fully exercised: a generic function that threads a
+// region through three nested closure levels, capturing generic values
+// (a seed of type T and two generic function values), the region itself,
+// and an int. Each instantiation gets its own specialized lambda + env.
+
+fn twister[T](r: Region, seed: T, combine: fn(T, T) -> T, f: fn(T) -> T)
+    -> fn(int) -> fn(T) -> T {
+    closure(r, fn(rounds: int) -> fn(T) -> T {
+        closure(r, fn(start: T) -> T {
+            let mut acc = combine(start, seed);
+            let mut i = 0;
+            while i < rounds {
+                acc := f(acc);
+                i := i + 1;
+            }
+            acc
+        })
+    })
+}
+
+fn add(a: int, b: int) -> int { a + b }
+fn inc3(x: int) -> int { x + 3 }
+
+fn main() -> int {
+    arena r = region(8192);
+    let t  = twister(r, 10, add, inc3);   // T = int, seed = 10
+    let r5 = t(5);                         // rounds = 5
+    r5(100)   // combine(100, 10) = 110; then +3 five times = 125
+}

@@ -281,6 +281,14 @@ let rec resolve_expr
   | EBinop (op, a, b) -> EBinop (op, r a, r b)
   | EUnop  (op, a)    -> EUnop  (op, r a)
   | ECall (callee, args) -> ECall (r callee, List.map r args)
+  | EFun (params, ret, body) ->
+      let params' = List.map (fun (n, t) -> (n, rt t)) params in
+      let new_locals = List.map fst params @ locals in
+      EFun (params', rt ret, resolve_expr map new_locals body)
+  | EClosure (rg, params, ret, body) ->
+      let params' = List.map (fun (n, t) -> (n, rt t)) params in
+      let new_locals = List.map fst params @ locals in
+      EClosure (r rg, params', rt ret, resolve_expr map new_locals body)
   | ECtor (c, args) ->
       ECtor (resolve_name map locals c, List.map r args)
   | ERecord (name, elems) ->
@@ -478,6 +486,11 @@ let expand_in_expr (aliases : (string * ty) list) (e : expr) : expr =
     | EBinop (op, a, b) -> EBinop (op, ex a, ex b)
     | EUnop (op, a) -> EUnop (op, ex a)
     | ECall (c, args) -> ECall (ex c, List.map ex args)
+    | EFun (params, ret, body) ->
+        EFun (List.map (fun (n, t) -> (n, xt t)) params, xt ret, ex body)
+    | EClosure (rg, params, ret, body) ->
+        EClosure (ex rg, List.map (fun (n, t) -> (n, xt t)) params,
+                  xt ret, ex body)
     | ECtor (c, args) -> ECtor (c, List.map ex args)
     | ERecord (n, elems) ->
         ERecord (n, List.map (function

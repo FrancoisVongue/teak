@@ -137,6 +137,16 @@ module T = struct
                      [single_expr] if a scalar was passed). ty list =
                      parallel list of each component's type — emit uses
                      it to pick the right writev formatter. *)
+    | TEMakeClosure of string * ty list * (string * ty) list * expr * ty
+                  (* closure(r, fn...) construction. Fields: name of the
+                     lifted lambda function, type arguments to it (the
+                     enclosing function's type params, so mono can
+                     specialize the lambda like any generic function),
+                     captured (name, type) pairs copied into the
+                     environment, the region expression the environment
+                     is allocated in, and the resulting fn(args)->ret
+                     type. The lambda body lives in a generated top-level
+                     func whose `captures` field matches these pairs. *)
 
   type func = {
     name        : string;
@@ -144,6 +154,10 @@ module T = struct
     params      : (string * ty) list;
     return_ty   : ty;
     body        : expr;
+    (* Non-empty only for lifted closure bodies: the values captured
+       from the creating scope, unpacked from the environment at entry.
+       The code pointer takes the environment as a leading void*. *)
+    captures    : (string * ty) list;
     (* Stage 3: true iff this function body contains a suspension
        point reachable directly (await or yield not inside a nested
        spawn). Such functions are lowered into a stackless state
@@ -231,6 +245,20 @@ let check_not_c_reserved (kind : string) (name : string) : unit =
 
 let meta_counter = ref 0
 let drop_name_counter = ref 0
+let lambda_counter = ref 0
+
+(* Closures discovered during inference of the current function. Each is
+   finalized (zonked, move-checked) at the end of check_func and turned
+   into a lifted top-level function, then appended to the program. *)
+type pending_lambda = {
+  pl_name   : string;
+  pl_params : (string * ty) list;
+  pl_ret    : ty;
+  pl_body   : T.expr;
+  pl_caps   : (string * ty) list;
+}
+let pending_lambdas : pending_lambda list ref = ref []
+let lifted_funcs : T.func list ref = ref []
 
 (* Depth of the current while loop nest. break/continue require > 0.
    Reset at each function-body entry. *)
@@ -997,6 +1025,56 @@ let rec infer (env : env) (tparams : string list)
   (vars : (string * (ty * bool)) list) (e : expr)
   : T.expr * ty =
   match e with
+  | EFun _ ->
+      raise (Type_error
+        "internal: lambda not lifted before type-checking (compiler bug)")
+
+  | EClosure (region_e, params, ret, body) ->
+      (* Validate the lambda's own type annotations against the type
+         params in scope — turns `TyApp("T",[])` into the rigid
+         `TyVar "T"` and checks user type names exist. Without this the
+         lambda's T would never unify with the enclosing scope's T. *)
+      let params =
+        List.map (fun (n, t) ->
+          (n, validate_ty_for_ascription env tparams t)) params
+      in
+      let ret = validate_ty_for_ascription env tparams ret in
+      let (tregion, treg_ty) = infer env tparams vars region_e in
+      (try unify treg_ty (TyApp ("Region", []))
+       with Type_error _ ->
+         raise (Type_error (Printf.sprintf
+           "closure(r, ...): first argument must be a Region, got %s"
+           (show_ty (zonk treg_ty)))));
+      let param_vars = List.map (fun (n, t) -> (n, (t, false))) params in
+      let (tbody, tbody_ty) = infer env tparams (param_vars @ vars) body in
+      (try unify tbody_ty ret
+       with Type_error _ ->
+         raise (Type_error (Printf.sprintf
+           "closure body has type %s, declared return type is %s"
+           (show_ty (zonk tbody_ty)) (show_ty (zonk ret)))));
+      (* Captured locals = free variables of the body that resolve to a
+         binding in the enclosing scope (not the lambda's own params,
+         not globals). *)
+      let pnames = List.map fst params in
+      let captures =
+        List.filter_map (fun n ->
+          if List.mem n pnames then None
+          else match List.assoc_opt n vars with
+            | Some (t, _) -> Some (n, t)
+            | None -> None)
+          (Lift.SS.elements (Lift.free_vars body))
+      in
+      let lname = Printf.sprintf "__lambda_c%d" !lambda_counter in
+      incr lambda_counter;
+      pending_lambdas := {
+        pl_name = lname; pl_params = params; pl_ret = ret;
+        pl_body = tbody; pl_caps = captures } :: !pending_lambdas;
+      let fn_ty = TyFun (List.map snd params, ret) in
+      (* The lifted lambda is generic over the same type params as the
+         enclosing function; pass them as type arguments so mono
+         specializes it per instantiation. *)
+      let type_args = List.map (fun p -> TyVar p) tparams in
+      (T.TEMakeClosure (lname, type_args, captures, tregion, fn_ty), fn_ty)
   | EInt n  -> (T.TEInt n,  TyInt)
   | EFloat f -> (T.TEFloat f, TyApp ("float", []))
   | EBool b -> (T.TEBool b, TyBool)
@@ -2267,6 +2345,10 @@ let rec zonk_expr (e : T.expr) : T.expr =
                     List.map zonk_expect ptys)
   | T.TEPrint (nl, es, ts) ->
       T.TEPrint (nl, List.map zonk_expr es, List.map zonk_expect ts)
+  | T.TEMakeClosure (name, type_args, caps, region, fn_ty) ->
+      T.TEMakeClosure (name, List.map zonk_expect type_args,
+        List.map (fun (n, t) -> (n, zonk_expect t)) caps,
+        zonk_expr region, zonk_expect fn_ty)
 
 and zonk_expect (t : ty) : ty =
   let t = zonk t in
@@ -2706,6 +2788,12 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       in
       (T.TEPrint (nl, List.rev es_rev, ts), live)
 
+  | T.TEMakeClosure (name, type_args, caps, region, fn_ty) ->
+      (* Captures are non-linear copies (linear capture is rejected at
+         finalize), so only the region expression needs move tracking. *)
+      let (region', live) = check_moves_expr env live false region in
+      (T.TEMakeClosure (name, type_args, caps, region', fn_ty), live)
+
 (* ---------- check a function ---------- *)
 
 (* True if the typed body contains an `await` or `yield` reachable
@@ -2782,6 +2870,7 @@ let rec body_has_suspension (e : T.expr) : bool =
       body_has_suspension v || body_has_suspension b
   | TEAwaitAll _ -> true
   | TEPrint (_, es, _) -> List.exists body_has_suspension es
+  | TEMakeClosure (_, _, _, region, _) -> body_has_suspension region
 
 let check_func (env : env) (f : func) : T.func =
   let (_, (param_tys, ret_ty)) = List.assoc f.name env.fns in
@@ -2813,12 +2902,50 @@ let check_func (env : env) (f : func) : T.func =
   let (body_with_moves, _final_live) =
     check_moves_expr env initial_live true tbody
   in
+  (* Finalize closures discovered while inferring this function: each
+     becomes a lifted top-level function with its captures. *)
+  let my_lambdas = List.rev !pending_lambdas in
+  pending_lambdas := [];
+  List.iter (fun pl ->
+    let param_tys = List.map (fun (n, t) -> (n, zonk t)) pl.pl_params in
+    let ret = zonk pl.pl_ret in
+    let caps = List.map (fun (n, t) -> (n, zonk t)) pl.pl_caps in
+    let lbody = zonk_expr pl.pl_body in
+    List.iter (fun (n, t) ->
+      (* A Region handle is a gen-checked observer: capturing a copy is
+         safe because calling the closure after the region is dropped
+         aborts on the generation check, exactly like a stale array
+         handle. Other linear values have no such guard and no copy. *)
+      if is_linear_ty t && not (is_region_ty t) then
+        raise (Type_error (Printf.sprintf
+          "closure cannot capture %S: it has linear type %s, which has no \
+           copy operation (closures capture by copy)" n (show_ty t))))
+      caps;
+    let lam_live =
+      List.fold_left (fun m (p, t) -> SM.add p t m) SM.empty
+        (param_tys @ caps)
+    in
+    let (lbody', _) = check_moves_expr env lam_live true lbody in
+    if body_has_suspension lbody' then
+      raise (Type_error
+        "await/yield inside a closure body is not supported yet");
+    lifted_funcs := {
+      T.name = pl.pl_name;
+      T.type_params = f.type_params;
+      T.params = param_tys;
+      T.return_ty = ret;
+      T.body = lbody';
+      T.captures = caps;
+      T.is_async = false;
+    } :: !lifted_funcs)
+    my_lambdas;
   { T.name = f.name;
     T.type_params = f.type_params;
     T.params = List.combine
       (List.map fst f.params) param_tys;
     T.return_ty = ret_ty;
     T.body = body_with_moves;
+    T.captures = [];
     T.is_async = body_has_suspension body_with_moves }
 
 (* ---------- top-level entry ---------- *)
@@ -2864,6 +2991,9 @@ let builtin_orto_nop_decl : extern_decl = {
 let check (prog : program) : T.program =
   meta_counter := 0;
   drop_name_counter := 0;
+  lambda_counter := 0;
+  pending_lambdas := [];
+  lifted_funcs := [];
   let (types, records, funcs, externs, tests) = split_program prog in
   (* Reject any user attempt to redeclare reserved built-in names. *)
   List.iter (fun (td : type_decl) ->
@@ -2903,6 +3033,8 @@ let check (prog : program) : T.program =
   let env = build_env types records funcs externs in
   check_no_recursive_types env.types env.records;
   let typed_funcs = List.map (check_func env) funcs in
+  (* Closures lifted out of function bodies during check_func. *)
+  let typed_funcs = typed_funcs @ List.rev !lifted_funcs in
   let typed_externs =
     List.map (fun (e : extern_decl) ->
       let (_, (param_tys, ret_ty)) = List.assoc e.ext_name env.fns in

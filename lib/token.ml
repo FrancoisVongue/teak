@@ -65,6 +65,7 @@ type token =
   | TPrint        (* print(expr)    — intrinsic: writev a tuple or scalar *)
   | TPrintln      (* println(expr)  — same, plus trailing '\n' *)
   | TArena        (* arena r = region(N); — scope-bound region binding *)
+  | TClosure      (* closure(r, fn...) — capturing lambda, env in region r *)
   (* punctuation *)
   | TLParen
   | TRParen
@@ -168,6 +169,7 @@ let show = function
   | TPrint        -> "PRINT"
   | TPrintln      -> "PRINTLN"
   | TArena        -> "ARENA"
+  | TClosure      -> "CLOSURE"
   | TLParen       -> "("
   | TRParen       -> ")"
   | TLBrace       -> "{"

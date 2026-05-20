@@ -140,6 +140,7 @@ let () =
         !load_order
     in
     let merged = Orto.Resolve.resolve modules in
+    let merged = Orto.Lift.lift merged in
     let typed_ast = Orto.Check.check merged in
     let mono = Orto.Mono.monomorphize typed_ast in
     let c = Orto.Emit.emit ~slots ~cores ~ring_entries ~test_mode mono in
@@ -154,6 +155,9 @@ let () =
       exit 1
   | Orto.Resolve.Resolve_error msg ->
       Printf.eprintf "module error: %s\n" msg;
+      exit 1
+  | Orto.Lift.Lift_error msg ->
+      Printf.eprintf "lambda error: %s\n" msg;
       exit 1
   | Orto.Check.Type_error msg ->
       Printf.eprintf "type error: %s\n" msg;
