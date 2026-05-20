@@ -50,3 +50,16 @@ fn format(r: Region, template: Ref[byte], parts: Ref[Ref[byte]]) -> Ref[byte] {
     }
     slice_of(out)
 }
+
+// Format and write a line to stdout. Takes NO region: the formatted
+// string never escapes this call, so the function provisions its own
+// scratch arena, fills it, writes, and frees it on return. The caller's
+// region is for values the caller keeps — not for throwaway output.
+fn line(template: Ref[byte], parts: Ref[Ref[byte]]) -> () {
+    let mut total = len(template);
+    let mut i = 0;
+    while i < len(parts) { total := total + len(parts[i]); i := i + 1; }
+    arena s = region((total + 16) * 2);
+    println(format(s, template, parts));
+}
+

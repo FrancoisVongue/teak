@@ -1,12 +1,12 @@
-// examples/word_freq.orto — top-N word frequencies. Exercises most of the
-// standard library at once: str (tokenize), map (count), vec (collect),
-// sort (rank), fmt (render), math (clamp the N).
+// word_freq.orto — top-N word frequencies. Exercises most of the standard
+// library at once: str (tokenize), map (count), vec (collect), sort (rank),
+// math (clamp the N). Output goes through the `println` intrinsic, which
+// renders ints itself on the stack and needs no region at all.
 
 use map::{Map};
 use vec::{Vec};
 use sort::{sort};
-use str::{split, hash, eq, from_int};
-use fmt::{format};
+use str::{split, hash, eq};
 use math::{min};
 
 struct WC { word: Ref[byte], n: int }
@@ -42,12 +42,12 @@ fn main() -> int {
     // 4. rank by frequency, descending
     sort::sort(vec::slice_of(pairs), by_count);
 
-    // 5. render the top few
+    // 5. render the top few — no region: println renders the int itself
     let top = math::min(3, vec::size(pairs));
     i := 0;
     while i < top {
         let p = vec::get(pairs, i);
-        print(fmt::format(r, "{} -> {}\n", ref(r, [p.word, str::from_int(r, p.n)])));
+        println((p.word, " -> ", p.n));
         i := i + 1;
     }
 
