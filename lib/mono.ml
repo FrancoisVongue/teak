@@ -309,12 +309,13 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
     | Check.T.TEPrint (nl, es, ts) ->
         Check.T.TEPrint (nl, List.map (rewrite_expr subst) es,
                          List.map rt ts)
-    | Check.T.TEMakeClosure (name, caps, region, fn_ty) ->
-        (* The lifted lambda is monomorphic (closures over type vars are
-           rejected in check), so the name needs no mangling — just pull
-           it into the output. *)
-        request_fn name [];
-        Check.T.TEMakeClosure (name,
+    | Check.T.TEMakeClosure (name, type_args, caps, region, fn_ty) ->
+        (* The lifted lambda is generic over the enclosing function's
+           type params; specialize it for this instantiation exactly
+           like a TEFnRef. *)
+        let ts = List.map rt type_args in
+        request_fn name ts;
+        Check.T.TEMakeClosure (mangle_name name ts, [],
           List.map (fun (n, t) -> (n, rt t)) caps,
           rewrite_expr subst region, rt fn_ty)
   in

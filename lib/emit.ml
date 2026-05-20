@@ -312,7 +312,7 @@ let rec collect_expr (e : Check.T.expr) : unit =
       List.iter collect_ty ptys
   | Check.T.TEPrint (_, es, ts) ->
       List.iter collect_expr es; List.iter collect_ty ts
-  | Check.T.TEMakeClosure (_, caps, region, fn_ty) ->
+  | Check.T.TEMakeClosure (_, _, caps, region, fn_ty) ->
       collect_expr region;
       List.iter (fun (_, t) -> collect_ty t) caps;
       collect_ty fn_ty
@@ -366,7 +366,7 @@ let rec scan_fnvals (e : Check.T.expr) : unit =
   | TELetTuple (_, _, v, b, _, _) -> scan_fnvals v; scan_fnvals b
   | TEAwaitAll (bs, _, _) -> List.iter scan_fnvals bs
   | TEPrint (_, es, _) -> List.iter scan_fnvals es
-  | TEMakeClosure (_, _, region, _) -> scan_fnvals region
+  | TEMakeClosure (_, _, _, region, _) -> scan_fnvals region
 
 let collect_program (prog : Check.T.program) : unit =
   Hashtbl.clear fn_types_seen;
@@ -816,12 +816,12 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
         TEAwaitAll (List.map (rn env) bs, t, ptys)
     | TEPrint (nl, es, ts) ->
         TEPrint (nl, List.map (rn env) es, ts)
-    | TEMakeClosure (name, caps, region, fn_ty) ->
+    | TEMakeClosure (name, type_args, caps, region, fn_ty) ->
         let caps' =
           List.map (fun (n, t) ->
             ((try List.assoc n env with Not_found -> n), t)) caps
         in
-        TEMakeClosure (name, caps', rn env region, fn_ty)
+        TEMakeClosure (name, type_args, caps', rn env region, fn_ty)
   in
   let initial_env = List.map (fun (p, _) -> (p, p)) f.params in
   { f with body = rn initial_env f.body }
@@ -992,7 +992,7 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TELetTuple (_, _, _, _, t, _) -> t
   | Check.T.TEAwaitAll (_, t, _) -> t
   | Check.T.TEPrint _ -> TyInt
-  | Check.T.TEMakeClosure (_, _, _, fn_ty) -> fn_ty
+  | Check.T.TEMakeClosure (_, _, _, _, fn_ty) -> fn_ty
 
 (* C name of a lifted closure's environment struct. *)
 let env_struct_name (fn_name : string) : string = "__env_" ^ fn_name
@@ -2023,7 +2023,7 @@ let rec emit_expr
         rc iov n_iov rc);
       { stmts = List.rev !stmts; value = "0" }
 
-  | Check.T.TEMakeClosure (lname, caps, region, fn_ty) ->
+  | Check.T.TEMakeClosure (lname, _, caps, region, fn_ty) ->
       let fn_c = c_type fn_ty in
       let rc = emit_expr ctor_map region in
       if caps = [] then
@@ -2335,7 +2335,7 @@ let async_collect_locals (body : Check.T.expr) : (string * ty) list =
         go v; go b
     | TEAwaitAll (bs, _, _) -> List.iter go bs
     | TEPrint (_, es, _) -> List.iter go es
-    | TEMakeClosure (_, _, region, _) -> go region
+    | TEMakeClosure (_, _, _, region, _) -> go region
   in
   go body;
   List.rev !acc
@@ -2418,8 +2418,8 @@ let async_rewrite_to_frame
     | TEAwaitAll (bs, t, ptys) ->
         TEAwaitAll (List.map go bs, t, ptys)
     | TEPrint (nl, es, ts) -> TEPrint (nl, List.map go es, ts)
-    | TEMakeClosure (name, caps, region, fn_ty) ->
-        TEMakeClosure (name,
+    | TEMakeClosure (name, type_args, caps, region, fn_ty) ->
+        TEMakeClosure (name, type_args,
           List.map (fun (n, t) -> (rename n, t)) caps, go region, fn_ty)
   in go e
 
@@ -2492,7 +2492,7 @@ let rec emit_has_suspension (e : Check.T.expr) : bool =
       emit_has_suspension v || emit_has_suspension b
   | TEAwaitAll _ -> true
   | TEPrint (_, es, _) -> List.exists emit_has_suspension es
-  | TEMakeClosure (_, _, region, _) -> emit_has_suspension region
+  | TEMakeClosure (_, _, _, region, _) -> emit_has_suspension region
 
 (* Synthetic frame locals required by `await all { ... }` lowerings.
    Reset per function; the walker reads it to know what `fr->...` to
@@ -2606,8 +2606,8 @@ let allocate_await_all_locals_in_body (body : Check.T.expr) : Check.T.expr =
           ptys;
         TEAwaitAll (List.map go bs, t, ptys)
     | TEPrint (nl, es, ts) -> TEPrint (nl, List.map go es, ts)
-    | TEMakeClosure (name, caps, region, fn_ty) ->
-        TEMakeClosure (name, caps, go region, fn_ty)
+    | TEMakeClosure (name, type_args, caps, region, fn_ty) ->
+        TEMakeClosure (name, type_args, caps, go region, fn_ty)
   in
   go body
 
@@ -2673,8 +2673,8 @@ let rec desugar_let_tuples (e : Check.T.expr) : Check.T.expr =
   | TETupleIdx (e, i, t) -> TETupleIdx (r e, i, t)
   | TEAwaitAll (bs, t, ptys) -> TEAwaitAll (List.map r bs, t, ptys)
   | TEPrint (nl, es, ts) -> TEPrint (nl, List.map r es, ts)
-  | TEMakeClosure (name, caps, region, fn_ty) ->
-      TEMakeClosure (name, caps, r region, fn_ty)
+  | TEMakeClosure (name, type_args, caps, region, fn_ty) ->
+      TEMakeClosure (name, type_args, caps, r region, fn_ty)
   | TELetTuple (names, vt, v, b, bt, ads) ->
       let v' = r v in
       let b' = r b in

@@ -137,14 +137,16 @@ module T = struct
                      [single_expr] if a scalar was passed). ty list =
                      parallel list of each component's type — emit uses
                      it to pick the right writev formatter. *)
-    | TEMakeClosure of string * (string * ty) list * expr * ty
+    | TEMakeClosure of string * ty list * (string * ty) list * expr * ty
                   (* closure(r, fn...) construction. Fields: name of the
-                     lifted lambda function, captured (name, type) pairs
-                     copied into the environment, the region expression
-                     the environment is allocated in, and the resulting
-                     fn(args)->ret type. The lambda body itself lives in
-                     a generated top-level func whose `captures` field
-                     matches these pairs. *)
+                     lifted lambda function, type arguments to it (the
+                     enclosing function's type params, so mono can
+                     specialize the lambda like any generic function),
+                     captured (name, type) pairs copied into the
+                     environment, the region expression the environment
+                     is allocated in, and the resulting fn(args)->ret
+                     type. The lambda body lives in a generated top-level
+                     func whose `captures` field matches these pairs. *)
 
   type func = {
     name        : string;
@@ -327,17 +329,6 @@ let rec is_linear_ty (t : ty) : bool =
          itself linear — destructuring moves every component out. *)
       List.exists is_linear_ty ts
   | _ -> false
-
-let rec ty_has_tyvar (t : ty) : bool =
-  match t with
-  | TyVar _ -> true
-  | TyInt | TyBool -> false
-  | TyApp (_, args) -> List.exists ty_has_tyvar args
-  | TyFun (a, r) -> List.exists ty_has_tyvar a || ty_has_tyvar r
-  | TyPtr t -> ty_has_tyvar t
-  | TyTuple ts -> List.exists ty_has_tyvar ts
-  | TyMeta { resolved = Some t; _ } -> ty_has_tyvar t
-  | TyMeta _ -> false
 
 (* A Region is bound exclusively with `arena`, never `let`. This keeps
    the scope-anchor role visible at the binding site. *)
@@ -1079,7 +1070,11 @@ let rec infer (env : env) (tparams : string list)
         pl_name = lname; pl_params = params; pl_ret = ret;
         pl_body = tbody; pl_caps = captures } :: !pending_lambdas;
       let fn_ty = TyFun (List.map snd params, ret) in
-      (T.TEMakeClosure (lname, captures, tregion, fn_ty), fn_ty)
+      (* The lifted lambda is generic over the same type params as the
+         enclosing function; pass them as type arguments so mono
+         specializes it per instantiation. *)
+      let type_args = List.map (fun p -> TyVar p) tparams in
+      (T.TEMakeClosure (lname, type_args, captures, tregion, fn_ty), fn_ty)
   | EInt n  -> (T.TEInt n,  TyInt)
   | EFloat f -> (T.TEFloat f, TyApp ("float", []))
   | EBool b -> (T.TEBool b, TyBool)
@@ -2350,8 +2345,8 @@ let rec zonk_expr (e : T.expr) : T.expr =
                     List.map zonk_expect ptys)
   | T.TEPrint (nl, es, ts) ->
       T.TEPrint (nl, List.map zonk_expr es, List.map zonk_expect ts)
-  | T.TEMakeClosure (name, caps, region, fn_ty) ->
-      T.TEMakeClosure (name,
+  | T.TEMakeClosure (name, type_args, caps, region, fn_ty) ->
+      T.TEMakeClosure (name, List.map zonk_expect type_args,
         List.map (fun (n, t) -> (n, zonk_expect t)) caps,
         zonk_expr region, zonk_expect fn_ty)
 
@@ -2793,11 +2788,11 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       in
       (T.TEPrint (nl, List.rev es_rev, ts), live)
 
-  | T.TEMakeClosure (name, caps, region, fn_ty) ->
+  | T.TEMakeClosure (name, type_args, caps, region, fn_ty) ->
       (* Captures are non-linear copies (linear capture is rejected at
          finalize), so only the region expression needs move tracking. *)
       let (region', live) = check_moves_expr env live false region in
-      (T.TEMakeClosure (name, caps, region', fn_ty), live)
+      (T.TEMakeClosure (name, type_args, caps, region', fn_ty), live)
 
 (* ---------- check a function ---------- *)
 
@@ -2875,7 +2870,7 @@ let rec body_has_suspension (e : T.expr) : bool =
       body_has_suspension v || body_has_suspension b
   | TEAwaitAll _ -> true
   | TEPrint (_, es, _) -> List.exists body_has_suspension es
-  | TEMakeClosure (_, _, region, _) -> body_has_suspension region
+  | TEMakeClosure (_, _, _, region, _) -> body_has_suspension region
 
 let check_func (env : env) (f : func) : T.func =
   let (_, (param_tys, ret_ty)) = List.assoc f.name env.fns in
@@ -2916,12 +2911,6 @@ let check_func (env : env) (f : func) : T.func =
     let ret = zonk pl.pl_ret in
     let caps = List.map (fun (n, t) -> (n, zonk t)) pl.pl_caps in
     let lbody = zonk_expr pl.pl_body in
-    List.iter (fun (_, t) ->
-      if ty_has_tyvar t then
-        raise (Type_error
-          "polymorphic closures are not supported yet — a closure's \
-           parameter, return and captured types must be concrete"))
-      (param_tys @ caps @ [("", ret)]);
     List.iter (fun (n, t) ->
       (* A Region handle is a gen-checked observer: capturing a copy is
          safe because calling the closure after the region is dropped
@@ -2942,7 +2931,7 @@ let check_func (env : env) (f : func) : T.func =
         "await/yield inside a closure body is not supported yet");
     lifted_funcs := {
       T.name = pl.pl_name;
-      T.type_params = [];
+      T.type_params = f.type_params;
       T.params = param_tys;
       T.return_ty = ret;
       T.body = lbody';
