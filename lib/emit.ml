@@ -4184,6 +4184,19 @@ let emit ?(slots=1024) ?(cores=1) ?(ring_entries=64) ?(test_mode=false) (prog : 
      #include <stdio.h>\n\
      #include <unistd.h>\n\
      #include <sys/uio.h>\n\
+     #include <time.h>\n\
+     \n\
+     /* Monotonic clock for std/time. Returns microseconds (truncated to\n\
+      * the platform int). Absolute value may wrap, but differences over\n\
+      * any reasonable interval are exact — use for measuring durations. */\n\
+     int orto_now_us(void) {\n\
+     \    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);\n\
+     \    return (int)((long long)ts.tv_sec * 1000000 + ts.tv_nsec / 1000);\n\
+     }\n\
+     int orto_now_ms(void) {\n\
+     \    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);\n\
+     \    return (int)((long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000);\n\
+     }\n\
      \n\
      /* Concurrency mode, set by orto's --cores N flag (default 1).\n\
       * cores=1 → single-thread runtime, no pthread dependency.\n\

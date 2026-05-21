@@ -1,0 +1,17 @@
+// std/time.orto — monotonic clock for measuring durations.
+//
+// Backed by clock_gettime(CLOCK_MONOTONIC) in the runtime. `now_us`/`now_ms`
+// return microseconds/milliseconds since an unspecified epoch. The absolute
+// value may wrap (int is currently 32-bit), but a difference `b - a` over any
+// reasonable interval is exact — capture a start with now_us(), measure with
+// since_us(start).
+
+extern fn orto_now_us() -> int
+extern fn orto_now_ms() -> int
+
+fn now_us() -> int { orto_now_us() }
+fn now_ms() -> int { orto_now_ms() }
+
+// Elapsed time since a point captured with now_us()/now_ms().
+fn since_us(start: int) -> int { orto_now_us() - start }
+fn since_ms(start: int) -> int { orto_now_ms() - start }
