@@ -594,7 +594,13 @@ let emit_fn_typedefs () : string list =
 let emit_array_forwards () : string list =
   List.rev_map (fun (mangled, _inner) ->
     Printf.sprintf
-      "typedef struct { int slot; int offset; int len; long long expected_gen; } %s;"
+      (* 16-byte handle (was 24): halves the cell size of nodes that hold
+         Refs, which roughly halves allocation memory traffic. gen is
+         32-bit here — a slot's generation wraps after 2^32 region
+         recycles (~billions); the wrap-proof form is to pack slot+gen
+         into one 64-bit word (48-bit gen), a follow-up that keeps 16
+         bytes AND full safety. *)
+      "typedef struct { int slot; int offset; int len; int expected_gen; } %s;"
       mangled)
     !array_types_order
 
@@ -4181,14 +4187,14 @@ let emit ?(slots=1024) ?(cores=1) ?(ring_entries=64) ?(test_mode=false) (prog : 
       * 64-bit so it can't wrap in any realistic uptime — even at\n\
       * 1G reuses/s per slot, wrapping takes ~300 years. */\n\
      struct Region_slot {\n\
-     \    long long gen;\n\
+     \    int gen;\n\
      \    char* buffer;\n\
      \    size_t buffer_size;\n\
      \    size_t used;\n\
      \    int next_free;   /* -1 if in use, else next free slot id */\n\
      \    int is_stack;    /* 1 if buffer is stack memory (do not free) */\n\
      };\n\
-     typedef struct { int slot; long long expected_gen; } Region;\n\
+     typedef struct { int slot; int expected_gen; } Region;\n\
      ORTO_TLS struct Region_slot ORTO_REGIONS[ORTO_REGION_SLOTS];\n\
      ORTO_TLS int ORTO_REGION_FREE_HEAD = -1;\n\
      \n\
