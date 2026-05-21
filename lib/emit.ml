@@ -4224,6 +4224,11 @@ let emit ?(slots=1024) ?(cores=1) ?(ring_entries=64) ?(test_mode=false) (prog : 
      \    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);\n\
      \    return (int)((long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000);\n\
      }\n\
+     /* 64-bit nanoseconds — never wraps in practice. The Go-style API. */\n\
+     int64_t orto_now_ns(void) {\n\
+     \    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);\n\
+     \    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;\n\
+     }\n\
      \n\
      /* Concurrency mode, set by orto's --cores N flag (default 1).\n\
       * cores=1 → single-thread runtime, no pthread dependency.\n\

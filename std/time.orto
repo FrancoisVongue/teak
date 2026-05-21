@@ -1,17 +1,29 @@
-// std/time.orto — monotonic clock for measuring durations.
+// std/time.orto — monotonic clock, modelled on Go's time package.
 //
-// Backed by clock_gettime(CLOCK_MONOTONIC) in the runtime. `now_us`/`now_ms`
-// return microseconds/milliseconds since an unspecified epoch. The absolute
-// value may wrap (int is currently 32-bit), but a difference `b - a` over any
-// reasonable interval is exact — capture a start with now_us(), measure with
-// since_us(start).
+// `now()` returns a monotonic instant in nanoseconds (int is 64-bit, so
+// it never wraps in practice). Durations are plain int nanoseconds; the
+// unit helpers below name them like Go (time.Second, time.Millisecond).
+//
+//     let t0 = time::now();
+//     ... work ...
+//     let elapsed_ms = time::since(t0) / time::millisecond();
 
-extern fn orto_now_us() -> int
-extern fn orto_now_ms() -> int
+extern fn orto_now_ns() -> i64
+extern fn orto_now_us() -> i32
+extern fn orto_now_ms() -> i32
 
-fn now_us() -> int { orto_now_us() }
-fn now_ms() -> int { orto_now_ms() }
+// Monotonic instant, nanoseconds.
+fn now() -> int { to_int(orto_now_ns()) }
 
-// Elapsed time since a point captured with now_us()/now_ms().
-fn since_us(start: int) -> int { orto_now_us() - start }
-fn since_ms(start: int) -> int { orto_now_ms() - start }
+// Nanoseconds elapsed since an instant captured with now().
+fn since(start: int) -> int { now() - start }
+
+// Coarser clocks (microseconds / milliseconds), if ns is overkill.
+fn now_us() -> int { to_int(orto_now_us()) }
+fn now_ms() -> int { to_int(orto_now_ms()) }
+
+// Duration units, in nanoseconds — name a duration like Go does.
+fn nanosecond()  -> int { 1 }
+fn microsecond() -> int { 1000 }
+fn millisecond() -> int { 1000000 }
+fn second()      -> int { 1000000000 }
