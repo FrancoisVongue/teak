@@ -88,6 +88,7 @@ let rec collect_unsafe (e : Check.T.expr) : unit =
   | TESlice (a, lo, hi, _) -> go a; go lo; go hi
   | TEToInt a | TEToByte a | TEToU16 a | TEToU32 a | TEToU64 a
   | TEToFloat a | TEToIntFromFloat a -> go a
+  | TECast (_, a) -> go a
   | TECAlloc (_, n, _) -> go n
   | TECFree a | TEIsNull a -> go a
   | TEArrayData (a, _) -> go a
@@ -405,6 +406,7 @@ let rec collect_expr (e : Check.T.expr) : unit =
   | Check.T.TEToU32 e  -> collect_expr e
   | Check.T.TEToU64 e  -> collect_expr e
   | Check.T.TEToFloat e -> collect_expr e
+  | Check.T.TECast (_, e) -> collect_expr e
   | Check.T.TEToIntFromFloat e -> collect_expr e
   | Check.T.TECAlloc (et, n, t) -> collect_ty et; collect_expr n; collect_ty t
   | Check.T.TECFree p -> collect_expr p
@@ -471,6 +473,7 @@ let rec scan_fnvals (e : Check.T.expr) : unit =
   | TESlice (a, lo, hi, _) -> scan_fnvals a; scan_fnvals lo; scan_fnvals hi
   | TEToInt e | TEToByte e | TEToU16 e | TEToU32 e | TEToU64 e
   | TEToFloat e | TEToIntFromFloat e -> scan_fnvals e
+  | TECast (_, e) -> scan_fnvals e
   | TECAlloc (_, n, _) -> scan_fnvals n
   | TECFree p | TEIsNull p -> scan_fnvals p
   | TEArrayData (a, _) -> scan_fnvals a
@@ -533,13 +536,10 @@ let collect_program (prog : Check.T.program) : unit =
 
 let rec c_type (t : ty) : string =
   match t with
-  | TyInt -> "int"
+  | TyInt -> "long long"
   | TyBool -> "int"
-  | TyApp ("byte", []) -> "uint8_t"
-  | TyApp ("u16", [])  -> "uint16_t"
-  | TyApp ("u32", [])  -> "uint32_t"
-  | TyApp ("u64", [])  -> "uint64_t"
-  | TyApp ("float", []) -> "double"
+  | TyApp (n, []) when List.mem_assoc n numeric_c_type ->
+      List.assoc n numeric_c_type
   (* Compiler-internal pseudo-type. Never appears in user surface;
      used by emit to mark frame fields that must hold a 64-bit gen
      counter so per-slot wrap can't false-match an old handle. *)
@@ -563,6 +563,18 @@ let rec c_type (t : ty) : string =
   | TyVar n ->
       failwith (Printf.sprintf "emit: TyVar %S after mono" n)
   | TyMeta _ -> failwith "emit: TyMeta after mono"
+
+(* C types for FFI (extern) signatures. orto `int` is 64-bit, but C's
+   `int` is 32-bit and that's what libc uses — so at the FFI boundary
+   `int` maps to C `int`. The C prototype then drives the conversions:
+   a 64-bit orto arg is narrowed to int at the call, an int return is
+   sign-extended back to 64-bit — no churn at call sites. For 64-bit C
+   params/returns, declare the extern with `i64`/`u64`. *)
+let rec c_type_ffi (t : ty) : string =
+  match t with
+  | TyInt -> "int"
+  | TyPtr inner -> c_type_ffi inner ^ "*"
+  | _ -> c_type t
 
 let emit_fn_typedefs () : string list =
   (* A function value is a fat pointer: a code pointer plus a reference
@@ -920,6 +932,7 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
     | TEToU32 e  -> TEToU32 (rn env e)
     | TEToU64 e  -> TEToU64 (rn env e)
     | TEToFloat e -> TEToFloat (rn env e)
+    | TECast (t, e) -> TECast (t, rn env e)
     | TEToIntFromFloat e -> TEToIntFromFloat (rn env e)
     | TECAlloc (et, n, t) -> TECAlloc (et, rn env n, t)
     | TECFree p -> TECFree (rn env p)
@@ -1118,6 +1131,7 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TEToU32 _  -> TyApp ("u32", [])
   | Check.T.TEToU64 _  -> TyApp ("u64", [])
   | Check.T.TEToFloat _ -> TyApp ("float", [])
+  | Check.T.TECast (t, _) -> TyApp (t, [])
   | Check.T.TEToIntFromFloat _ -> TyInt
   | Check.T.TECAlloc (_, _, t) -> t
   | Check.T.TECFree _ -> TyInt
@@ -1159,7 +1173,10 @@ let rec emit_expr
   (ctor_map : (string, type_decl * variant * int) Hashtbl.t)
   (e : Check.T.expr) : c_code =
   match e with
-  | Check.T.TEInt n      -> { stmts = []; value = string_of_int n }
+  | Check.T.TEInt n      ->
+      (* int is 64-bit; emit a long long literal so literal arithmetic
+         (e.g. 1000000000 * 3) computes in 64-bit, not C's 32-bit int. *)
+      { stmts = []; value = Printf.sprintf "%dLL" n }
   | Check.T.TEFloat f    ->
       (* Use enough digits to round-trip a double exactly. Force a
          decimal point so `1.0` doesn't emit as `1` (which C parses
@@ -1860,7 +1877,7 @@ let rec emit_expr
   | Check.T.TEToInt sub ->
       let cs = emit_expr ctor_map sub in
       { stmts = cs.stmts;
-        value = Printf.sprintf "((int)(%s))" cs.value }
+        value = Printf.sprintf "((long long)(%s))" cs.value }
 
   | Check.T.TEToByte sub ->
       let cs = emit_expr ctor_map sub in
@@ -1887,11 +1904,16 @@ let rec emit_expr
       { stmts = cs.stmts;
         value = Printf.sprintf "((double)(%s))" cs.value }
 
+  | Check.T.TECast (target, sub) ->
+      let cs = emit_expr ctor_map sub in
+      { stmts = cs.stmts;
+        value = Printf.sprintf "((%s)(%s))" (c_type (TyApp (target, []))) cs.value }
+
   | Check.T.TEToIntFromFloat sub ->
       let cs = emit_expr ctor_map sub in
       (* C cast double->int truncates toward zero. *)
       { stmts = cs.stmts;
-        value = Printf.sprintf "((int)(%s))" cs.value }
+        value = Printf.sprintf "((long long)(%s))" cs.value }
 
   | Check.T.TECAlloc (et, n_e, _result_ty) ->
       let cn = emit_expr ctor_map n_e in
@@ -2378,7 +2400,7 @@ let emit_extern_decl (e : Check.T.extern) : string =
       else
         String.concat ", "
           ((List.map (fun (x, t) ->
-            Printf.sprintf "%s %s" (c_type t) x) e.params)
+            Printf.sprintf "%s %s" (c_type_ffi t) x) e.params)
            @ [user_data])
     in
     Printf.sprintf "extern int %s(%s);" e.name params_s
@@ -2389,9 +2411,9 @@ let emit_extern_decl (e : Check.T.extern) : string =
       else
         String.concat ", "
           (List.map (fun (x, t) ->
-            Printf.sprintf "%s %s" (c_type t) x) e.params)
+            Printf.sprintf "%s %s" (c_type_ffi t) x) e.params)
     in
-    Printf.sprintf "extern %s %s(%s);" (c_type e.return_ty) e.name params_s
+    Printf.sprintf "extern %s %s(%s);" (c_type_ffi e.return_ty) e.name params_s
 
 (* Parameter list of a function as it appears in C. A lifted closure
    (captures <> []) takes its environment as a leading `void *env`. *)
@@ -2572,7 +2594,8 @@ let async_collect_locals (body : Check.T.expr) : (string * ty) list =
     | TEAssignIdx (a, i, v, _) -> go a; go i; go v
     | TELen (e, _) -> go e
     | TESlice (a, lo, hi, _) -> go a; go lo; go hi
-    | TEToInt e | TEToByte e | TEToFloat e | TEToIntFromFloat e
+    | TECast (_, e)
+  | TEToInt e | TEToByte e | TEToFloat e | TEToIntFromFloat e
     | TEToU16 e | TEToU32 e | TEToU64 e -> go e
     | TECAlloc (_, n, _) -> go n
     | TECFree e -> go e
@@ -2661,6 +2684,7 @@ let async_rewrite_to_frame
     | TEToU32 e -> TEToU32 (go e)
     | TEToU64 e -> TEToU64 (go e)
     | TEToFloat e -> TEToFloat (go e)
+    | TECast (t, e) -> TECast (t, go e)
     | TEToIntFromFloat e -> TEToIntFromFloat (go e)
     | TECAlloc (et, n, rt) -> TECAlloc (et, go n, rt)
     | TECFree e -> TECFree (go e)
@@ -2738,6 +2762,7 @@ let rec emit_has_suspension (e : Check.T.expr) : bool =
   | TELen (e, _) -> emit_has_suspension e
   | TESlice (a, lo, hi, _) ->
       emit_has_suspension a || emit_has_suspension lo || emit_has_suspension hi
+  | TECast (_, e)
   | TEToInt e | TEToByte e | TEToFloat e | TEToIntFromFloat e
   | TEToU16 e | TEToU32 e | TEToU64 e ->
       emit_has_suspension e
@@ -2811,6 +2836,7 @@ let allocate_await_all_locals_in_body (body : Check.T.expr) : Check.T.expr =
     | TEToU32 e -> TEToU32 (go e)
     | TEToU64 e -> TEToU64 (go e)
     | TEToFloat e -> TEToFloat (go e)
+    | TECast (t, e) -> TECast (t, go e)
     | TEToIntFromFloat e -> TEToIntFromFloat (go e)
     | TECAlloc (et, n, t) -> TECAlloc (et, go n, t)
     | TECFree e -> TECFree (go e)
@@ -2923,6 +2949,7 @@ let rec desugar_let_tuples (e : Check.T.expr) : Check.T.expr =
   | TEToU32 e -> TEToU32 (r e)
   | TEToU64 e -> TEToU64 (r e)
   | TEToFloat e -> TEToFloat (r e)
+  | TECast (t, e) -> TECast (t, r e)
   | TEToIntFromFloat e -> TEToIntFromFloat (r e)
   | TECAlloc (et, n, t) -> TECAlloc (et, r n, t)
   | TECFree e -> TECFree (r e)

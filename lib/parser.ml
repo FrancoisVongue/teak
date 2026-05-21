@@ -111,6 +111,7 @@ let rec parse_ty st =
         TyApp (s, args)
       end else
         TyApp (s, [])
+  | TIdent name when is_numeric_type name -> TyApp (name, [])
   | t -> raise (Parse_error
     (Printf.sprintf "expected type, got %s" (Token.show t)))
 
@@ -478,6 +479,18 @@ and parse_atom_consume st =
        | t -> raise (Parse_error
            (Printf.sprintf "expected `)` or `,` after parenthesised expression, got %s"
               (Token.show t))))
+  | TIdent name
+    when String.length name > 3 && String.sub name 0 3 = "to_"
+         && is_numeric_type (String.sub name 3 (String.length name - 3))
+         && peek st = TLParen ->
+      (* to_<T>(e) — convert e to numeric type T. One rule for the whole
+         matrix (to_i64, to_u8, to_f32, ...). The legacy to_int/to_byte/
+         to_u16/to_u32/to_u64/to_float are keyword tokens, handled above. *)
+      let t = String.sub name 3 (String.length name - 3) in
+      advance st;
+      let e = parse_expr st in
+      expect st TRParen;
+      ECast (t, e)
   | TIdent name ->
       (* Qualified reference `mod::name` (e.g. `vec::push`) — let modules
          share short verb names (new/push/get) without import clashes.

@@ -71,6 +71,8 @@ module T = struct
                   (* to_u64(n)  — int to u64 (signed→unsigned reinterpret) *)
     | TEToFloat of expr
                   (* to_float(n) — int → float *)
+    | TECast   of string * expr
+                  (* to_<T>(e) — convert e to numeric type T (a C cast) *)
     | TEFloat  of float
                   (* float literal *)
     | TEToIntFromFloat of expr
@@ -582,17 +584,18 @@ let rec validate_ty
                "Stream expects exactly 1 type argument, got %d"
                (List.length args)));
         TyApp ("Stream", args)
-      end else if n = "byte" || n = "u16" || n = "u32" || n = "u64" then begin
-        (* Unsigned int primitives, fixed width. byte = u8.
-           No arithmetic in orto; go through `to_int` for math, then
-           `to_<width>` to truncate back. Same idiom as byte. *)
+      end else if is_numeric_type n then begin
+        (* Fixed-width numeric primitives: i8..i128, u8..u128, f16..f128
+           (byte = u8, float = f64). No arithmetic directly on the sized
+           types — go through `int`/`float` with to_<T> casts, same idiom
+           as byte. The whole matrix routes through one registry. *)
         if List.length args <> 0 then
           raise (Type_error
             (Printf.sprintf
                "%s takes no type arguments, got %d" n
                (List.length args)));
         TyApp (n, [])
-      end else if n = "float" then begin
+      end else if false then begin
         (* float — IEEE 754 double, 8 bytes. NaN / Infinity behave per
            IEEE: NaN != NaN, comparisons with NaN are false. *)
         if List.length args <> 0 then
@@ -1917,18 +1920,16 @@ let rec infer (env : env) (tparams : string list)
   | EToInt sub_e ->
       let (ts, ts_ty) = infer env tparams vars sub_e in
       (match prune ts_ty with
-       | TyApp ("byte", []) -> (T.TEToInt ts, TyInt)
-       | TyApp ("u16",  []) -> (T.TEToInt ts, TyInt)
-       | TyApp ("u32",  []) -> (T.TEToInt ts, TyInt)
-       | TyApp ("u64",  []) -> (T.TEToInt ts, TyInt)
-       | TyApp ("float", []) -> (T.TEToIntFromFloat ts, TyInt)
+       | TyApp (n, []) when is_float_type n -> (T.TEToIntFromFloat ts, TyInt)
+       | TyInt -> (T.TEToInt ts, TyInt)            (* no-op / identity *)
+       | TyApp (n, []) when is_numeric_type n -> (T.TEToInt ts, TyInt)
        | TyMeta _ ->
            unify ts_ty (TyApp ("byte", []));
            (T.TEToInt ts, TyInt)
        | t ->
            raise (Type_error
              (Printf.sprintf
-                "to_int expects byte/u16/u32/u64/float, got %s"
+                "to_int expects a numeric source, got %s"
                 (show_ty (zonk t)))))
 
   | EToByte sub_e ->
@@ -1977,6 +1978,20 @@ let rec infer (env : env) (tparams : string list)
               "to_float expects int, got %s"
               (show_ty (zonk ts_ty)))));
       (T.TEToFloat ts, TyApp ("float", []))
+
+  | ECast (target, sub_e) ->
+      let (ts, ts_ty) = infer env tparams vars sub_e in
+      let src_ok = match prune ts_ty with
+        | TyInt -> true
+        | TyApp (n, []) when is_numeric_type n -> true
+        | TyMeta _ -> unify ts_ty TyInt; true
+        | _ -> false
+      in
+      if not src_ok then
+        raise (Type_error
+          (Printf.sprintf "to_%s expects a numeric source, got %s"
+             target (show_ty (zonk ts_ty))));
+      (T.TECast (target, ts), TyApp (target, []))
 
   | ECAlloc (elem_t, n_e) ->
       let elem_t = validate_ty_for_ascription env tparams elem_t in
@@ -2428,6 +2443,7 @@ let rec zonk_expr (e : T.expr) : T.expr =
   | T.TEToU32 e  -> T.TEToU32 (zonk_expr e)
   | T.TEToU64 e  -> T.TEToU64 (zonk_expr e)
   | T.TEToFloat e -> T.TEToFloat (zonk_expr e)
+  | T.TECast (t, e) -> T.TECast (t, zonk_expr e)
   | T.TEToIntFromFloat e -> T.TEToIntFromFloat (zonk_expr e)
   | T.TECAlloc (et, n, rt) ->
       T.TECAlloc (zonk_expect et, zonk_expr n, zonk_expect rt)
@@ -2752,6 +2768,10 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       let (sub', live) = check_moves_expr env live false sub in
       (T.TEToFloat sub', live)
 
+  | T.TECast (t, sub) ->
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TECast (t, sub'), live)
+
   | T.TEToIntFromFloat sub ->
       let (sub', live) = check_moves_expr env live false sub in
       (T.TEToIntFromFloat sub', live)
@@ -2974,7 +2994,7 @@ let rec body_has_suspension (e : T.expr) : bool =
       body_has_suspension a
       || body_has_suspension lo || body_has_suspension hi
   | TEToInt e | TEToByte e | TEToFloat e | TEToIntFromFloat e
-  | TEToU16 e | TEToU32 e | TEToU64 e ->
+  | TEToU16 e | TEToU32 e | TEToU64 e | TECast (_, e) ->
       body_has_suspension e
   | TECAlloc (_, n, _) -> body_has_suspension n
   | TECFree e -> body_has_suspension e

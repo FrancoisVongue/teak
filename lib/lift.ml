@@ -71,6 +71,7 @@ let rec free_vars (e : expr) : SS.t =
   | EAssignIdx (a, i, v) -> u [free_vars a; free_vars i; free_vars v]
   | ELen e -> free_vars e
   | ESlice (a, lo, hi) -> u [free_vars a; free_vars lo; free_vars hi]
+  | ECast (_, e)
   | EToInt e | EToByte e | EToU16 e | EToU32 e | EToU64 e | EToFloat e ->
       free_vars e
   | ECAlloc (_, n) -> free_vars n
@@ -169,6 +170,7 @@ let lift (prog : program) : program =
     | EToU32 e -> EToU32 (xform e)
     | EToU64 e -> EToU64 (xform e)
     | EToFloat e -> EToFloat (xform e)
+    | ECast (t, e) -> ECast (t, xform e)
     | ECAlloc (t, n) -> ECAlloc (t, xform n)
     | ECFree p -> ECFree (xform p)
     | EIsNull p -> EIsNull (xform p)

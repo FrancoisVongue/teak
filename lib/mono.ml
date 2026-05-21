@@ -135,14 +135,9 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         TyApp ("Stream", [rewrite_ty subst inner])
     | TyApp ("Stream", _) ->
         failwith "mono rewrite_ty: Stream with wrong arity (should be unary)"
-    | TyApp ("byte", []) | TyApp ("u16", []) | TyApp ("u32", []) | TyApp ("u64", []) ->
-        t
-    | TyApp ("byte", _) ->
-        failwith "mono rewrite_ty: byte takes no type arguments"
-    | TyApp ("float", []) ->
-        TyApp ("float", [])
-    | TyApp ("float", _) ->
-        failwith "mono rewrite_ty: float takes no type arguments"
+    | TyApp (n, []) when is_numeric_type n -> t   (* whole numeric matrix *)
+    | TyApp (n, _) when is_numeric_type n ->
+        failwith (Printf.sprintf "mono rewrite_ty: %s takes no type arguments" n)
     | TyApp (n, args) ->
         let args = List.map (rewrite_ty subst) args in
         if is_record_name n then begin
@@ -263,6 +258,8 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         Check.T.TEToU64 (rewrite_expr subst e)
     | Check.T.TEToFloat e ->
         Check.T.TEToFloat (rewrite_expr subst e)
+    | Check.T.TECast (t, e) ->
+        Check.T.TECast (t, rewrite_expr subst e)
     | Check.T.TEToIntFromFloat e ->
         Check.T.TEToIntFromFloat (rewrite_expr subst e)
     | Check.T.TECAlloc (et, n, rt_) ->

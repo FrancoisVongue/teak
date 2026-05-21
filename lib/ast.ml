@@ -26,6 +26,23 @@ and ty =
   | TyTuple of ty list           (* (T1, T2, ..., Tn) for n >= 2 — anonymous product *)
   | TyMeta of meta               (* unification variable, only inside the checker *)
 
+(* The numeric type matrix: signed/unsigned integers 8..128 and floats,
+   like Zig/Go. One registry, shared by parser (recognising a type name
+   and a `to_<T>` cast), checker, and emit. `byte` aliases u8, `float`
+   aliases f64; `int` is the word-size signed arithmetic type, handled
+   separately as TyInt. *)
+let numeric_c_type : (string * string) list =
+  [ "i8", "int8_t"; "i16", "int16_t"; "i32", "int32_t"; "i64", "int64_t";
+    "i128", "__int128";
+    "u8", "uint8_t"; "u16", "uint16_t"; "u32", "uint32_t"; "u64", "uint64_t";
+    "u128", "unsigned __int128";
+    "f16", "_Float16"; "f32", "float"; "f64", "double"; "f128", "__float128";
+    "byte", "uint8_t"; "float", "double" ]
+
+let is_numeric_type (n : string) : bool = List.mem_assoc n numeric_c_type
+let is_float_type (n : string) : bool =
+  List.mem n ["f16"; "f32"; "f64"; "f128"; "float"]
+
 type pat =
   | PBind of string                      (* lowercase ident — binds scrutinee to name; "_" = wildcard *)
   | PCtor of string * string list
@@ -97,6 +114,7 @@ type expr =
   | EToU32  of expr                       (* to_u32(n)  — truncate int to u32 *)
   | EToU64  of expr                       (* to_u64(n)  — int to u64 (signed reinterpret) *)
   | EToFloat of expr                      (* to_float(n) — int → float *)
+  | ECast   of string * expr              (* to_<T>(e) — convert e to numeric type T *)
   | ECAlloc of ty * expr                  (* c_alloc[T](n) — malloc n*sizeof(T), returns *T *)
   | ECFree  of expr                       (* c_free(p) — free raw pointer *)
   | ENullPtr of ty                        (* null_ptr[T]() — typed NULL *)
@@ -364,6 +382,7 @@ let rec show_expr = function
   | EToU32 e -> Printf.sprintf "to_u32(%s)" (show_expr e)
   | EToU64 e -> Printf.sprintf "to_u64(%s)" (show_expr e)
   | EToFloat e -> Printf.sprintf "to_float(%s)" (show_expr e)
+  | ECast (t, e) -> Printf.sprintf "to_%s(%s)" t (show_expr e)
   | ECAlloc (t, n) ->
       Printf.sprintf "c_alloc[%s](%s)" (show_ty t) (show_expr n)
   | ECFree p -> Printf.sprintf "c_free(%s)" (show_expr p)
