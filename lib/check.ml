@@ -1058,6 +1058,19 @@ let check_match_arms_structure
   end
 
 (* vars carries (name, (type, is_mut)) so EAssign can verify mutability. *)
+(* Expected-type propagation for literals: in a context with a known
+   numeric target (let ascription, function argument, return), a bare
+   int/float literal is born at that type. `let x: i64 = 5` just works,
+   no `to_i64`. Not a runtime conversion — the literal adopts the type
+   (visible in the annotation), so no hidden magic. We rewrite to the
+   exact target name, so unification against the annotation always
+   matches (no byte/u8 alias issues). *)
+let coerce_literal (expected : ty option) (e : expr) : expr =
+  match expected with
+  | Some (TyApp (n, [])) when is_numeric_type n ->
+      (match e with EInt _ | EFloat _ -> ECast (n, e) | _ -> e)
+  | _ -> e
+
 let rec infer (env : env) (tparams : string list)
   (vars : (string * (ty * bool)) list) (e : expr)
   : T.expr * ty =
@@ -1354,6 +1367,12 @@ let rec infer (env : env) (tparams : string list)
 
   | ELet (x, is_mut, ascription, value, body) ->
       if x <> "_" then check_not_c_reserved "let-binding" x;
+      let expected =
+        match ascription with
+        | Some t -> Some (validate_ty_for_ascription env tparams t)
+        | None -> None
+      in
+      let value = coerce_literal expected value in
       let (tv, tv_ty) = infer env tparams vars value in
       if is_region_ty tv_ty then
         raise (Type_error
@@ -1361,11 +1380,9 @@ let rec infer (env : env) (tparams : string list)
              "regions are bound with `arena`, not `let` \
               (write `arena %s = ...`). A region is a scope-anchored \
               resource, not a copyable value." x));
-      (match ascription with
+      (match expected with
        | None -> ()
-       | Some t ->
-           let t = validate_ty_for_ascription env tparams t in
-           unify tv_ty t);
+       | Some t -> unify tv_ty t);
       (* Linear types (Region, user `linear` structs/enums) cannot be
          `mut` — reassigning would silently leak the previous value. *)
       if is_mut && is_linear_ty tv_ty then
@@ -2371,6 +2388,7 @@ and check_args env tparams vars callee_name param_tys args : T.expr list =
       (Printf.sprintf "%S expects %d argument(s), got %d"
          callee_name n_expected n_got));
   List.map2 (fun expected arg ->
+    let arg = coerce_literal (Some expected) arg in
     let (targ, t) = infer env tparams vars arg in
     (try unify expected t
      with Type_error _ ->
