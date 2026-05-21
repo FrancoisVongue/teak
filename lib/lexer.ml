@@ -222,7 +222,7 @@ let lex (src : string) : token list =
           done;
           if Buffer.length buf = 0 then
             raise (Lex_error ("hex literal needs at least one digit", !i));
-          push (TInt (int_of_string ("0x" ^ Buffer.contents buf)))
+          push (TInt (Int64.of_string ("0x" ^ Buffer.contents buf)))
         end
         else if c = '0' && !i + 1 < n
                 && (src.[!i + 1] = 'b' || src.[!i + 1] = 'B') then begin
@@ -233,7 +233,7 @@ let lex (src : string) : token list =
           done;
           if Buffer.length buf = 0 then
             raise (Lex_error ("binary literal needs at least one digit", !i));
-          push (TInt (int_of_string ("0b" ^ Buffer.contents buf)))
+          push (TInt (Int64.of_string ("0b" ^ Buffer.contents buf)))
         end
         else begin
           Buffer.clear buf;
@@ -274,7 +274,7 @@ let lex (src : string) : token list =
             end;
             push (TFloat (float_of_string (Buffer.contents buf)))
           end else
-            push (TInt (int_of_string (Buffer.contents buf)))
+            push (TInt (Int64.of_string (Buffer.contents buf)))
         end
 
     | c when is_lower_ident_start c ->

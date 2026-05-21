@@ -63,7 +63,7 @@ type binop =
 type unop = OpNeg | OpNot | OpBNot
 
 type expr =
-  | EInt    of int
+  | EInt    of int64
   | EFloat  of float
   | EBool   of bool
   | EVar    of string
@@ -293,7 +293,7 @@ let show_unop = function
   | OpBNot -> "~"
 
 let rec show_expr = function
-  | EInt n          -> string_of_int n
+  | EInt n          -> Int64.to_string n
   | EFloat f        -> Printf.sprintf "%g" f
   | EBool true      -> "true"
   | EBool false     -> "false"

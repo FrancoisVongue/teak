@@ -2,7 +2,7 @@
 
 type token =
   (* literals *)
-  | TInt of int
+  | TInt of int64
   | TFloat of float
   | TIdent of string
   | TCtorIdent of string
@@ -108,7 +108,7 @@ type token =
   | TEOF
 
 let show = function
-  | TInt n        -> Printf.sprintf "INT(%d)" n
+  | TInt n        -> Printf.sprintf "INT(%Ld)" n
   | TFloat f      -> Printf.sprintf "FLOAT(%g)" f
   | TIdent s      -> Printf.sprintf "IDENT(%s)" s
   | TCtorIdent s  -> Printf.sprintf "CTOR(%s)" s

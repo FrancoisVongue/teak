@@ -17,7 +17,7 @@ exception Type_error of string
 
 module T = struct
   type expr =
-    | TEInt    of int
+    | TEInt    of int64
     | TEBool   of bool
     | TEVar    of string * ty
     | TEStringLit of string
@@ -2329,7 +2329,7 @@ let rec infer (env : env) (tparams : string list)
            let elem_e = T.TEIndex (src_var, i_var, elem) in
            let inc =
              T.TEAssign (i_name,
-               T.TEBinop (OpAdd, i_var, T.TEInt 1, TyInt), TyInt) in
+               T.TEBinop (OpAdd, i_var, T.TEInt 1L, TyInt), TyInt) in
            (* bind x = src[i]; run body (value discarded); then i := i+1 *)
            let body_then_inc =
              T.TELet ("_", tbody_ty, tbody, inc, TyInt, false) in
@@ -2342,7 +2342,7 @@ let rec infer (env : env) (tparams : string list)
                loop_body) in
            let lowered =
              T.TELet (src_name, src_ty, tsrc,
-               T.TELet (i_name, TyInt, T.TEInt 0, loop, TyInt, false),
+               T.TELet (i_name, TyInt, T.TEInt 0L, loop, TyInt, false),
                TyInt, false) in
            (lowered, TyInt)
        | _ ->

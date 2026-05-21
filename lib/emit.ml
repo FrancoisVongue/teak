@@ -1176,7 +1176,7 @@ let rec emit_expr
   | Check.T.TEInt n      ->
       (* int is 64-bit; emit a long long literal so literal arithmetic
          (e.g. 1000000000 * 3) computes in 64-bit, not C's 32-bit int. *)
-      { stmts = []; value = Printf.sprintf "%dLL" n }
+      { stmts = []; value = Printf.sprintf "%LdLL" n }
   | Check.T.TEFloat f    ->
       (* Use enough digits to round-trip a double exactly. Force a
          decimal point so `1.0` doesn't emit as `1` (which C parses
@@ -1629,7 +1629,7 @@ let rec emit_expr
          touch only live bytes, like C does. *)
       let init_stmts =
         match init_e, size_e with
-        | Check.T.TECtor (c, _, args, _), Check.T.TEInt 1 ->
+        | Check.T.TECtor (c, _, args, _), Check.T.TEInt 1L ->
             let arg_codes = List.map (emit_expr ctor_map) args in
             let (_, _, tag) =
               try Hashtbl.find ctor_map c

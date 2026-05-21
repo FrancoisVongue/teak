@@ -339,8 +339,8 @@ and parse_postfix_chain st head =
       (match eat st with
        | TIdent s ->
            parse_postfix_chain st (EField (head, s))
-       | TInt n when n >= 0 ->
-           parse_postfix_chain st (ETupleIdx (head, n))
+       | TInt n when n >= 0L ->
+           parse_postfix_chain st (ETupleIdx (head, Int64.to_int n))
        | t -> raise (Parse_error
          (Printf.sprintf "expected field name or tuple index after `.`, got %s"
             (Token.show t))))
@@ -612,7 +612,7 @@ and parse_atom_consume st =
                 EArray (r, first, init)        (* ref(r, n, init) *)
             | _ ->
                 expect st TRParen;
-                EArray (r, EInt 1, first)))    (* ref(r, v) — one cell *)
+                EArray (r, EInt 1L, first)))    (* ref(r, v) — one cell *)
   | TIf -> parse_if_after_kw st
   | TMatch -> parse_match_after_kw st
   | TWhile ->
@@ -642,10 +642,10 @@ and parse_atom_consume st =
            let hi = parse_expr st in
            let body = parse_block st in
            let hi_var = Printf.sprintf "_for_hi_%d" (Hashtbl.hash (var, hi)) in
-           let bump = EAssign (var, EBinop (OpAdd, EVar var, EInt 1)) in
+           let bump = EAssign (var, EBinop (OpAdd, EVar var, EInt 1L)) in
            let new_body =
              ELet ("_", false, None, body,
-               ELet ("_", false, None, bump, EInt 0))
+               ELet ("_", false, None, bump, EInt 0L))
            in
            ELet (hi_var, false, None, hi,
              ELet (var, true, None, lo_or_src,
@@ -778,7 +778,7 @@ and parse_atom_consume st =
       expect st TComma;
       let a = parse_expr st in
       (match a with
-       | EInt k when k > 0 && (k land (k - 1)) = 0 -> ()
+       | EInt k when k > 0L && Int64.logand k (Int64.sub k 1L) = 0L -> ()
        | EInt _ -> raise (Parse_error
            "aligned_region(_, A): A must be a positive power of two")
        | _ -> raise (Parse_error
@@ -863,10 +863,10 @@ and parse_single_pat st =
       end else
         PCtor (c, [])
   | TIdent x -> PBind x
-  | TInt n -> PInt n
+  | TInt n -> PInt (Int64.to_int n)
   | TMinus ->
       (match eat st with
-       | TInt n -> PInt (- n)
+       | TInt n -> PInt (- (Int64.to_int n))
        | t -> raise (Parse_error
          (Printf.sprintf "expected integer literal after `-` in pattern, got %s"
             (Token.show t))))
