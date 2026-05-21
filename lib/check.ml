@@ -1281,6 +1281,7 @@ let rec infer (env : env) (tparams : string list)
                   (Printf.sprintf "record %S has no field %S" name fname))
             in
             let expected = subst_ty subst decl_ty in
+            let value = coerce_literal (Some expected) value in
             let (tv, tv_ty) = infer env tparams vars value in
             (try unify expected tv_ty
              with Type_error _ ->
