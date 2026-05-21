@@ -1580,7 +1580,6 @@ let rec emit_expr
          copyable; the buffer is owned by the region. *)
       let cr = emit_expr ctor_map region_e in
       let cn = emit_expr ctor_map size_e in
-      let cv = emit_expr ctor_map init_e in
       let r_var = fresh "_r" in
       let n_var = fresh "_n" in
       let off_var = fresh "_off" in
@@ -1589,7 +1588,7 @@ let rec emit_expr
       let arr_var = fresh "_arr" in
       let arr_c = c_type result_ty in
       let elem_c = c_type (ty_of_expr init_e) in
-      let stmts = cr.stmts @ cn.stmts @ cv.stmts @ [
+      let region_setup = cr.stmts @ cn.stmts @ [
         Printf.sprintf "Region %s = %s;" r_var cr.value;
         Printf.sprintf "if (ORTO_REGIONS[%s.slot].gen != %s.expected_gen) abort();"
           r_var r_var;
@@ -1604,13 +1603,40 @@ let rec emit_expr
           r_var n_var elem_c;
         Printf.sprintf "%s* %s = (%s*)(ORTO_REGIONS[%s.slot].buffer + %s);"
           elem_c slots_var elem_c r_var off_var;
-        Printf.sprintf "for (int %s = 0; %s < %s; %s++) %s[%s] = %s;"
-          i_var i_var n_var i_var slots_var i_var cv.value;
+      ] in
+      (* Filling a single cell with a constructor (the common "box" /
+         recursive-data case): write the active variant's fields straight
+         into the cell. The obvious `cell = (T){...}` would force C to
+         zero the whole union (the inactive, larger variant's bytes) —
+         pure waste, since the tag gates every read. Direct field writes
+         touch only live bytes, like C does. *)
+      let init_stmts =
+        match init_e, size_e with
+        | Check.T.TECtor (c, _, args, _), Check.T.TEInt 1 ->
+            let arg_codes = List.map (emit_expr ctor_map) args in
+            let (_, _, tag) =
+              try Hashtbl.find ctor_map c
+              with Not_found -> failwith (Printf.sprintf "emit: unknown ctor %S" c)
+            in
+            List.concat_map (fun a -> a.stmts) arg_codes
+            @ [ Printf.sprintf "%s[0].tag = %d;" slots_var tag ]
+            @ List.mapi (fun i a ->
+                Printf.sprintf "%s[0].as.%s.f%d = %s;" slots_var c i a.value)
+                arg_codes
+        | _ ->
+            let cv = emit_expr ctor_map init_e in
+            cv.stmts @ [
+              Printf.sprintf "for (int %s = 0; %s < %s; %s++) %s[%s] = %s;"
+                i_var i_var n_var i_var slots_var i_var cv.value;
+            ]
+      in
+      let handle = [
         Printf.sprintf
           "%s %s = ((%s){ .slot = %s.slot, .offset = %s, .len = %s, .expected_gen = %s.expected_gen });"
           arr_c arr_var arr_c r_var off_var n_var r_var;
       ] in
-      { stmts; value = arr_var }
+      { stmts = region_setup @ init_stmts @ handle; value = arr_var }
+
 
   | Check.T.TEArrayLit (region_e, elems, result_ty) ->
       (* array(r, [v0..vN-1]): bump-allocate N slots in r, store the
