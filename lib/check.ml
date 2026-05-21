@@ -1066,10 +1066,25 @@ let check_match_arms_structure
    (visible in the annotation), so no hidden magic. We rewrite to the
    exact target name, so unification against the annotation always
    matches (no byte/u8 alias issues). *)
-let coerce_literal (expected : ty option) (e : expr) : expr =
+let rec coerce_literal (expected : ty option) (e : expr) : expr =
   match expected with
   | Some (TyApp (n, [])) when is_numeric_type n ->
-      (match e with EInt _ | EFloat _ -> ECast (n, e) | _ -> e)
+      let go = coerce_literal expected in
+      (match e with
+       | EInt _ | EFloat _ -> ECast (n, e)
+       (* Push the expected type into tail/value positions so nested
+          literals adopt it too: `let x: i64 = if c { 5 } else { 7 }`. *)
+       | EIf (c, t, el) -> EIf (c, go t, go el)
+       | EMatch (s, arms) ->
+           EMatch (s, List.map (fun (p, g, b) -> (p, g, go b)) arms)
+       | ELet (x, m, asc, v, body) -> ELet (x, m, asc, v, go body)
+       | EBinop (op, a, b)
+         when (match op with
+               | OpAdd | OpSub | OpMul | OpDiv | OpMod
+               | OpBOr | OpBAnd | OpBXor | OpShl | OpShr -> true
+               | _ -> false) ->
+           EBinop (op, go a, go b)   (* result type = operand type *)
+       | _ -> e)
   | _ -> e
 
 let rec infer (env : env) (tparams : string list)
@@ -3080,7 +3095,8 @@ let check_func (env : env) (f : func) : T.func =
       (List.map (fun t -> (t, false)) param_tys)
   in
   let tparams = f.type_params in
-  let (tbody, tbody_ty) = infer env tparams vars f.body in
+  let (tbody, tbody_ty) =
+    infer env tparams vars (coerce_literal (Some ret_ty) f.body) in
   current_return_ty := None;
   (try unify ret_ty tbody_ty
    with Type_error _ ->
