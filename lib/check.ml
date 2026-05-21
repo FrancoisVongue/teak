@@ -209,18 +209,19 @@ end
 
 type op_typing =
   | OpFixed of ty * ty     (* operand type, result type *)
-  | OpEqual                (* both operands same type; must be int/bool/byte/float *)
-  | OpNumeric              (* both operands same numeric (int or float); result same *)
-  | OpComparison           (* both operands same numeric (int or float); result bool *)
+  | OpEqual                (* both operands same comparable type; result bool *)
+  | OpNumeric              (* both operands same numeric (any int/float); result same *)
+  | OpComparison           (* both operands same numeric; result bool *)
+  | OpInteger              (* both operands same integer type (no float); result same *)
 
 let binop_typing = function
   | OpAdd | OpSub | OpMul | OpDiv          -> OpNumeric
-  | OpMod                                   -> OpFixed (TyInt, TyInt)  (* C: only int *)
+  | OpMod                                   -> OpInteger  (* %, bitwise, shift: any int *)
   | OpLt | OpGt | OpLe | OpGe              -> OpComparison
   | OpAnd | OpOr                            -> OpFixed (TyBool, TyBool)
   | OpEq | OpNeq                            -> OpEqual
-  | OpBOr | OpBAnd | OpBXor                 -> OpFixed (TyInt, TyInt)
-  | OpShl | OpShr                           -> OpFixed (TyInt, TyInt)
+  | OpBOr | OpBAnd | OpBXor                 -> OpInteger
+  | OpShl | OpShr                           -> OpInteger
 
 let unop_typing = function
   | OpNeg  -> (TyInt, TyInt)
@@ -1135,17 +1136,47 @@ let rec infer (env : env) (tparams : string list)
       (T.TEStringLit s, result_ty)
 
   | EBinop (op, a, b) ->
-      let (ta, ta_ty) = infer env tparams vars a in
-      let (tb, tb_ty) = infer env tparams vars b in
-      let require_numeric_operand t =
+      (* A bare literal adopts the other operand's numeric type:
+         `count * 2` works whether count is int or i32 (2 becomes i32).
+         Same expected-type propagation, applied across the operator. *)
+      let is_lit = function EInt _ | EFloat _ -> true | _ -> false in
+      let (ta, ta_ty, tb, tb_ty) =
+        if is_lit a && not (is_lit b) then
+          let (tb, tb_ty) = infer env tparams vars b in
+          let (ta, ta_ty) = infer env tparams vars (coerce_literal (Some tb_ty) a) in
+          (ta, ta_ty, tb, tb_ty)
+        else if is_lit b && not (is_lit a) then
+          let (ta, ta_ty) = infer env tparams vars a in
+          let (tb, tb_ty) = infer env tparams vars (coerce_literal (Some ta_ty) b) in
+          (ta, ta_ty, tb, tb_ty)
+        else
+          let (ta, ta_ty) = infer env tparams vars a in
+          let (tb, tb_ty) = infer env tparams vars b in
+          (ta, ta_ty, tb, tb_ty)
+      in
+      (* Operand classes. Any numeric type works directly (i8..i128,
+         u8..u128, f16..f128, int, float) — sized ints are first-class,
+         not storage-only. Both operands must be the *same* type: no
+         implicit mixing (no `i32 + i64`), per the no-implicit-conversion
+         law — convert one explicitly. *)
+      let require_numeric kind t =
         match prune t with
         | TyInt -> ()
-        | TyApp ("float", []) -> ()
-        | TyMeta _ -> unify t TyInt   (* default to int *)
+        | TyApp (n, []) when is_numeric_type n -> ()
+        | TyMeta _ -> unify t TyInt   (* unconstrained literal → int *)
         | t ->
             raise (Type_error
-              (Printf.sprintf
-                 "%s requires int or float operands, got %s"
+              (Printf.sprintf "%s requires %s operands, got %s"
+                 (show_binop op) kind (show_ty (zonk t))))
+      in
+      let require_integer t =
+        match prune t with
+        | TyInt -> ()
+        | TyApp (n, []) when is_numeric_type n && not (is_float_type n) -> ()
+        | TyMeta _ -> unify t TyInt
+        | t ->
+            raise (Type_error
+              (Printf.sprintf "%s requires integer operands, got %s"
                  (show_binop op) (show_ty (zonk t))))
       in
       let result_ty =
@@ -1158,23 +1189,26 @@ let rec infer (env : env) (tparams : string list)
             unify ta_ty tb_ty;
             (match prune ta_ty with
              | TyInt | TyBool -> ()
-             | TyApp ("byte", []) -> ()
-             | TyApp ("float", []) -> ()
+             | TyApp (n, []) when is_numeric_type n -> ()
              | TyMeta _ -> unify ta_ty TyInt
              | t ->
                  raise (Type_error
                    (Printf.sprintf
-                      "%s requires int, bool, byte, or float operands, got %s"
+                      "%s requires numeric or bool operands, got %s"
                       (show_binop op) (show_ty (zonk t)))));
             TyBool
         | OpNumeric ->
             unify ta_ty tb_ty;
-            require_numeric_operand ta_ty;
+            require_numeric "numeric" ta_ty;
             ta_ty
         | OpComparison ->
             unify ta_ty tb_ty;
-            require_numeric_operand ta_ty;
+            require_numeric "numeric" ta_ty;
             TyBool
+        | OpInteger ->
+            unify ta_ty tb_ty;
+            require_integer ta_ty;
+            ta_ty
       in
       (T.TEBinop (op, ta, tb, result_ty), result_ty)
 
