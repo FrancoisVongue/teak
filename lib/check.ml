@@ -1198,6 +1198,30 @@ let rec infer (env : env) (tparams : string list)
               (Printf.sprintf "%s requires integer operands, got %s"
                  (show_binop op) (show_ty (zonk t))))
       in
+      (* Pointer arithmetic on the raw `*T` escape hatch — matches C:
+         `p + n` / `p - n` advance by elements (result *T), `p - q`
+         on two pointers of the same element type is the element
+         difference (result int). This is the unsafe world; the offset
+         is not checked. *)
+      let ptr_elem t = match prune t with TyPtr e -> Some e | _ -> None in
+      (match op, ptr_elem ta_ty, ptr_elem tb_ty with
+       | OpAdd, Some _, None ->
+           (try unify tb_ty TyInt with Type_error _ ->
+              raise (Type_error "pointer + : offset must be int"));
+           (T.TEBinop (op, ta, tb, ta_ty), ta_ty)
+       | OpAdd, None, Some _ ->
+           (try unify ta_ty TyInt with Type_error _ ->
+              raise (Type_error "pointer + : offset must be int"));
+           (T.TEBinop (op, ta, tb, tb_ty), tb_ty)
+       | OpSub, Some e1, Some e2 ->
+           (try unify e1 e2 with Type_error _ ->
+              raise (Type_error "pointer - pointer: element types differ"));
+           (T.TEBinop (op, ta, tb, TyInt), TyInt)
+       | OpSub, Some _, None ->
+           (try unify tb_ty TyInt with Type_error _ ->
+              raise (Type_error "pointer - : offset must be int"));
+           (T.TEBinop (op, ta, tb, ta_ty), ta_ty)
+       | _ ->
       let result_ty =
         match binop_typing op with
         | OpFixed (operand_ty, result_ty) ->
@@ -1229,7 +1253,7 @@ let rec infer (env : env) (tparams : string list)
             require_integer ta_ty;
             ta_ty
       in
-      (T.TEBinop (op, ta, tb, result_ty), result_ty)
+      (T.TEBinop (op, ta, tb, result_ty), result_ty))
 
   | EUnop (op, e) ->
       let (te, te_ty) = infer env tparams vars e in
@@ -1993,6 +2017,7 @@ let rec infer (env : env) (tparams : string list)
       (match prune ts_ty with
        | TyApp (n, []) when is_float_type n -> (T.TEToIntFromFloat ts, TyInt)
        | TyInt -> (T.TEToInt ts, TyInt)            (* no-op / identity *)
+       | TyPtr _ -> (T.TEToInt ts, TyInt)          (* raw pointer address as int *)
        | TyApp (n, []) when is_numeric_type n -> (T.TEToInt ts, TyInt)
        | TyMeta _ ->
            unify ts_ty (TyApp ("byte", []));

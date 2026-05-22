@@ -1890,8 +1890,13 @@ let rec emit_expr
 
   | Check.T.TEToInt sub ->
       let cs = emit_expr ctor_map sub in
-      { stmts = cs.stmts;
-        value = Printf.sprintf "((long long)(%s))" cs.value }
+      let value = match ty_of_expr sub with
+        | TyPtr _ ->
+            (* address of a raw pointer as an integer *)
+            Printf.sprintf "((long long)(intptr_t)(%s))" cs.value
+        | _ -> Printf.sprintf "((long long)(%s))" cs.value
+      in
+      { stmts = cs.stmts; value }
 
   | Check.T.TEToByte sub ->
       let cs = emit_expr ctor_map sub in
