@@ -66,6 +66,11 @@ let rec collect_unsafe (e : Check.T.expr) : unit =
   | TEDrop (sub, ty) ->
       (match ty with TyApp ("Region", []) -> func_unsafe := true | _ -> ());
       go sub
+  | TEReset sub ->
+      (* reset bumps the region's generation at runtime; be conservative
+         and disable gen-check elision in functions that reset. *)
+      func_unsafe := true;
+      go sub
   | TEInt _ | TEBool _ | TEVar _ | TEStringLit _ | TEFnRef _
   | TEFloat _ | TENullPtr _ | TEBreak | TEContinue -> ()
   | TECall (c, args, _) -> go c; List.iter go args
@@ -423,6 +428,7 @@ let rec collect_expr (e : Check.T.expr) : unit =
   | Check.T.TEReturn (v, t) -> collect_expr v; collect_ty t
   | Check.T.TETryAt (a, i, t) -> collect_expr a; collect_expr i; collect_ty t
   | Check.T.TEDrop (e, t) -> collect_expr e; collect_ty t
+  | Check.T.TEReset e -> collect_expr e
   | Check.T.TEAwait (e, t, p) -> collect_expr e; collect_ty t; collect_ty p
   | Check.T.TESpawn (e, t) -> collect_expr e; collect_ty t
   | Check.T.TEForStream (_, et, s, b) ->
@@ -487,6 +493,7 @@ let rec scan_fnvals (e : Check.T.expr) : unit =
   | TEReturn (v, _) -> scan_fnvals v
   | TETryAt (a, i, _) -> scan_fnvals a; scan_fnvals i
   | TEDrop (e, _) -> scan_fnvals e
+  | TEReset e -> scan_fnvals e
   | TEAwait (e, _, _) -> scan_fnvals e
   | TESpawn (e, _) -> scan_fnvals e
   | TEForStream (_, _, s, b) -> scan_fnvals s; scan_fnvals b
@@ -953,6 +960,7 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
     | TEReturn (v, t) -> TEReturn (rn env v, t)
     | TETryAt (a, i, t) -> TETryAt (rn env a, rn env i, t)
     | TEDrop (e, t) -> TEDrop (rn env e, t)
+    | TEReset e -> TEReset (rn env e)
     | TEAwait (e, t, p) -> TEAwait (rn env e, t, p)
     | TESpawn (e, t) -> TESpawn (rn env e, t)
     | TEForStream (x, et, s, b) ->
@@ -1151,6 +1159,7 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TEReturn (_, _) -> TyInt
   | Check.T.TETryAt (_, _, t) -> t
   | Check.T.TEDrop (_, _) -> TyTuple []
+  | Check.T.TEReset _ -> TyTuple []
   | Check.T.TEAwait (_, t, _) -> t
   | Check.T.TESpawn (_, t) -> t
   | Check.T.TEForStream _ -> TyTuple []
@@ -2028,6 +2037,20 @@ let rec emit_expr
       ] in
       { stmts; value = "0" }
 
+  | Check.T.TEReset sub ->
+      (* reset(r): bump the region's generation (so every outstanding Ref
+         into it now fails its gen-check), refresh the binding so future
+         allocations into r succeed, and rewind the bump pointer. The
+         operand is a region variable (checked), so cs.value is an lvalue. *)
+      let cs = emit_expr ctor_map sub in
+      let r = cs.value in
+      let stmts = cs.stmts @ [
+        Printf.sprintf "ORTO_REGIONS[%s.slot].gen++;" r;
+        Printf.sprintf "%s.expected_gen = ORTO_REGIONS[%s.slot].gen;" r r;
+        Printf.sprintf "ORTO_REGIONS[%s.slot].used = 0;" r;
+      ] in
+      { stmts; value = "0" }
+
   | Check.T.TETryAt (a_e, i_e, result_ty) ->
       (* try_at(a, i): Some(a[i]) if gen+bounds OK, else None. *)
       let ca = emit_expr ctor_map a_e in
@@ -2625,6 +2648,7 @@ let async_collect_locals (body : Check.T.expr) : (string * ty) list =
     | TEReturn (v, _) -> go v
     | TETryAt (a, i, _) -> go a; go i
     | TEDrop (e, _) -> go e
+    | TEReset e -> go e
     | TEAwait (e, _, _) -> go e
     | TESpawn (e, _) -> go e
     | TEForStream (x, t, s, b) -> add x t; go s; go b
@@ -2715,6 +2739,7 @@ let async_rewrite_to_frame
     | TEReturn (v, t) -> TEReturn (go v, t)
     | TETryAt (a, i, t) -> TETryAt (go a, go i, t)
     | TEDrop (e, t) -> TEDrop (go e, t)
+    | TEReset e -> TEReset (go e)
     | TEAwait (e, t, p) -> TEAwait (go e, t, p)
     | TESpawn (e, t) -> TESpawn (go e, t)
     | TEForStream (x, et, s, b) ->
@@ -2797,6 +2822,7 @@ let rec emit_has_suspension (e : Check.T.expr) : bool =
   | TEReturn (v, _) -> emit_has_suspension v
   | TETryAt (a, i, _) -> emit_has_suspension a || emit_has_suspension i
   | TEDrop (e, _) -> emit_has_suspension e
+  | TEReset e -> emit_has_suspension e
   | TETuple (es, _) -> List.exists emit_has_suspension es
   | TETupleIdx (e, _, _) -> emit_has_suspension e
   | TELetTuple (_, _, v, b, _, _) ->
@@ -2869,6 +2895,7 @@ let allocate_await_all_locals_in_body (body : Check.T.expr) : Check.T.expr =
     | TEReturn (v, t) -> TEReturn (go v, t)
     | TETryAt (a, i, t) -> TETryAt (go a, go i, t)
     | TEDrop (e, t) -> TEDrop (go e, t)
+    | TEReset e -> TEReset (go e)
     | TEAwait (e, t, p) ->
         (* Dynamic await-all: result type is Array[Result[T]] and the
            inner expression has type Array[Task[T]].  Pre-allocate the
@@ -2983,6 +3010,7 @@ let rec desugar_let_tuples (e : Check.T.expr) : Check.T.expr =
   | TEReturn (v, t) -> TEReturn (r v, t)
   | TETryAt (a, i, t) -> TETryAt (r a, r i, t)
   | TEDrop (e, t) -> TEDrop (r e, t)
+  | TEReset e -> TEReset (r e)
   | TEAwait (e, t, p) -> TEAwait (r e, t, p)
   | TESpawn (e, t) -> TESpawn (r e, t)
   | TEForStream (x, et, s, b) -> TEForStream (x, et, r s, r b)

@@ -422,7 +422,7 @@ and parse_atom st =
   | TIf | TMatch | TWhile | TBreak | TContinue | TFor | TReturn
   | TLen | TSlice
   | TToInt | TToByte | TToFloat | TToU16 | TToU32 | TToU64
-  | TCAlloc | TCFree | TNullPtr | TIsNull | TArrayData | TPtrCast | TTryAt | TDrop
+  | TCAlloc | TCFree | TNullPtr | TIsNull | TArrayData | TPtrCast | TTryAt | TDrop | TReset
   | TRegion | TStackRegion | TAlignedRegion
   | TPrint | TPrintln -> parse_atom_consume st
   | t -> raise (Parse_error
@@ -760,6 +760,11 @@ and parse_atom_consume st =
       let e = parse_expr st in
       expect st TRParen;
       EDrop e
+  | TReset ->
+      expect st TLParen;
+      let e = parse_expr st in
+      expect st TRParen;
+      EReset e
   | TPrint ->
       expect st TLParen;
       let e = parse_expr st in

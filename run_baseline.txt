@@ -37,6 +37,7 @@ ptr_reinterpret RUN 7
 raw_pointers GCCFAIL
 records RUN 73
 region_as_file RUN 120
+region_reset RUN 100
 regions RUN 116
 shapes RUN 123
 stackcalc RUN 42

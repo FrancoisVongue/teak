@@ -93,6 +93,8 @@ module T = struct
                   (* try_at(a, i) — third field is result Option[T] *)
     | TEDrop  of expr * ty
                   (* drop(x) — second field is x's (linear) type *)
+    | TEReset of expr
+                  (* reset(r) — rewind region r (operand is a region var) *)
     | TEDeref  of expr * ty
                   (* p deref — second field is element type T *)
     | TEAssign of string * expr * ty
@@ -2181,6 +2183,20 @@ let rec infer (env : env) (tparams : string list)
              (show_ty (zonk tx_ty))));
       (T.TEDrop (tx, tx_ty), TyTuple [])
 
+  | EReset r_e ->
+      (* reset(r) rewinds the region in place: it must write back the
+         binding's generation, so the operand has to be a region variable. *)
+      (match r_e with
+       | EVar _ -> ()
+       | _ -> raise (Type_error "reset() expects a region variable"));
+      let (tr, tr_ty) = infer env tparams vars r_e in
+      (try unify tr_ty (TyApp ("Region", []))
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf "reset() expects a Region, got %s"
+              (show_ty (zonk tr_ty)))));
+      (T.TEReset tr, TyTuple [])
+
   (* Stage 3 — concurrency. Phase 2 wires up types for the three
      fundamentals (await / spawn / yield); phases 4+ generate the
      state machine and runtime. await all { … } needs tuples; the
@@ -2550,6 +2566,8 @@ let rec zonk_expr (e : T.expr) : T.expr =
       T.TETryAt (zonk_expr a, zonk_expr i, zonk_expect t)
   | T.TEDrop (e, t) ->
       T.TEDrop (zonk_expr e, zonk_expect t)
+  | T.TEReset e ->
+      T.TEReset (zonk_expr e)
   | T.TEAwait (e, t, p) ->
       T.TEAwait (zonk_expr e, zonk_expect t, zonk_expect p)
   | T.TESpawn (e, t) ->
@@ -2925,6 +2943,11 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       in
       (T.TEDrop (sub', t), live)
 
+  | T.TEReset sub ->
+      (* reset borrows the region (does not consume it) — like ref(r, _). *)
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TEReset sub', live)
+
   | T.TEAwait (sub, t, p) ->
       (* await consumes the Task/Stream-shaped operand: if the inner
          expression is a bare linear name, retire it (await-after-await
@@ -3103,6 +3126,7 @@ let rec body_has_suspension (e : T.expr) : bool =
   | TETryAt (a, i, _) ->
       body_has_suspension a || body_has_suspension i
   | TEDrop (e, _) -> body_has_suspension e
+  | TEReset e -> body_has_suspension e
   | TETuple (es, _) -> List.exists body_has_suspension es
   | TETupleIdx (e, _, _) -> body_has_suspension e
   | TELetTuple (_, _, v, b, _, _) ->

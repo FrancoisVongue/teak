@@ -51,6 +51,7 @@ type token =
   | TIsNull       (* is_null(p) — NULL check *)
   | TArrayData    (* array_data(a) — *T pointing at the bytes of Array[T] *)
   | TPtrCast      (* ptr_cast[T](e) — reinterpret a raw pointer/address as *T *)
+  | TReset        (* reset(r) — rewind a region, invalidating its refs *)
   | TTryAt        (* try_at(a, i) — defensive read, returns Option[T] *)
   | TRegion       (* region(N) — heap arena, malloc'd block *)
   | TStackRegion  (* stack_region(N) — N literal, block on stack *)
@@ -157,6 +158,7 @@ let show = function
   | TIsNull       -> "IS_NULL"
   | TArrayData    -> "ARRAY_DATA"
   | TPtrCast      -> "PTR_CAST"
+  | TReset        -> "RESET"
   | TTryAt        -> "TRY_AT"
   | TRegion       -> "REGION"
   | TStackRegion  -> "STACK_REGION"
