@@ -422,6 +422,7 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
           rec_type_params = [];
           rec_fields      = new_fields;
           rec_is_linear   = orig.rec_is_linear;
+          rec_is_packed   = orig.rec_is_packed;
         } in
         Hashtbl.replace mono_recs mono.rec_name mono
       done;

@@ -51,6 +51,8 @@ strings_slice RUN 119
 sys NOMAIN_OR_ERR
 tree RUN 123
 unit RUN 67
+wire RUN 9
 stdtest_collections RUN 38
+stdtest_raw_codec RUN 7
 stdtest_text RUN 23
 stdtest_word_freq RUN 4

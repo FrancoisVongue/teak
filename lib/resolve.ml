@@ -456,6 +456,7 @@ let resolve_decl
         rec_type_params = type_params;
         rec_fields;
         rec_is_linear = rd.rec_is_linear;
+        rec_is_packed = rd.rec_is_packed;
       })
   | TopFunc f ->
       let type_params = f.type_params in

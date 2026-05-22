@@ -1,0 +1,24 @@
+// Regression: std::raw byte codec over raw *byte + bswap.
+use raw::{write_u64_le, read_u64_le, write_u64_be, read_u64_be,
+          write_u32_be, read_u32_be, bswap32, bswap16};
+
+fn main() -> int {
+    let buf = c_alloc[byte](16);
+
+    write_u64_le(buf, 0, 1099511627776);     // 2^40
+    let a = read_u64_le(buf, 0);
+    write_u64_be(buf, 8, 1099511627776);
+    let b = read_u64_be(buf, 8);
+    let ok64 = if a == 1099511627776 { if b == 1099511627776 { 1 } else { 0 } } else { 0 };
+
+    write_u32_be(buf, 0, 168496141);         // 0x0A0B0C0D, host-independent
+    let c = read_u32_be(buf, 0);
+    let ok32 = if c == 168496141 { 1 } else { 0 };
+
+    let s32 = bswap32(16909060);             // 0x01020304 -> 0x04030201
+    let s16 = bswap16(258);                  // 0x0102 -> 0x0201
+    let ok_sw = if s32 == 67305985 { if s16 == 513 { 1 } else { 0 } } else { 0 };
+
+    c_free(buf);
+    ok64 + ok32 + ok_sw + 4                  // 1 + 1 + 1 + 4 = 7
+}

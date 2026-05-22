@@ -1,0 +1,107 @@
+// std::raw — the unsafe namespace. Byte codecs and bit ops over raw
+// `*byte` memory (foreign buffers from FFI, mmap'd files, packets).
+//
+// These are byte-assembly: they read/write one byte at a time at an
+// explicit offset, so they are host-endian-INDEPENDENT and have no
+// alignment requirement — the correct way to handle wire formats.
+// The mirror of std::bin, but for `*byte` instead of Ref[byte].
+//
+// No bounds checks: the raw world is opt-in, the caller knows the layout.
+
+// ---------- 16-bit ----------
+
+fn read_u16_le(p: *byte, off: int) -> int {
+    to_int(p[off]) + to_int(p[off + 1]) * 256
+}
+
+fn read_u16_be(p: *byte, off: int) -> int {
+    to_int(p[off]) * 256 + to_int(p[off + 1])
+}
+
+fn write_u16_le(p: *byte, off: int, v: int) -> int {
+    p[off]     := to_byte(v % 256);
+    p[off + 1] := to_byte((v / 256) % 256);
+    0
+}
+
+fn write_u16_be(p: *byte, off: int, v: int) -> int {
+    p[off]     := to_byte((v / 256) % 256);
+    p[off + 1] := to_byte(v % 256);
+    0
+}
+
+// ---------- 32-bit ----------
+
+fn read_u32_le(p: *byte, off: int) -> int {
+    to_int(p[off])
+    + to_int(p[off + 1]) * 256
+    + to_int(p[off + 2]) * 65536
+    + to_int(p[off + 3]) * 16777216
+}
+
+fn read_u32_be(p: *byte, off: int) -> int {
+    to_int(p[off]) * 16777216
+    + to_int(p[off + 1]) * 65536
+    + to_int(p[off + 2]) * 256
+    + to_int(p[off + 3])
+}
+
+fn write_u32_le(p: *byte, off: int, v: int) -> int {
+    p[off]     := to_byte(v % 256);
+    p[off + 1] := to_byte((v / 256) % 256);
+    p[off + 2] := to_byte((v / 65536) % 256);
+    p[off + 3] := to_byte((v / 16777216) % 256);
+    0
+}
+
+fn write_u32_be(p: *byte, off: int, v: int) -> int {
+    p[off]     := to_byte((v / 16777216) % 256);
+    p[off + 1] := to_byte((v / 65536) % 256);
+    p[off + 2] := to_byte((v / 256) % 256);
+    p[off + 3] := to_byte(v % 256);
+    0
+}
+
+// ---------- 64-bit ----------
+
+fn read_u64_le(p: *byte, off: int) -> int {
+    let lo = read_u32_le(p, off);
+    let hi = read_u32_le(p, off + 4);
+    lo + hi * 4294967296
+}
+
+fn read_u64_be(p: *byte, off: int) -> int {
+    let hi = read_u32_be(p, off);
+    let lo = read_u32_be(p, off + 4);
+    hi * 4294967296 + lo
+}
+
+fn write_u64_le(p: *byte, off: int, v: int) -> int {
+    write_u32_le(p, off, v % 4294967296);
+    write_u32_le(p, off + 4, (v / 4294967296) % 4294967296);
+    0
+}
+
+fn write_u64_be(p: *byte, off: int, v: int) -> int {
+    write_u32_be(p, off, (v / 4294967296) % 4294967296);
+    write_u32_be(p, off + 4, v % 4294967296);
+    0
+}
+
+// ---------- byte swap (reverse byte order of a value) ----------
+
+fn bswap16(x: int) -> int {
+    (x % 256) * 256 + (x / 256) % 256
+}
+
+fn bswap32(x: int) -> int {
+    (x % 256) * 16777216
+    + ((x / 256) % 256) * 65536
+    + ((x / 65536) % 256) * 256
+    + (x / 16777216) % 256
+}
+
+fn bswap64(x: int) -> int {
+    bswap32(x % 4294967296) * 4294967296
+    + bswap32((x / 4294967296) % 4294967296)
+}

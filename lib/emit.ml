@@ -1087,8 +1087,9 @@ let emit_record_definition (rd : record_decl) : string =
     List.map (fun (fn, fty) ->
       Printf.sprintf "    %s %s;" (c_type fty) fn) rd.rec_fields
   in
-  Printf.sprintf "struct %s {\n%s\n};" rd.rec_name
-    (String.concat "\n" field_lines)
+  let attr = if rd.rec_is_packed then " __attribute__((packed))" else "" in
+  Printf.sprintf "struct %s {\n%s\n}%s;" rd.rec_name
+    (String.concat "\n" field_lines) attr
 
 (* Field types of a variant, keyed by (mangled owner type, ctor name).
    ctor_map alone is keyed by ctor name and so collides across

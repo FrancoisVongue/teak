@@ -58,6 +58,28 @@ fn write_u32_be(buf: Ref[byte], off: int, v: int) -> int {
     0
 }
 
+// ---------- 64-bit ----------
+
+fn read_u64_le(buf: Ref[byte], off: int) -> int {
+    read_u32_le(buf, off) + read_u32_le(buf, off + 4) * 4294967296
+}
+
+fn read_u64_be(buf: Ref[byte], off: int) -> int {
+    read_u32_be(buf, off) * 4294967296 + read_u32_be(buf, off + 4)
+}
+
+fn write_u64_le(buf: Ref[byte], off: int, v: int) -> int {
+    write_u32_le(buf, off, v % 4294967296);
+    write_u32_le(buf, off + 4, (v / 4294967296) % 4294967296);
+    0
+}
+
+fn write_u64_be(buf: Ref[byte], off: int, v: int) -> int {
+    write_u32_be(buf, off, (v / 4294967296) % 4294967296);
+    write_u32_be(buf, off + 4, v % 4294967296);
+    0
+}
+
 // ---------- detect native endianness ----------
 
 fn is_little_endian(r: Region) -> bool {

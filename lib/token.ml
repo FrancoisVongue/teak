@@ -35,6 +35,7 @@ type token =
   | TStruct
   | TEnum
   | TLinear        (* linear — marks a struct/enum as move-only with user drop *)
+  | TPacked        (* packed — marks a struct as no-padding (C ABI / wire overlay) *)
   | TDrop          (* drop(x) — consume and run the type's destructor *)
   | TUse           (* use mod::item; — selective import *)
   | TConst         (* const NAME: T = expr; — named compile-time value *)
@@ -142,6 +143,7 @@ let show = function
   | TStruct       -> "STRUCT"
   | TEnum         -> "ENUM"
   | TLinear       -> "LINEAR"
+  | TPacked       -> "PACKED"
   | TDrop         -> "DROP"
   | TUse          -> "USE"
   | TConst        -> "CONST"
