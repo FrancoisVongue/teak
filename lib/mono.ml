@@ -272,6 +272,8 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         Check.T.TEIsNull (rewrite_expr subst p)
     | Check.T.TEArrayData (a, t) ->
         Check.T.TEArrayData (rewrite_expr subst a, rt t)
+    | Check.T.TEPtrCast (e, t) ->
+        Check.T.TEPtrCast (rewrite_expr subst e, rt t)
     | Check.T.TEDeref (p, t) ->
         Check.T.TEDeref (rewrite_expr subst p, rt t)
     | Check.T.TEAssign (x, v, t) ->

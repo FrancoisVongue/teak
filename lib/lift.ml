@@ -76,6 +76,7 @@ let rec free_vars (e : expr) : SS.t =
       free_vars e
   | ECAlloc (_, n) -> free_vars n
   | ECFree p | EIsNull p | EArrayData p | EDeref p -> free_vars p
+  | EPtrCast (_, e) -> free_vars e
   | ENullPtr _ -> SS.empty
   | ETryAt (a, i) -> SS.union (free_vars a) (free_vars i)
   | EDrop e -> free_vars e
@@ -175,6 +176,7 @@ let lift (prog : program) : program =
     | ECFree p -> ECFree (xform p)
     | EIsNull p -> EIsNull (xform p)
     | EArrayData a -> EArrayData (xform a)
+    | EPtrCast (t, e) -> EPtrCast (t, xform e)
     | ETryAt (a, i) -> ETryAt (xform a, xform i)
     | EDrop e -> EDrop (xform e)
     | EDeref p -> EDeref (xform p)

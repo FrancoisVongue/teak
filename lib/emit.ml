@@ -92,6 +92,7 @@ let rec collect_unsafe (e : Check.T.expr) : unit =
   | TECAlloc (_, n, _) -> go n
   | TECFree a | TEIsNull a -> go a
   | TEArrayData (a, _) -> go a
+  | TEPtrCast (a, _) -> go a
   | TETryAt (a, b, _) -> go a; go b
   | TEDeref (a, _) -> go a
   | TEAssignField (p, _, v) -> go p; go v
@@ -413,6 +414,7 @@ let rec collect_expr (e : Check.T.expr) : unit =
   | Check.T.TENullPtr t -> collect_ty t
   | Check.T.TEIsNull p -> collect_expr p
   | Check.T.TEArrayData (a, t) -> collect_expr a; collect_ty t
+  | Check.T.TEPtrCast (e, t) -> collect_expr e; collect_ty t
   | Check.T.TEDeref (p, t) -> collect_expr p; collect_ty t
   | Check.T.TEAssign (_, v, t) -> collect_expr v; collect_ty t
   | Check.T.TEAssignField (p, _, v) -> collect_expr p; collect_expr v
@@ -477,6 +479,7 @@ let rec scan_fnvals (e : Check.T.expr) : unit =
   | TECAlloc (_, n, _) -> scan_fnvals n
   | TECFree p | TEIsNull p -> scan_fnvals p
   | TEArrayData (a, _) -> scan_fnvals a
+  | TEPtrCast (e, _) -> scan_fnvals e
   | TEDeref (p, _) -> scan_fnvals p
   | TEAssign (_, v, _) -> scan_fnvals v
   | TEAssignField (p, _, v) -> scan_fnvals p; scan_fnvals v
@@ -939,6 +942,7 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
     | TENullPtr t -> TENullPtr t
     | TEIsNull p -> TEIsNull (rn env p)
     | TEArrayData (a, t) -> TEArrayData (rn env a, t)
+    | TEPtrCast (e, t) -> TEPtrCast (rn env e, t)
     | TEDeref (p, t) -> TEDeref (rn env p, t)
     | TEAssign (x, v, t) ->
         let x' = try List.assoc x env with Not_found -> x in
@@ -1138,6 +1142,7 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TENullPtr t -> t
   | Check.T.TEIsNull _ -> TyBool
   | Check.T.TEArrayData (_, t) -> t
+  | Check.T.TEPtrCast (_, t) -> t
   | Check.T.TEDeref (_, t) -> t
   | Check.T.TEAssign (_, _, _) -> TyTuple []
   | Check.T.TEAssignField (_, _, _) -> TyTuple []
@@ -1961,6 +1966,17 @@ let rec emit_expr
       ] in
       { stmts; value = res_var }
 
+  | Check.T.TEPtrCast (sub_e, result_ty) ->
+      (* ptr_cast[T](e) — plain C reinterpret cast to T*. No checks:
+         this is the raw world. Source is *U or an int address. *)
+      let cs = emit_expr ctor_map sub_e in
+      let elem_c = match result_ty with
+        | TyPtr inner -> c_type inner
+        | _ -> failwith "emit TEPtrCast: result not *T"
+      in
+      { stmts = cs.stmts;
+        value = Printf.sprintf "((%s*)(%s))" elem_c cs.value }
+
   | Check.T.TEDeref (p_e, _) ->
       let cp = emit_expr ctor_map p_e in
       { stmts = cp.stmts;
@@ -2601,6 +2617,7 @@ let async_collect_locals (body : Check.T.expr) : (string * ty) list =
     | TECFree e -> go e
     | TEIsNull e -> go e
     | TEArrayData (a, _) -> go a
+    | TEPtrCast (e, _) -> go e
     | TEDeref (p, _) -> go p
     | TEAssign (_, v, _) -> go v
     | TEAssignField (p, _, v) -> go p; go v
@@ -2690,6 +2707,7 @@ let async_rewrite_to_frame
     | TECFree e -> TECFree (go e)
     | TEIsNull e -> TEIsNull (go e)
     | TEArrayData (a, t) -> TEArrayData (go a, t)
+    | TEPtrCast (e, t) -> TEPtrCast (go e, t)
     | TEDeref (p, t) -> TEDeref (go p, t)
     | TEAssign (x, v, t) -> TEAssign (rename x, go v, t)
     | TEAssignField (p, f, v) -> TEAssignField (go p, f, go v)
@@ -2770,6 +2788,7 @@ let rec emit_has_suspension (e : Check.T.expr) : bool =
   | TECFree e -> emit_has_suspension e
   | TEIsNull e -> emit_has_suspension e
   | TEArrayData (a, _) -> emit_has_suspension a
+  | TEPtrCast (e, _) -> emit_has_suspension e
   | TEDeref (p, _) -> emit_has_suspension p
   | TEAssign (_, v, _) -> emit_has_suspension v
   | TEAssignField (p, _, v) ->
@@ -2842,6 +2861,7 @@ let allocate_await_all_locals_in_body (body : Check.T.expr) : Check.T.expr =
     | TECFree e -> TECFree (go e)
     | TEIsNull e -> TEIsNull (go e)
     | TEArrayData (a, t) -> TEArrayData (go a, t)
+    | TEPtrCast (e, t) -> TEPtrCast (go e, t)
     | TEDeref (p, t) -> TEDeref (go p, t)
     | TEAssign (x, v, t) -> TEAssign (x, go v, t)
     | TEAssignField (p, f, v) -> TEAssignField (go p, f, go v)
@@ -2955,6 +2975,7 @@ let rec desugar_let_tuples (e : Check.T.expr) : Check.T.expr =
   | TECFree e -> TECFree (r e)
   | TEIsNull e -> TEIsNull (r e)
   | TEArrayData (a, t) -> TEArrayData (r a, t)
+  | TEPtrCast (e, t) -> TEPtrCast (r e, t)
   | TEDeref (p, t) -> TEDeref (r p, t)
   | TEAssign (x, v, t) -> TEAssign (x, r v, t)
   | TEAssignField (p, f, v) -> TEAssignField (r p, f, r v)

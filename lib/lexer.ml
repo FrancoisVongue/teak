@@ -59,6 +59,7 @@ let lower_ident_or_keyword s =
   | "null_ptr" -> TNullPtr
   | "is_null" -> TIsNull
   | "array_data" -> TArrayData
+  | "ptr_cast" -> TPtrCast
   | "try_at" -> TTryAt
   | "region" -> TRegion
   | "stack_region" -> TStackRegion

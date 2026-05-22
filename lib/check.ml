@@ -87,6 +87,8 @@ module T = struct
                   (* is_null(p) -> bool *)
     | TEArrayData of expr * ty
                   (* array_data(a: Array[T]) -> TyPtr T *)
+    | TEPtrCast of expr * ty
+                  (* ptr_cast[T](e) — source expr, result type TyPtr T *)
     | TETryAt of expr * expr * ty
                   (* try_at(a, i) — third field is result Option[T] *)
     | TEDrop  of expr * ty
@@ -2122,6 +2124,23 @@ let rec infer (env : env) (tparams : string list)
       let result_ty = TyPtr elem in
       (T.TEArrayData (ta, result_ty), result_ty)
 
+  | EPtrCast (elem_t, sub_e) ->
+      let elem_t = validate_ty_for_ascription env tparams elem_t in
+      let (ts, ts_ty) = infer env tparams vars sub_e in
+      let src_ok = match prune ts_ty with
+        | TyPtr _ -> true
+        | TyInt -> true   (* int address → *T, for MMIO / fixed addresses *)
+        | TyMeta _ -> let elem = TyMeta (fresh_meta ()) in unify ts_ty (TyPtr elem); true
+        | _ -> false
+      in
+      if not src_ok then
+        raise (Type_error
+          (Printf.sprintf
+             "ptr_cast[_] expects a raw pointer or int address, got %s"
+             (show_ty (zonk ts_ty))));
+      let result_ty = TyPtr elem_t in
+      (T.TEPtrCast (ts, result_ty), result_ty)
+
   | EDeref p_e ->
       let (tp, tp_ty) = infer env tparams vars p_e in
       let elem = TyMeta (fresh_meta ()) in
@@ -2519,6 +2538,7 @@ let rec zonk_expr (e : T.expr) : T.expr =
   | T.TENullPtr t -> T.TENullPtr (zonk_expect t)
   | T.TEIsNull e -> T.TEIsNull (zonk_expr e)
   | T.TEArrayData (a, t) -> T.TEArrayData (zonk_expr a, zonk_expect t)
+  | T.TEPtrCast (e, t) -> T.TEPtrCast (zonk_expr e, zonk_expect t)
   | T.TEDeref (p, t) -> T.TEDeref (zonk_expr p, zonk_expect t)
   | T.TEAssign (x, v, t) -> T.TEAssign (x, zonk_expr v, zonk_expect t)
   | T.TEAssignField (p, f, v) ->
@@ -2862,6 +2882,10 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       let (a', live) = check_moves_expr env live false a in
       (T.TEArrayData (a', t), live)
 
+  | T.TEPtrCast (e, t) ->
+      let (e', live) = check_moves_expr env live false e in
+      (T.TEPtrCast (e', t), live)
+
   | T.TEDeref (p, t) ->
       let (p', live) = check_moves_expr env live false p in
       (T.TEDeref (p', t), live)
@@ -3068,6 +3092,7 @@ let rec body_has_suspension (e : T.expr) : bool =
   | TECFree e -> body_has_suspension e
   | TEIsNull e -> body_has_suspension e
   | TEArrayData (a, _) -> body_has_suspension a
+  | TEPtrCast (e, _) -> body_has_suspension e
   | TEDeref (p, _) -> body_has_suspension p
   | TEAssign (_, v, _) -> body_has_suspension v
   | TEAssignField (p, _, v) ->
