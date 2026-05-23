@@ -42,7 +42,6 @@ let lower_ident_or_keyword s =
   | "struct" -> TStruct
   | "enum"  -> TEnum
   | "linear" -> TLinear
-  | "packed" -> TPacked
   | "drop"  -> TDrop
   | "match" -> TMatch
   | "extern" -> TExtern

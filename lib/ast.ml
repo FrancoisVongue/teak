@@ -170,7 +170,6 @@ type record_decl = {
   rec_type_params : string list;
   rec_fields      : (string * ty) list;
   rec_is_linear   : bool;   (* `linear struct Foo { ... }` *)
-  rec_is_packed   : bool;   (* `packed struct Foo { ... }` — no padding, C ABI overlay *)
 }
 
 type func = {

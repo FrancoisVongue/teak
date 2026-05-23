@@ -1102,7 +1102,7 @@ let parse_extern st =
 
 (* ---------- type declarations ---------- *)
 
-let parse_struct st ~is_linear ~is_packed : top_decl =
+let parse_struct st ~is_linear : top_decl =
   expect st TStruct;
   let name = match eat st with
     | TCtorIdent s -> s
@@ -1137,7 +1137,6 @@ let parse_struct st ~is_linear ~is_packed : top_decl =
     rec_type_params = type_params;
     rec_fields = fields;
     rec_is_linear = is_linear;
-    rec_is_packed = is_packed;
   }
 
 let parse_enum st ~is_linear : top_decl =
@@ -1304,25 +1303,16 @@ let parse (toks : token list) : program =
         let f = parse_func st in
         loop terminator (TopFunc f :: acc)
     | TStruct ->
-        let td = parse_struct st ~is_linear:false ~is_packed:false in
+        let td = parse_struct st ~is_linear:false in
         loop terminator (td :: acc)
     | TEnum ->
         let td = parse_enum st ~is_linear:false in
         loop terminator (td :: acc)
-    | TPacked ->
-        advance st;
-        (match peek st with
-         | TStruct ->
-             let td = parse_struct st ~is_linear:false ~is_packed:true in
-             loop terminator (td :: acc)
-         | t -> raise (Parse_error
-           (Printf.sprintf "expected `struct` after `packed`, got %s"
-              (Token.show t))))
     | TLinear ->
         advance st;
         (match peek st with
          | TStruct ->
-             let td = parse_struct st ~is_linear:true ~is_packed:false in
+             let td = parse_struct st ~is_linear:true in
              loop terminator (td :: acc)
          | TEnum ->
              let td = parse_enum st ~is_linear:true in
