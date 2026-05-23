@@ -424,7 +424,7 @@ and parse_atom st =
   | TFn | TClosure | TRef
   | TIf | TMatch | TWhile | TBreak | TContinue | TFor | TReturn
   | TLen | TSlice
-  | TToInt | TToByte | TToFloat | TToU16 | TToU32 | TToU64
+  | TToInt | TToByte | TToFloat
   | TCAlloc | TCFree | TNullPtr | TIsNull | TArrayData | TPtrCast | TTryAt | TDrop | TReset
   | TRegion | TStackRegion | TAlignedRegion
   | TPrint | TPrintln -> parse_atom_consume st
@@ -693,21 +693,6 @@ and parse_atom_consume st =
       let e = parse_expr st in
       expect st TRParen;
       EToByte e
-  | TToU16 ->
-      expect st TLParen;
-      let e = parse_expr st in
-      expect st TRParen;
-      EToU16 e
-  | TToU32 ->
-      expect st TLParen;
-      let e = parse_expr st in
-      expect st TRParen;
-      EToU32 e
-  | TToU64 ->
-      expect st TLParen;
-      let e = parse_expr st in
-      expect st TRParen;
-      EToU64 e
   | TToFloat ->
       expect st TLParen;
       let e = parse_expr st in

@@ -63,12 +63,6 @@ module T = struct
                   (* to_int(b) — widen byte to int *)
     | TEToByte of expr
                   (* to_byte(n) — truncate int to byte (u8) *)
-    | TEToU16 of expr
-                  (* to_u16(n)  — truncate int to u16 *)
-    | TEToU32 of expr
-                  (* to_u32(n)  — truncate int to u32 *)
-    | TEToU64 of expr
-                  (* to_u64(n)  — int to u64 (signed→unsigned reinterpret) *)
     | TEToFloat of expr
                   (* to_float(n) — int → float *)
     | TECast   of string * expr
@@ -2038,33 +2032,6 @@ let rec infer (env : env) (tparams : string list)
               (show_ty (zonk ts_ty)))));
       (T.TEToByte ts, TyApp ("byte", []))
 
-  | EToU16 sub_e ->
-      let (ts, ts_ty) = infer env tparams vars sub_e in
-      (try unify ts_ty TyInt
-       with Type_error _ ->
-         raise (Type_error
-           (Printf.sprintf
-              "to_u16 expects int, got %s" (show_ty (zonk ts_ty)))));
-      (T.TEToU16 ts, TyApp ("u16", []))
-
-  | EToU32 sub_e ->
-      let (ts, ts_ty) = infer env tparams vars sub_e in
-      (try unify ts_ty TyInt
-       with Type_error _ ->
-         raise (Type_error
-           (Printf.sprintf
-              "to_u32 expects int, got %s" (show_ty (zonk ts_ty)))));
-      (T.TEToU32 ts, TyApp ("u32", []))
-
-  | EToU64 sub_e ->
-      let (ts, ts_ty) = infer env tparams vars sub_e in
-      (try unify ts_ty TyInt
-       with Type_error _ ->
-         raise (Type_error
-           (Printf.sprintf
-              "to_u64 expects int, got %s" (show_ty (zonk ts_ty)))));
-      (T.TEToU64 ts, TyApp ("u64", []))
-
   | EToFloat sub_e ->
       let (ts, ts_ty) = infer env tparams vars sub_e in
       (try unify ts_ty TyInt
@@ -2567,9 +2534,6 @@ let rec zonk_expr (e : T.expr) : T.expr =
       T.TESlice (zonk_expr a, zonk_expr lo, zonk_expr hi, zonk_expect t)
   | T.TEToInt e  -> T.TEToInt (zonk_expr e)
   | T.TEToByte e -> T.TEToByte (zonk_expr e)
-  | T.TEToU16 e  -> T.TEToU16 (zonk_expr e)
-  | T.TEToU32 e  -> T.TEToU32 (zonk_expr e)
-  | T.TEToU64 e  -> T.TEToU64 (zonk_expr e)
   | T.TEToFloat e -> T.TEToFloat (zonk_expr e)
   | T.TECast (t, e) -> T.TECast (t, zonk_expr e)
   | T.TEToIntFromFloat e -> T.TEToIntFromFloat (zonk_expr e)
@@ -2883,17 +2847,6 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       let (sub', live) = check_moves_expr env live false sub in
       (T.TEToByte sub', live)
 
-  | T.TEToU16 sub ->
-      let (sub', live) = check_moves_expr env live false sub in
-      (T.TEToU16 sub', live)
-
-  | T.TEToU32 sub ->
-      let (sub', live) = check_moves_expr env live false sub in
-      (T.TEToU32 sub', live)
-
-  | T.TEToU64 sub ->
-      let (sub', live) = check_moves_expr env live false sub in
-      (T.TEToU64 sub', live)
 
   | T.TEToFloat sub ->
       let (sub', live) = check_moves_expr env live false sub in
@@ -3134,7 +3087,7 @@ let rec body_has_suspension (e : T.expr) : bool =
       body_has_suspension a
       || body_has_suspension lo || body_has_suspension hi
   | TEToInt e | TEToByte e | TEToFloat e | TEToIntFromFloat e
-  | TEToU16 e | TEToU32 e | TEToU64 e | TECast (_, e) ->
+  | TECast (_, e) ->
       body_has_suspension e
   | TECAlloc (_, n, _) -> body_has_suspension n
   | TECFree e -> body_has_suspension e

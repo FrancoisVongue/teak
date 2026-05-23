@@ -250,12 +250,6 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         Check.T.TEToInt (rewrite_expr subst e)
     | Check.T.TEToByte e ->
         Check.T.TEToByte (rewrite_expr subst e)
-    | Check.T.TEToU16 e ->
-        Check.T.TEToU16 (rewrite_expr subst e)
-    | Check.T.TEToU32 e ->
-        Check.T.TEToU32 (rewrite_expr subst e)
-    | Check.T.TEToU64 e ->
-        Check.T.TEToU64 (rewrite_expr subst e)
     | Check.T.TEToFloat e ->
         Check.T.TEToFloat (rewrite_expr subst e)
     | Check.T.TECast (t, e) ->

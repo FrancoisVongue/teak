@@ -51,9 +51,6 @@ let lower_ident_or_keyword s =
   | "slice" -> TSlice
   | "to_int" -> TToInt
   | "to_byte" -> TToByte
-  | "to_u16" -> TToU16
-  | "to_u32" -> TToU32
-  | "to_u64" -> TToU64
   | "c_alloc" -> TCAlloc
   | "c_free"  -> TCFree
   | "null_ptr" -> TNullPtr

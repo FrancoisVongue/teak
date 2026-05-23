@@ -91,7 +91,7 @@ let rec collect_unsafe (e : Check.T.expr) : unit =
   | TEAssignIdx (a, i, v, _) -> go a; go i; go v
   | TELen (a, _) -> go a
   | TESlice (a, lo, hi, _) -> go a; go lo; go hi
-  | TEToInt a | TEToByte a | TEToU16 a | TEToU32 a | TEToU64 a
+  | TEToInt a | TEToByte a
   | TEToFloat a | TEToIntFromFloat a -> go a
   | TECast (_, a) -> go a
   | TECAlloc (_, n, _) -> go n
@@ -408,9 +408,6 @@ let rec collect_expr (e : Check.T.expr) : unit =
       collect_expr a; collect_expr lo; collect_expr hi; collect_ty t
   | Check.T.TEToInt e  -> collect_expr e
   | Check.T.TEToByte e -> collect_expr e
-  | Check.T.TEToU16 e  -> collect_expr e
-  | Check.T.TEToU32 e  -> collect_expr e
-  | Check.T.TEToU64 e  -> collect_expr e
   | Check.T.TEToFloat e -> collect_expr e
   | Check.T.TECast (_, e) -> collect_expr e
   | Check.T.TEToIntFromFloat e -> collect_expr e
@@ -479,7 +476,7 @@ let rec scan_fnvals (e : Check.T.expr) : unit =
   | TEAssignIdx (a, i, v, _) -> scan_fnvals a; scan_fnvals i; scan_fnvals v
   | TELen (e, _) -> scan_fnvals e
   | TESlice (a, lo, hi, _) -> scan_fnvals a; scan_fnvals lo; scan_fnvals hi
-  | TEToInt e | TEToByte e | TEToU16 e | TEToU32 e | TEToU64 e
+  | TEToInt e | TEToByte e
   | TEToFloat e | TEToIntFromFloat e -> scan_fnvals e
   | TECast (_, e) -> scan_fnvals e
   | TECAlloc (_, n, _) -> scan_fnvals n
@@ -938,9 +935,6 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
         TESlice (rn env a, rn env lo, rn env hi, t)
     | TEToInt e  -> TEToInt (rn env e)
     | TEToByte e -> TEToByte (rn env e)
-    | TEToU16 e  -> TEToU16 (rn env e)
-    | TEToU32 e  -> TEToU32 (rn env e)
-    | TEToU64 e  -> TEToU64 (rn env e)
     | TEToFloat e -> TEToFloat (rn env e)
     | TECast (t, e) -> TECast (t, rn env e)
     | TEToIntFromFloat e -> TEToIntFromFloat (rn env e)
@@ -1139,9 +1133,6 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TESlice (_, _, _, t) -> t
   | Check.T.TEToInt _  -> TyInt
   | Check.T.TEToByte _ -> TyApp ("byte", [])
-  | Check.T.TEToU16 _  -> TyApp ("u16", [])
-  | Check.T.TEToU32 _  -> TyApp ("u32", [])
-  | Check.T.TEToU64 _  -> TyApp ("u64", [])
   | Check.T.TEToFloat _ -> TyApp ("float", [])
   | Check.T.TECast (t, _) -> TyApp (t, [])
   | Check.T.TEToIntFromFloat _ -> TyInt
@@ -1903,21 +1894,6 @@ let rec emit_expr
       { stmts = cs.stmts;
         value = Printf.sprintf "((uint8_t)(%s))" cs.value }
 
-  | Check.T.TEToU16 sub ->
-      let cs = emit_expr ctor_map sub in
-      { stmts = cs.stmts;
-        value = Printf.sprintf "((uint16_t)(%s))" cs.value }
-
-  | Check.T.TEToU32 sub ->
-      let cs = emit_expr ctor_map sub in
-      { stmts = cs.stmts;
-        value = Printf.sprintf "((uint32_t)(%s))" cs.value }
-
-  | Check.T.TEToU64 sub ->
-      let cs = emit_expr ctor_map sub in
-      { stmts = cs.stmts;
-        value = Printf.sprintf "((uint64_t)(%s))" cs.value }
-
   | Check.T.TEToFloat sub ->
       let cs = emit_expr ctor_map sub in
       { stmts = cs.stmts;
@@ -2639,8 +2615,7 @@ let async_collect_locals (body : Check.T.expr) : (string * ty) list =
     | TELen (e, _) -> go e
     | TESlice (a, lo, hi, _) -> go a; go lo; go hi
     | TECast (_, e)
-  | TEToInt e | TEToByte e | TEToFloat e | TEToIntFromFloat e
-    | TEToU16 e | TEToU32 e | TEToU64 e -> go e
+    | TEToInt e | TEToByte e | TEToFloat e | TEToIntFromFloat e -> go e
     | TECAlloc (_, n, _) -> go n
     | TECFree e -> go e
     | TEIsNull e -> go e
@@ -2726,9 +2701,6 @@ let async_rewrite_to_frame
     | TESlice (a, lo, hi, t) -> TESlice (go a, go lo, go hi, t)
     | TEToInt e -> TEToInt (go e)
     | TEToByte e -> TEToByte (go e)
-    | TEToU16 e -> TEToU16 (go e)
-    | TEToU32 e -> TEToU32 (go e)
-    | TEToU64 e -> TEToU64 (go e)
     | TEToFloat e -> TEToFloat (go e)
     | TECast (t, e) -> TECast (t, go e)
     | TEToIntFromFloat e -> TEToIntFromFloat (go e)
@@ -2811,8 +2783,7 @@ let rec emit_has_suspension (e : Check.T.expr) : bool =
   | TESlice (a, lo, hi, _) ->
       emit_has_suspension a || emit_has_suspension lo || emit_has_suspension hi
   | TECast (_, e)
-  | TEToInt e | TEToByte e | TEToFloat e | TEToIntFromFloat e
-  | TEToU16 e | TEToU32 e | TEToU64 e ->
+  | TEToInt e | TEToByte e | TEToFloat e | TEToIntFromFloat e ->
       emit_has_suspension e
   | TECAlloc (_, n, _) -> emit_has_suspension n
   | TECFree e -> emit_has_suspension e
@@ -2882,9 +2853,6 @@ let allocate_await_all_locals_in_body (body : Check.T.expr) : Check.T.expr =
     | TESlice (a, lo, hi, t) -> TESlice (go a, go lo, go hi, t)
     | TEToInt e -> TEToInt (go e)
     | TEToByte e -> TEToByte (go e)
-    | TEToU16 e -> TEToU16 (go e)
-    | TEToU32 e -> TEToU32 (go e)
-    | TEToU64 e -> TEToU64 (go e)
     | TEToFloat e -> TEToFloat (go e)
     | TECast (t, e) -> TECast (t, go e)
     | TEToIntFromFloat e -> TEToIntFromFloat (go e)
@@ -2997,9 +2965,6 @@ let rec desugar_let_tuples (e : Check.T.expr) : Check.T.expr =
   | TESlice (a, lo, hi, t) -> TESlice (r a, r lo, r hi, t)
   | TEToInt e -> TEToInt (r e)
   | TEToByte e -> TEToByte (r e)
-  | TEToU16 e -> TEToU16 (r e)
-  | TEToU32 e -> TEToU32 (r e)
-  | TEToU64 e -> TEToU64 (r e)
   | TEToFloat e -> TEToFloat (r e)
   | TECast (t, e) -> TECast (t, r e)
   | TEToIntFromFloat e -> TEToIntFromFloat (r e)
