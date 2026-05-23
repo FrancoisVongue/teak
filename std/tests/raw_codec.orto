@@ -5,11 +5,16 @@ use raw::{write_u64_le, read_u64_le, write_u64_be, read_u64_be,
 fn main() -> int {
     let buf = c_alloc[byte](16);
 
-    write_u64_le(buf, 0, 1099511627776);     // 2^40
+    // u64 with bit 63 SET (built via shifts to avoid a >i64 literal):
+    // 0x80000001_00000002. The old int-based codec mangled this.
+    let val = (to_u64(2147483649) << 32) | to_u64(2);   // 0x80000001 hi, 2 lo
+    write_u64_le(buf, 0, val);
     let a = read_u64_le(buf, 0);
-    write_u64_be(buf, 8, 1099511627776);
+    write_u64_be(buf, 8, val);
     let b = read_u64_be(buf, 8);
-    let ok64 = if a == 1099511627776 { if b == 1099511627776 { 1 } else { 0 } } else { 0 };
+    // round-trip preserves the bit-63 value, and byte layout is correct:
+    let le_ok = if buf[0] == to_byte(2) { if buf[7] == to_byte(128) { 1 } else { 0 } } else { 0 };
+    let ok64 = if a == val { if b == val { le_ok } else { 0 } } else { 0 };
 
     write_u32_be(buf, 0, 168496141);         // 0x0A0B0C0D, host-independent
     let c = read_u32_be(buf, 0);
