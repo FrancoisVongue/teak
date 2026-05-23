@@ -17,7 +17,7 @@ use sys::{o_wronly, o_rdonly, o_creat, o_trunc};
 use str::{c_str, int_to_bytes, concat_all};
 // print/println are intrinsics
 
-fn write_temp(ring: Ring, path: Ref[byte], content: Ref[byte]) -> int {
+fn write_temp(ring: Ring, path: Handle[byte], content: Handle[byte]) -> int {
     let fd = uring_open(ring, path, o_wronly() + o_creat() + o_trunc(), 420);
     if fd < 0 { return 1 }
     uring_write(ring, fd, content, 0);

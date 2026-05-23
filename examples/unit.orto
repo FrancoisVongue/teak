@@ -4,7 +4,7 @@
 // `()`. An `if` without `else` is a statement: it runs its body for
 // effect, discards the body's value, and yields `()`.
 
-fn bump(r: Ref[int], i: int) -> () {
+fn bump(r: Handle[int], i: int) -> () {
     r[i] := r[i] + 1;
 }
 
@@ -15,7 +15,7 @@ fn classify(x: int) -> int {
     tag
 }
 
-fn first_big(xs: Ref[int]) -> int {
+fn first_big(xs: Handle[int]) -> int {
     let mut i = 0;
     while i < len(xs) {
         if xs[i] > 50 { return xs[i]; }   // return inside an if-without-else

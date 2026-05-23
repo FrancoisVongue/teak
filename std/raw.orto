@@ -4,7 +4,7 @@
 // These are byte-assembly: they read/write one byte at a time at an
 // explicit offset, so they are host-endian-INDEPENDENT and have no
 // alignment requirement — the correct way to handle wire formats.
-// The mirror of std::bin, but for `*byte` instead of Ref[byte].
+// The mirror of std::bin, but for `*byte` instead of Handle[byte].
 //
 // No bounds checks: the raw world is opt-in, the caller knows the layout.
 

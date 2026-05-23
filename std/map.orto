@@ -14,7 +14,7 @@ use vec::{Vec};
 struct Entry[K, V] { state: int, key: K, val: V }
 
 struct Map[K, V] {
-    slots : Ref[Entry[K, V]],
+    slots : Handle[Entry[K, V]],
     cap   : int,           // always a power of two
     count : int,           // live entries
     occ   : int,           // used + tombstones (probe-chain occupancy)

@@ -9,7 +9,7 @@
 // Behaviour over T is injected per call (contains/index_of take `eq`,
 // map/filter/find take a closure) — never bound to the type.
 
-struct Vec[T] { data: Ref[T], count: int, cap: int, zero: T }
+struct Vec[T] { data: Handle[T], count: int, cap: int, zero: T }
 
 fn new[T](r: Region, cap: int, zero: T) -> Vec[T] {
     let c = if cap < 1 { 1 } else { cap };
@@ -17,7 +17,7 @@ fn new[T](r: Region, cap: int, zero: T) -> Vec[T] {
 }
 
 // Build a Vec by copying an existing Ref (slice) of length n.
-fn from_ref[T](r: Region, src: Ref[T], zero: T) -> Vec[T] {
+fn from_ref[T](r: Region, src: Handle[T], zero: T) -> Vec[T] {
     let n = len(src);
     let c = if n < 1 { 1 } else { n };
     let d = ref(r, c, zero);
@@ -42,7 +42,7 @@ fn last[T](v: Vec[T]) -> Option[T] {
 }
 
 // A view over the live elements (a slice of the backing). Cheap, shares memory.
-fn slice_of[T](v: Vec[T]) -> Ref[T] { slice(v.data, 0, v.count) }
+fn slice_of[T](v: Vec[T]) -> Handle[T] { slice(v.data, 0, v.count) }
 
 // ---------- growth / shrink (return a new handle) ----------
 

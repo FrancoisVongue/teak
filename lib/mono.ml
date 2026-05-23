@@ -114,11 +114,11 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
          with Not_found ->
            failwith (Printf.sprintf
              "mono rewrite_ty: free type variable %S" n))
-    | TyApp ("Ref", [inner]) ->
+    | TyApp ("Handle", [inner]) ->
         (* Array is structural — emit emits one wrapper+cell pair per
            distinct element type. *)
-        TyApp ("Ref", [rewrite_ty subst inner])
-    | TyApp ("Ref", _) ->
+        TyApp ("Handle", [rewrite_ty subst inner])
+    | TyApp ("Handle", _) ->
         failwith "mono rewrite_ty: Array with wrong arity (should be unary)"
     | TyApp ("Region", []) ->
         (* Region is a structural nullary builtin — emit just typedefs it. *)

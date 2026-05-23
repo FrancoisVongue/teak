@@ -8,8 +8,8 @@
 struct Rec  { id: int, amount: int }
 struct Pipe { transform: fn(int) -> int, keep: fn(int) -> bool }
 
-// generic eager map: Ref[A] -> Ref[int]
-fn map_int[A](r: Region, xs: Ref[A], f: fn(A) -> int) -> Ref[int] {
+// generic eager map: Handle[A] -> Handle[int]
+fn map_int[A](r: Region, xs: Handle[A], f: fn(A) -> int) -> Handle[int] {
     let n = len(xs);
     let out = ref(r, n, 0);
     let mut i = 0;
@@ -21,7 +21,7 @@ fn map_int[A](r: Region, xs: Ref[A], f: fn(A) -> int) -> Ref[int] {
 }
 
 // generic fold using for-in-ref
-fn fold_int[A](xs: Ref[A], init: int, step: fn(int, A) -> int) -> int {
+fn fold_int[A](xs: Handle[A], init: int, step: fn(int, A) -> int) -> int {
     let mut acc = init;
     for x in xs {
         acc := step(acc, x);
@@ -48,7 +48,7 @@ fn make_counter(r: Region) -> fn() -> int {
 }
 
 // run a struct-held pipeline: transform, keep, produce a new Ref
-fn run_pipe(r: Region, p: Pipe, xs: Ref[int]) -> Ref[int] {
+fn run_pipe(r: Region, p: Pipe, xs: Handle[int]) -> Handle[int] {
     let mut cnt = 0;
     for x in xs {
         if (p.keep)((p.transform)(x)) { cnt := cnt + 1; }

@@ -9,7 +9,7 @@ use sort::{sort};
 use str::{split, hash, eq};
 use math::{min};
 
-struct WC { word: Ref[byte], n: int }
+struct WC { word: Handle[byte], n: int }
 
 fn by_count(a: WC, b: WC) -> int { b.n - a.n }   // descending by count
 
@@ -17,10 +17,10 @@ fn main() -> int {
     arena r = region(262144);
     let text = "the quick brown fox the lazy dog the fox jumps the dog";
 
-    // 1. tokenize on spaces -> Vec[Ref[byte]]
+    // 1. tokenize on spaces -> Vec[Handle[byte]]
     let words = str::split(r, text, 32);
 
-    // 2. count occurrences in a Map[Ref[byte], int]; behaviour injected.
+    // 2. count occurrences in a Map[Handle[byte], int]; behaviour injected.
     let mut counts = map::new(r, 16, "", 0, str::hash, str::eq);
     let mut i = 0;
     while i < vec::size(words) {

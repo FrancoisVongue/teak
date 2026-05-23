@@ -34,7 +34,7 @@ fn classify(x: float) -> int {
 }
 
 // Mixing int and float requires explicit conversion.
-fn average(xs: Ref[int]) -> float {
+fn average(xs: Handle[int]) -> float {
     let mut sum = 0;
     for i in 0..len(xs) {
         sum := sum + xs[i];

@@ -58,7 +58,7 @@ let lower_ident_or_keyword s =
   | "c_free"  -> TCFree
   | "null_ptr" -> TNullPtr
   | "is_null" -> TIsNull
-  | "array_data" -> TArrayData
+  | "as_ptr" -> TArrayData
   | "ptr_cast" -> TPtrCast
   | "reset" -> TReset
   | "try_at" -> TTryAt

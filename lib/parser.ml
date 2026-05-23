@@ -100,10 +100,13 @@ let rec parse_ty st =
       let ret = parse_ty st in
       TyFun (args, ret)
   | TCtorIdent s  ->
-      (* The reference type is `Ref[T]`. The old name `Array` is gone. *)
+      (* The reference type is `Handle[T]`. Old names are gone. *)
       if s = "Array" then
         raise (Parse_error
-          "the reference type is `Ref[T]` now (it replaced `Array[T]`)");
+          "the reference type is `Handle[T]` now (it replaced `Array[T]`)");
+      if s = "Ref" then
+        raise (Parse_error
+          "the reference type was renamed to `Handle[T]` (it replaced `Ref[T]`)");
       if peek st = TLBracket then begin
         advance st;
         let args = parse_ty_list st in

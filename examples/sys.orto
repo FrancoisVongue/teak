@@ -7,7 +7,7 @@
 // magic needed.
 //
 // Most byte buffers passed to syscalls live in a user-allocated Region
-// (so Ref[byte] is the natural type). `array_data(buf)` converts to
+// (so Handle[byte] is the natural type). `as_ptr(buf)` converts to
 // `*byte` at the call site.
 
 // ---------- libc syscalls and helpers ----------
@@ -78,8 +78,8 @@ fn fd_wrap(raw: int) -> Fd { Fd { raw: raw } }
 // alternative would be a custom `linear enum FdResult` per-call,
 // which is more boilerplate for the same effect.
 
-fn sys_open(path: Ref[byte], flags: int, mode: int) -> int {
-    open(array_data(path), flags, mode)
+fn sys_open(path: Handle[byte], flags: int, mode: int) -> int {
+    open(as_ptr(path), flags, mode)
 }
 
 fn sys_socket(domain: int, type_: int, protocol: int) -> int {
@@ -87,12 +87,12 @@ fn sys_socket(domain: int, type_: int, protocol: int) -> int {
 }
 
 // Borrow operations on Fd — the descriptor stays alive.
-fn fd_read(f: Fd, buf: Ref[byte]) -> int {
-    read(f.raw, array_data(buf), len(buf))
+fn fd_read(f: Fd, buf: Handle[byte]) -> int {
+    read(f.raw, as_ptr(buf), len(buf))
 }
 
-fn fd_write(f: Fd, buf: Ref[byte]) -> int {
-    write(f.raw, array_data(buf), len(buf))
+fn fd_write(f: Fd, buf: Handle[byte]) -> int {
+    write(f.raw, as_ptr(buf), len(buf))
 }
 
 fn fd_seek(f: Fd, offset: int, whence: int) -> int {

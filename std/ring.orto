@@ -2,7 +2,7 @@
 // FIFO: push appends at the tail; when full, push drops the oldest. pop
 // removes from the head. Both return the updated ring (it is a value).
 
-struct Ring[T] { data: Ref[T], cap: int, head: int, count: int, zero: T }
+struct Ring[T] { data: Handle[T], cap: int, head: int, count: int, zero: T }
 
 fn new[T](r: Region, cap: int, zero: T) -> Ring[T] {
     let c = if cap < 1 { 1 } else { cap };

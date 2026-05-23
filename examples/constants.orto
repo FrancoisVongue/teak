@@ -6,7 +6,7 @@
 
 const max_cap: int = 4096;
 const half: int = max_cap / 2;     // a const may use another const
-const greeting: Ref[byte] = "hi";
+const greeting: Handle[byte] = "hi";
 
 fn main() -> int {
     let mut s = 0;

@@ -22,7 +22,7 @@ fn main() -> int {
     // scope-exit r — один free(r->buffer).
 }
 
-fn build_histogram(values: Ref[int], counters: Ref[int], i: int) -> int {
+fn build_histogram(values: Handle[int], counters: Handle[int], i: int) -> int {
     if i < len(values) {
         let v = values[i];
         counters[v] := counters[v] + 1;
@@ -32,7 +32,7 @@ fn build_histogram(values: Ref[int], counters: Ref[int], i: int) -> int {
     }
 }
 
-fn find_max(counters: Ref[int], i: int, best: int) -> int {
+fn find_max(counters: Handle[int], i: int, best: int) -> int {
     if i < len(counters) {
         let v = counters[i];
         let new_best = if v > best { v } else { best };

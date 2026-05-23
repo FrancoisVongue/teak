@@ -24,7 +24,7 @@ struct NlMsgHdr {
     pid:   int,
 }
 
-fn nl_hdr_serialize(r: Region, h: NlMsgHdr) -> Ref[byte] {
+fn nl_hdr_serialize(r: Region, h: NlMsgHdr) -> Handle[byte] {
     let buf = ref(r, 16, to_byte(0));
     write_u32_le(buf, 0,  h.length);
     write_u16_le(buf, 4,  h.type_);
@@ -34,7 +34,7 @@ fn nl_hdr_serialize(r: Region, h: NlMsgHdr) -> Ref[byte] {
     buf
 }
 
-fn nl_hdr_parse(buf: Ref[byte]) -> NlMsgHdr {
+fn nl_hdr_parse(buf: Handle[byte]) -> NlMsgHdr {
     NlMsgHdr {
         length:   read_u32_le(buf, 0),
         type_: read_u16_le(buf, 4),
@@ -46,7 +46,7 @@ fn nl_hdr_parse(buf: Ref[byte]) -> NlMsgHdr {
 
 // Format a header for human display (decimal). Built piece-by-piece;
 // when we have variadic format(), this would be one line.
-fn nl_hdr_show(r: Region, h: NlMsgHdr) -> Ref[byte] {
+fn nl_hdr_show(r: Region, h: NlMsgHdr) -> Handle[byte] {
     concat_all(r, ref(r, [
         "NlMsgHdr { len=", int_to_bytes(r, h.length),
         " type=", int_to_bytes(r, h.type_),

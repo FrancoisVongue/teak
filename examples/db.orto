@@ -6,8 +6,8 @@ use str::{parse_int, contains_substr};
 
 struct Person {
     id:    int,
-    name:  Ref[byte],
-    email: Ref[byte],
+    name:  Handle[byte],
+    email: Handle[byte],
     age:   int,
 }
 
@@ -21,7 +21,7 @@ fn row_to_person(row: Row) -> Person {
 }
 
 // Load all users from the DB into the given region.
-fn all_users(r: Region) -> Ref[Person] {
+fn all_users(r: Region) -> Handle[Person] {
     let rows = run_query(r, "SELECT id, name, email, age FROM users");
     let result = ref(r, len(rows),
         Person { id: 0, name: "", email: "", age: 0 });
@@ -33,7 +33,7 @@ fn all_users(r: Region) -> Ref[Person] {
 
 // Linear scan by id. No allocation — returns a copy of the Person
 // record (it's all copyable handles).
-fn find_by_id(users: Ref[Person], id: int) -> Option[Person] {
+fn find_by_id(users: Handle[Person], id: int) -> Option[Person] {
     for i in 0..len(users) {
         if users[i].id == id { return Some(users[i]) }
     }
@@ -42,7 +42,7 @@ fn find_by_id(users: Ref[Person], id: int) -> Option[Person] {
 
 // Filter by substring of name. Two-pass: count first, then
 // allocate exactly the right size, then fill.
-fn search_by_name(r: Region, users: Ref[Person], needle: Ref[byte]) -> Ref[Person] {
+fn search_by_name(r: Region, users: Handle[Person], needle: Handle[byte]) -> Handle[Person] {
     let mut count = 0;
     for i in 0..len(users) {
         if contains_substr(users[i].name, needle) { count := count + 1; }

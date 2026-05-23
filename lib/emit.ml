@@ -289,7 +289,7 @@ let register_string (s : string) : int =
       off
 
 let mangle_array_name (inner : ty) : string =
-  "Ref_" ^ Mono.mangle_ty inner
+  "Handle_" ^ Mono.mangle_ty inner
 
 let register_array (mangled : string) (inner : ty) =
   if not (Hashtbl.mem array_types_seen mangled) then begin
@@ -302,10 +302,10 @@ let rec collect_ty (t : ty) : unit =
   | TyInt | TyBool -> ()
   | TyVar n ->
       failwith (Printf.sprintf "emit collect_ty: TyVar %S after mono" n)
-  | TyApp ("Ref", [inner]) ->
+  | TyApp ("Handle", [inner]) ->
       collect_ty inner;
       register_array (mangle_array_name inner) inner
-  | TyApp ("Ref", _) ->
+  | TyApp ("Handle", _) ->
       failwith "emit collect_ty: Array with wrong arity"
   | TyApp ("Region", []) -> ()
       (* Region runtime is emitted unconditionally at the top of the file. *)
@@ -362,8 +362,8 @@ let rec collect_expr (e : Check.T.expr) : unit =
   | Check.T.TEStringLit s ->
       let _ = register_string s in
       (* String literal materialises as an Array[byte] handle — make
-         sure the Ref_byte typedef is emitted. *)
-      collect_ty (TyApp ("Ref", [TyApp ("byte", [])]))
+         sure the Handle_byte typedef is emitted. *)
+      collect_ty (TyApp ("Handle", [TyApp ("byte", [])]))
   | Check.T.TEVar (_, t) -> collect_ty t
   | Check.T.TEFnRef (_, _, t) -> collect_ty t
   | Check.T.TECall (callee, args, t) ->
@@ -554,7 +554,7 @@ let rec c_type (t : ty) : string =
      used by emit to mark frame fields that must hold a 64-bit gen
      counter so per-slot wrap can't false-match an old handle. *)
   | TyApp ("__cll", []) -> "long long"
-  | TyApp ("Ref", [inner]) -> mangle_array_name inner
+  | TyApp ("Handle", [inner]) -> mangle_array_name inner
   | TyApp ("Region", []) -> "Region"
   | TyApp ("Task", [inner]) ->
       (* Stage 3 phase 2 placeholder: the concrete C struct for a
@@ -688,7 +688,7 @@ let emit_tuple_drop_defs () : string list =
             Some (Printf.sprintf "    %s"
                     (let _ = ty in
                      let fn_call = match ty with
-                       | TyApp ("Ref", [inner]) ->
+                       | TyApp ("Handle", [inner]) ->
                            Printf.sprintf "drop_%s(t.f%d);" (mangle_array_name inner) i
                        | TyApp ("Task", [inner]) ->
                            Printf.sprintf "drop_Task_%s(t.f%d);" (Mono.mangle_ty inner) i
@@ -758,10 +758,10 @@ let emit_stream_drop_forwards () : string list =
    the type name carries its module mangling (`net__Socket`); the helper
    in check.ml derives the matching drop fn name. For Region the runtime
    supplies `drop_Region` directly. Array[Linear T] gets a generated
-   drop_Ref_<T> per instantiation (phase 3 induced linearity). *)
+   drop_Handle_<T> per instantiation (phase 3 induced linearity). *)
 let drop_call_stmt (var_name : string) (t : ty) : string =
   match t with
-  | TyApp ("Ref", [inner]) ->
+  | TyApp ("Handle", [inner]) ->
       let fn = "drop_" ^ mangle_array_name inner in
       Printf.sprintf "%s(%s);" fn var_name
   | TyApp ("Task", [inner]) ->
@@ -780,7 +780,7 @@ let drop_call_stmt (var_name : string) (t : ty) : string =
       failwith
         (Printf.sprintf "emit: drop on non-TyApp type %s" (Ast.show_ty t))
 
-(* Forward declarations for every drop_Ref_<T> we'll emit, so they
+(* Forward declarations for every drop_Handle_<T> we'll emit, so they
    can be referenced before their definition (e.g. nested
    Array[Array[Linear]] drops the inner array). *)
 let emit_array_drop_forwards () : string list =
@@ -1116,7 +1116,7 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TEInt _ -> TyInt
   | Check.T.TEFloat _ -> TyApp ("float", [])
   | Check.T.TEBool _ -> TyBool
-  | Check.T.TEStringLit _ -> TyApp ("Ref", [TyApp ("byte", [])])
+  | Check.T.TEStringLit _ -> TyApp ("Handle", [TyApp ("byte", [])])
   | Check.T.TEVar (_, t) -> t
   | Check.T.TEFnRef (_, _, t) -> t
   | Check.T.TECall (_, _, t) -> t
@@ -1208,7 +1208,7 @@ let rec emit_expr
       let off = register_string s in
       let len = String.length s in
       let value = Printf.sprintf
-        "((Ref_byte){ .slot = 0, .offset = %d, .len = %d, .expected_gen = 1 })"
+        "((Handle_byte){ .slot = 0, .offset = %d, .len = %d, .expected_gen = 1 })"
         off len
       in
       { stmts = []; value }
@@ -1430,7 +1430,7 @@ let rec emit_expr
         | TyInt | TyBool -> false
         | TyApp ("byte", []) -> false
         | TyApp ("u16", []) | TyApp ("u32", []) | TyApp ("u64", []) -> false
-        | TyApp ("Ref", _) -> false
+        | TyApp ("Handle", _) -> false
         | TyTuple _ -> false
         | TyApp _ -> true
         | _ -> true
@@ -1681,7 +1681,7 @@ let rec emit_expr
       let arr_var = fresh "_arr" in
       let arr_c = c_type result_ty in
       let elem_ty = match result_ty with
-        | TyApp ("Ref", [inner]) -> inner
+        | TyApp ("Handle", [inner]) -> inner
         | _ -> failwith "emit TEArrayLit: result not Array[_]"
       in
       let elem_c = c_type elem_ty in
@@ -1869,7 +1869,7 @@ let rec emit_expr
       let arr_c = c_type result_ty in
       let elem_c =
         match result_ty with
-        | TyApp ("Ref", [inner]) -> c_type inner
+        | TyApp ("Handle", [inner]) -> c_type inner
         | _ -> failwith "emit TESlice: result not Array[_]"
       in
       let stmts = ca.stmts @ clo.stmts @ chi.stmts @ [
@@ -2066,7 +2066,7 @@ let rec emit_expr
       let arr_c = c_type (ty_of_expr a_e) in
       let opt_c = c_type result_ty in
       let elem_ty = match ty_of_expr a_e with
-        | TyApp ("Ref", [inner]) -> inner
+        | TyApp ("Handle", [inner]) -> inner
         | _ -> failwith "emit TETryAt: scrutinee not Array[_]"
       in
       let elem_c = c_type elem_ty in
@@ -2253,9 +2253,9 @@ let rec emit_expr
         incr i_iov;
         let v = ce.value in
         (match t with
-         | TyApp ("Ref", [TyApp ("byte", [])]) ->
+         | TyApp ("Handle", [TyApp ("byte", [])]) ->
              let h = fresh "_h" in
-             push (Printf.sprintf "Ref_byte %s = %s;" h v);
+             push (Printf.sprintf "Handle_byte %s = %s;" h v);
              push (Printf.sprintf
                "%s[%d].iov_base = ORTO_REGIONS[%s.slot].buffer + %s.offset;"
                iov i h h);
@@ -2362,7 +2362,7 @@ and index_setup ctor_map arr_e idx_e elem_c =
   let i_var = fresh "_i" in
   let arr_c = c_type (ty_of_expr arr_e) in
   match ty_of_expr arr_e with
-  | TyApp ("Ref", _) ->
+  | TyApp ("Handle", _) ->
       let gen_check =
         if gen_check_needed arr_e then
           [ Printf.sprintf
@@ -2907,12 +2907,12 @@ let allocate_await_all_locals_in_body (body : Check.T.expr) : Check.T.expr =
            loop counters and the result-array handle as frame locals so
            they survive across CQE-driven suspensions inside the loop. *)
         (match t with
-         | TyApp ("Ref", [_]) ->
+         | TyApp ("Handle", [_]) ->
              let k = !dyn_await_index in
              incr dyn_await_index;
              (* After mono, p is the mono'd inner T; the coll's type
                 in the frame is `Ref_Task_<pty>`. *)
-             let coll_mangled = "Ref_Task_" ^ Mono.mangle_ty p in
+             let coll_mangled = "Handle_Task_" ^ Mono.mangle_ty p in
              let res_ty = t in
              await_all_synth_locals :=
                (Printf.sprintf "_dawn%d_arr" k, TyApp (coll_mangled, [])) ::
@@ -3334,7 +3334,7 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
     match e with
     | TEAwait (inner, result_ty, pty)
       when (match result_ty with
-            | TyApp ("Ref", [_]) -> true
+            | TyApp ("Handle", [_]) -> true
             | _ -> false) ->
         (* Dynamic await-all on Array[Task[T]] -> Array[Result[T]].
            The pre-pass allocated frame locals named `_dawn{k}_*`; we

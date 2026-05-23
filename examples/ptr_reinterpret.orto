@@ -3,7 +3,7 @@
 //   int -> *T  : a pointer at a fixed address (MMIO / device registers)
 //
 // This is the raw world: no gen-check, no bounds-check. The type `*T`
-// (vs `Ref[T]`) already says "you are on your own".
+// (vs `Handle[T]`) already says "you are on your own".
 
 fn main() -> int {
     // 4 raw bytes, little-endian, spelling the u32 value 7.

@@ -2,7 +2,7 @@
 // lives in the same region. ref(r, v) allocates one cell; rest[0] reads
 // it. The fixed-size handle is what makes the recursive type finite.
 
-enum List { Nil, Cons(int, Ref[List]) }
+enum List { Nil, Cons(int, Handle[List]) }
 
 fn sum(l: List) -> int {
     match l {

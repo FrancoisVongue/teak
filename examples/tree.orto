@@ -1,8 +1,8 @@
 // Recursive data: a tree whose nodes live in a region, referenced by
-// region handles. A node's children are a Ref[Tree] — a fixed-size
+// region handles. A node's children are a Handle[Tree] — a fixed-size
 // handle, so the type is finite even though it mentions itself.
 
-enum Tree { Leaf, Node(int, Ref[Tree]) }
+enum Tree { Leaf, Node(int, Handle[Tree]) }
 
 fn total(t: Tree) -> int {
     match t {
@@ -19,7 +19,7 @@ fn total(t: Tree) -> int {
     }
 }
 
-fn leaf2(r: Region) -> Ref[Tree] { ref(r, 2, Leaf) }
+fn leaf2(r: Region) -> Handle[Tree] { ref(r, 2, Leaf) }
 
 fn main() -> int {
     arena r = region(8192);

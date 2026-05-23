@@ -1,7 +1,7 @@
 // Hello world via the `print` language intrinsic.
 //
 // `print(s)` and `println(s)` are builtin — they take any printable
-// type (Ref[byte], int, bool, float, byte, u16, u32, u64) or a
+// type (Handle[byte], int, bool, float, byte, u16, u32, u64) or a
 // tuple of printable values. Both lower to one writev syscall.
 
 fn main() -> int {

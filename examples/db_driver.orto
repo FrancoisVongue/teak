@@ -3,17 +3,17 @@
 // The real version of this module would speak the actual wire
 // protocol over a socket. For the demo we hardcode a small "users"
 // table and ignore the SQL parameter. The shape of the public API
-// (Region in, Ref[Row] out, each cell as Ref[byte]) is what a
+// (Region in, Handle[Row] out, each cell as Handle[byte]) is what a
 // real driver would look like.
 
 use str::int_to_bytes;
 
 struct Row {
-    cells: Ref[Ref[byte]],
+    cells: Handle[Handle[byte]],
 }
 
 // Build one Row from int/string/int triple — internal helper.
-fn make_row(r: Region, id: int, name: Ref[byte], email: Ref[byte], age: int) -> Row {
+fn make_row(r: Region, id: int, name: Handle[byte], email: Handle[byte], age: int) -> Row {
     Row { cells: ref(r, [
         int_to_bytes(r, id), name, email, int_to_bytes(r, age),
     ])}
@@ -22,7 +22,7 @@ fn make_row(r: Region, id: int, name: Ref[byte], email: Ref[byte], age: int) -> 
 // Run a SELECT. A real driver would parse `sql`, send it over the
 // wire, and stream rows back into `r`. We return the hardcoded
 // users table and ignore the SQL.
-fn run_query(r: Region, _sql: Ref[byte]) -> Ref[Row] {
+fn run_query(r: Region, _sql: Handle[byte]) -> Handle[Row] {
     ref(r, [
         make_row(r, 1, "alice",   "alice@example.com",  30),
         make_row(r, 2, "bob",     "bob@example.com",    45),

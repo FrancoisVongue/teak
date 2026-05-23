@@ -1,4 +1,4 @@
-// std/sort.orto — in-place sort of a Ref[T] (or slice) with an explicit
+// std/sort.orto — in-place sort of a Handle[T] (or slice) with an explicit
 // comparator. cmp(a, b) < 0 means a comes before b, 0 equal, > 0 after.
 // The comparator is injected — no ordering is baked into any type
 // (use str::compare for strings, a field-projecting closure for records).
@@ -7,13 +7,13 @@
 // reverse-sorted inputs don't degrade to O(n^2)), falling back to
 // insertion sort on small ranges where it's faster.
 
-fn swap[T](xs: Ref[T], i: int, j: int) -> () {
+fn swap[T](xs: Handle[T], i: int, j: int) -> () {
     let t = xs[i];
     xs[i] := xs[j];
     xs[j] := t;
 }
 
-fn insertion[T](xs: Ref[T], lo: int, hi: int, cmp: fn(T, T) -> int) -> () {
+fn insertion[T](xs: Handle[T], lo: int, hi: int, cmp: fn(T, T) -> int) -> () {
     let mut i = lo + 1;
     while i <= hi {
         let key = xs[i];
@@ -28,7 +28,7 @@ fn insertion[T](xs: Ref[T], lo: int, hi: int, cmp: fn(T, T) -> int) -> () {
 }
 
 // Index of the median of xs[a], xs[b], xs[c].
-fn med3[T](xs: Ref[T], a: int, b: int, c: int, cmp: fn(T, T) -> int) -> int {
+fn med3[T](xs: Handle[T], a: int, b: int, c: int, cmp: fn(T, T) -> int) -> int {
     if cmp(xs[a], xs[b]) < 0 {
         if cmp(xs[b], xs[c]) < 0 { b }
         else { if cmp(xs[a], xs[c]) < 0 { c } else { a } }
@@ -39,7 +39,7 @@ fn med3[T](xs: Ref[T], a: int, b: int, c: int, cmp: fn(T, T) -> int) -> int {
 }
 
 // Lomuto partition around the pivot already parked at `hi`.
-fn partition[T](xs: Ref[T], lo: int, hi: int, cmp: fn(T, T) -> int) -> int {
+fn partition[T](xs: Handle[T], lo: int, hi: int, cmp: fn(T, T) -> int) -> int {
     let pivot = xs[hi];
     let mut i = lo - 1;
     let mut j = lo;
@@ -51,7 +51,7 @@ fn partition[T](xs: Ref[T], lo: int, hi: int, cmp: fn(T, T) -> int) -> int {
     i + 1
 }
 
-fn qsort[T](xs: Ref[T], lo: int, hi: int, cmp: fn(T, T) -> int) -> () {
+fn qsort[T](xs: Handle[T], lo: int, hi: int, cmp: fn(T, T) -> int) -> () {
     if hi - lo < 12 {
         insertion(xs, lo, hi, cmp);
     } else {
@@ -64,11 +64,11 @@ fn qsort[T](xs: Ref[T], lo: int, hi: int, cmp: fn(T, T) -> int) -> () {
     }
 }
 
-fn sort[T](xs: Ref[T], cmp: fn(T, T) -> int) -> () {
+fn sort[T](xs: Handle[T], cmp: fn(T, T) -> int) -> () {
     if len(xs) > 1 { qsort(xs, 0, len(xs) - 1, cmp); }
 }
 
-fn is_sorted[T](xs: Ref[T], cmp: fn(T, T) -> int) -> bool {
+fn is_sorted[T](xs: Handle[T], cmp: fn(T, T) -> int) -> bool {
     let mut i = 1;
     let mut ok = true;
     while i < len(xs) {
@@ -80,7 +80,7 @@ fn is_sorted[T](xs: Ref[T], cmp: fn(T, T) -> int) -> bool {
 
 // Binary search in a sorted Ref. Returns an index of a matching element,
 // or -1 if absent. cmp is the same ordering used to sort.
-fn bsearch[T](xs: Ref[T], key: T, cmp: fn(T, T) -> int) -> int {
+fn bsearch[T](xs: Handle[T], key: T, cmp: fn(T, T) -> int) -> int {
     let mut lo = 0;
     let mut hi = len(xs) - 1;
     let mut found = 0 - 1;
@@ -94,7 +94,7 @@ fn bsearch[T](xs: Ref[T], key: T, cmp: fn(T, T) -> int) -> int {
 }
 
 // First index i with cmp(xs[i], key) >= 0 (insertion point keeping order).
-fn lower_bound[T](xs: Ref[T], key: T, cmp: fn(T, T) -> int) -> int {
+fn lower_bound[T](xs: Handle[T], key: T, cmp: fn(T, T) -> int) -> int {
     let mut lo = 0;
     let mut hi = len(xs);
     while lo < hi {
@@ -105,7 +105,7 @@ fn lower_bound[T](xs: Ref[T], key: T, cmp: fn(T, T) -> int) -> int {
 }
 
 // First index i with cmp(xs[i], key) > 0.
-fn upper_bound[T](xs: Ref[T], key: T, cmp: fn(T, T) -> int) -> int {
+fn upper_bound[T](xs: Handle[T], key: T, cmp: fn(T, T) -> int) -> int {
     let mut lo = 0;
     let mut hi = len(xs);
     while lo < hi {
