@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>orto через теорию категорий</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --line:#2b323c; --text:#d7dde5;
+    --dim:#8b95a3; --accent:#7aa2f7; --data:#7ee787; --lin:#f7768e;
+    --func:#e0af68; --eff:#bb9af7; --raw:#ff9e64; --num:#56d4dd;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
+    font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  #wrap{display:flex;flex-direction:column;height:100%}
+  header{padding:14px 20px;border-bottom:1px solid var(--line)}
+  header h1{margin:0;font-size:18px;font-weight:650}
+  header p{margin:4px 0 0;color:var(--dim);font-size:12.5px}
+  #tabs{display:flex;flex-wrap:wrap;gap:6px;padding:10px 20px;border-bottom:1px solid var(--line)}
+  .tab{padding:6px 12px;border:1px solid var(--line);border-radius:7px;cursor:pointer;
+    background:var(--panel);color:var(--dim);font-size:12.5px;user-select:none;transition:.15s}
+  .tab:hover{color:var(--text);border-color:#3a4250}
+  .tab.on{color:#0e1116;background:var(--accent);border-color:var(--accent);font-weight:650}
+  #main{display:flex;flex:1;min-height:0}
+  #stage{flex:1;position:relative;min-width:0}
+  svg{width:100%;height:100%;display:block;cursor:grab}
+  #side{width:380px;border-left:1px solid var(--line);padding:18px 20px;overflow:auto;background:var(--panel)}
+  #side h2{margin:0 0 6px;font-size:15.5px;color:var(--accent)}
+  #side .tag{display:inline-block;font-size:11px;color:var(--dim);border:1px solid var(--line);
+    border-radius:5px;padding:1px 7px;margin:0 0 10px}
+  #side h3{margin:16px 0 5px;font-size:13px;color:var(--text)}
+  #side p{margin:7px 0;color:#c2cad4;font-size:13px}
+  #side code{background:#0e1116;border:1px solid var(--line);border-radius:4px;padding:.5px 5px;
+    font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#a9d6ff}
+  #side .k{color:var(--dim);font-style:italic}
+  .edge{fill:none;stroke:#46506022;stroke-width:1.6}
+  .edge.hl{stroke:var(--accent);stroke-width:2.4}
+  .edge.absent{stroke:var(--lin);stroke-dasharray:3 4;stroke-width:1.6;opacity:.7}
+  .elabel{fill:var(--dim);font:11px ui-monospace,monospace;pointer-events:none}
+  .elabel.neg{fill:var(--lin)}
+  .node circle{stroke:#0e1116;stroke-width:2;cursor:grab}
+  .node text{fill:#0e1116;font:600 12px -apple-system,sans-serif;pointer-events:none;text-anchor:middle}
+  .node.dim{opacity:.28}
+  .legend{position:absolute;left:14px;bottom:12px;font-size:11.5px;color:var(--dim);
+    background:#0e1116cc;border:1px solid var(--line);border-radius:8px;padding:8px 11px}
+  .legend i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:-1px}
+  .hint{position:absolute;right:14px;top:12px;font-size:11px;color:var(--dim)}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <header>
+    <h1>orto через теорию категорий</h1>
+    <p>Объекты и морфизмы. Категория = объекты + стрелки + композиция (ассоциативна) + тождество <code>id</code>. Перетаскивай узлы, наводи для пояснения.</p>
+  </header>
+  <div id="tabs"></div>
+  <div id="main">
+    <div id="stage">
+      <svg id="svg">
+        <defs>
+          <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="#5b6573"/>
+          </marker>
+          <marker id="arrhl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="#7aa2f7"/>
+          </marker>
+        </defs>
+        <g id="edges"></g><g id="elabels"></g><g id="nodes"></g>
+      </svg>
+      <div class="legend" id="legend"></div>
+      <div class="hint">тяни узлы · клик — подсветить соседей</div>
+    </div>
+    <div id="side"></div>
+  </div>
+</div>
+<script>
+"use strict";
+const NS="http://www.w3.org/2000/svg";
+const COL={data:"#7ee787",lin:"#f7768e",func:"#e0af68",eff:"#bb9af7",
+  raw:"#ff9e64",num:"#56d4dd",lang:"#7aa2f7",unit:"#9aa5b1"};
+const GROUP_LABEL={data:"данные (cartesian)",lin:"линейные (monoidal)",
+  func:"функтор / generic",eff:"эффект / async",raw:"raw / FFI",
+  num:"числовой тип",lang:"язык",unit:"объект"};
+
+/* ---------- датасеты: каждая «категория» ---------- */
+const DATA = {
+
+overview:{
+ title:"Обзор: один язык — несколько категорий",
+ tag:"карта",
+ nodes:[
+  {id:"data",label:"Данные",g:"data",info:"Копируемые типы: числа, struct, enum, Handle. Cartesian-категория: есть произведение ×, сумма +, диагональ Δ (копия) и отбрасывание ! ."},
+  {id:"lin",label:"Ресурсы",g:"lin",info:"Линейные типы: Region, Socket. Symmetric monoidal без cartesian-структуры — нет Δ (копии) и нет ! (отбрасывания). Линейность = выкинуть диагональ."},
+  {id:"mem",label:"Region/Handle",g:"data",info:"Region — линейный владелец памяти. Handle[T] — копируемый gen-checked хендл в него. Доступ r[i] — частичный морфизм (может abort); try_at — стрелка Клейсли в Option."},
+  {id:"gen",label:"Generics",g:"func",info:"Handle[-], Option[-], Result[-] — эндофункторы на категории типов. Параметрическая функция ∀A.F(A)→G(A) — естественное преобразование."},
+  {id:"eff",label:"Async",g:"eff",info:"Эффект НЕ вынесен в монаду. await/spawn/yield компилируются в state-machine + io_uring. Категория типов остаётся без async-монады — функции не «красятся»."},
+  {id:"raw",label:"*T / FFI",g:"raw",info:"Сырой указатель — отдельный объект, граница с внешним миром. Теряет gen ровно здесь, как и линейные ресурсы."},
+ ],
+ edges:[
+  {a:"mem",b:"data",l:"Handle копируем ∈"},
+  {a:"lin",b:"mem",l:"Region линеен"},
+  {a:"gen",b:"data",l:"функтор над"},
+  {a:"eff",b:"data",l:"НЕ монада в типах",neg:true},
+  {a:"raw",b:"lin",l:"теряет gen на границе"},
+  {a:"data",b:"lin",l:"нет Δ для линейных",neg:true},
+ ],
+ desc:`<h3>Идея</h3><p>orto — не одна категория, а аккуратное склеивание нескольких. Ключевой выбор: <b>данные живут в cartesian-мире</b> (копируй, отбрасывай, бери произведения и суммы), <b>ресурсы — в monoidal-мире без cartesian-структуры</b> (линейность), а <b>эффекты вообще не попадают в категорию типов</b> (async компилируется, а не типизируется монадой).</p>
+ <p>Каждая вкладка раскрывает один из этих кусков как настоящий граф объектов и морфизмов.</p>`
+},
+
+base:{
+ title:"Базовые типы и касты",
+ tag:"подкатегория Num",
+ nodes:[
+  {id:"i8",label:"i8",g:"num"},{id:"i16",label:"i16",g:"num"},
+  {id:"i32",label:"i32",g:"num"},{id:"i64",label:"i64",g:"num",
+    info:"int = i64. Терминальный «рабочий» объект: to_int(_) ведёт сюда из любого числового, арифметика по умолчанию здесь."},
+  {id:"u8",label:"u8/byte",g:"num",info:"byte — это u8. Литералы и сетевые байты живут здесь."},
+  {id:"u32",label:"u32",g:"num"},{id:"u64",label:"u64",g:"num",
+    info:"Полный u64 НЕ влезает в знаковый i64 — поэтому codec'и возвращают именно u64, а не int."},
+  {id:"f64",label:"f64",g:"num",info:"float = f64 (IEEE-754 double). Переход int↔float только явный (to_float / to_int)."},
+ ],
+ edges:[
+  {a:"i8",b:"i64",l:"to_int (lossless)"},
+  {a:"i16",b:"i64",l:"to_int"},
+  {a:"i32",b:"i64",l:"to_int"},
+  {a:"u8",b:"i64",l:"to_int"},
+  {a:"i64",b:"u8",l:"to_byte (trunc)"},
+  {a:"i64",b:"u32",l:"to_u32"},
+  {a:"i64",b:"u64",l:"to_u64"},
+  {a:"i64",b:"f64",l:"to_float"},
+  {a:"f64",b:"i64",l:"to_int (trunc→0)"},
+ ],
+ desc:`<h3>Категория числовых типов</h3>
+ <p>Объекты — фиксированные ширины (<code>i8..i128</code>, <code>u8..u128</code>, <code>f16..f128</code>). Морфизмы — <b>явные касты</b> <code>to_int</code>, <code>to_byte</code>, <code>to_u32</code>, <code>to_float</code>… Композиция = цепочка кастов, <code>id</code> = каст типа в себя.</p>
+ <h3>Почему всё через <code>i64</code></h3>
+ <p><code>int = i64</code> играет роль «хаба»: расширения в него <span class="k">lossless</span> (моно-стрелки), сужения из него — усекают. Ровно один общий механизм каста <code>to_&lt;T&gt;</code> порождает все стрелки — нет отдельных правил на каждую пару (это и есть N+M вместо N²).</p>
+ <h3>Закон явности</h3>
+ <p>Нет неявных коэрций: <code>i32 + i64</code> — ошибка, не «магия». Каждая стрелка в коде видна. Это категория, где морфизмы не подставляются молча.</p>`
+},
+
+prodsum:{
+ title:"Произведение и сумма (struct / enum)",
+ tag:"бикартезианость",
+ nodes:[
+  {id:"P",label:"struct S",g:"data",info:"S = A × B. Поля — проекции π. Конструктор S{a,b} — универсальная стрелка в произведение."},
+  {id:"A",label:"A",g:"data"},{id:"B",label:"B",g:"data"},
+  {id:"one",label:"() = 1",g:"unit",info:"Unit — терминальный объект. Из любого типа есть ровно одна стрелка в 1 (отбрасывание). Эффекты возвращают ()."},
+  {id:"S",label:"enum E",g:"data",info:"E = A + B. Конструкторы вариантов — инъекции inl/inr. match — универсальная стрелка ИЗ суммы (копроизведение)."},
+ ],
+ edges:[
+  {a:"P",b:"A",l:"π₁ (поле .a)"},
+  {a:"P",b:"B",l:"π₂ (поле .b)"},
+  {a:"P",b:"one",l:"! (в терминал)"},
+  {a:"A",b:"S",l:"inl (ctor)"},
+  {a:"B",b:"S",l:"inr (ctor)"},
+  {a:"S",b:"one",l:"match → ()"},
+ ],
+ desc:`<h3>Данные = (ко)произведения</h3>
+ <p>CLAUDE.md прямо говорит «типы суммы и произведения». Категориально это буквально так:</p>
+ <p><b>struct</b> = <b>произведение</b> A×B: поля — проекции π₁,π₂; <code>S{a,b}</code> — единственная стрелка, согласованная с проекциями (универсальное свойство ×).</p>
+ <p><b>enum</b> = <b>копроизведение</b> A+B: конструкторы — инъекции inl,inr; <code>match</code> — единственная стрелка из суммы, заданная по веткам (универсальное свойство +).</p>
+ <p><b>()</b> = <b>терминальный объект 1</b>: единственная стрелка <code>!</code> в него = «отбросить». Эффекты (<code>:=</code>, <code>while</code>, <code>print</code>) возвращают <code>()</code>.</p>
+ <h3>Бикартезианость</h3>
+ <p>Есть и ×, и + — это бикартезианая категория. Никаких «классов» и наследования: данные строятся ровно двумя двойственными операциями, и всё.</p>`
+},
+
+memory:{
+ title:"Память: cartesian vs monoidal",
+ tag:"линейность = нет Δ",
+ nodes:[
+  {id:"int",label:"int",g:"data",info:"Копируемый. Есть диагональ Δ: int→int×int (копия) и ! : int→1 (отбрасывание)."},
+  {id:"h",label:"Handle[T]",g:"data",info:"Копируемый gen-checked хендл. Тоже cartesian: можно копировать и отбрасывать. Безопасность даёт рантайм gen-check, не линейность."},
+  {id:"reg",label:"Region",g:"lin",info:"Линейный владелец. НЕТ Δ (нельзя скопировать владельца) и НЕТ ! (нельзя молча отбросить — drop в конце scope обязателен)."},
+  {id:"sock",label:"Socket",g:"lin",info:"linear struct + drop_Socket. Monoidal-объект: можно двигать (move), нельзя дублировать."},
+  {id:"copy",label:"A×A",g:"data",info:"Результат копирования. Доступен только для cartesian-объектов."},
+  {id:"one",label:"1",g:"unit",info:"Терминал. Отбрасывание ! есть только у cartesian-объектов."},
+ ],
+ edges:[
+  {a:"int",b:"copy",l:"Δ копия"},
+  {a:"h",b:"copy",l:"Δ копия"},
+  {a:"int",b:"one",l:"! отбросить"},
+  {a:"reg",b:"copy",l:"Δ запрещена",neg:true},
+  {a:"reg",b:"one",l:"! запрещено",neg:true},
+  {a:"sock",b:"copy",l:"Δ запрещена",neg:true},
+ ],
+ desc:`<h3>Точная теорема, а не метафора</h3>
+ <p>Cartesian-категория имеет <b>диагональ</b> Δ:A→A×A (копирование) и <b>отбрасывание</b> !:A→1. Линейная логика по Curry–Howard–Lambek — это <b>симметричная моноидальная категория без</b> этих двух стрелок.</p>
+ <p>orto-линейность — ровно это: <code>linear</code>-тип теряет Δ и ! . «Нельзя скопировать» = нет диагонали; «нельзя забыть» (обязательный drop) = нет свободного отбрасывания. Не спецправило — выпадение cartesian-структуры.</p>
+ <h3>Где живёт Handle</h3>
+ <p><code>Handle[T]</code> остаётся <b>cartesian</b> (копируем, отбрасываем) — безопасность ему даёт <span class="k">рантайм gen-check</span>, а не линейность. Поэтому он удобен (много алиасов), а владелец памяти (<code>Region</code>) — линеен.</p>
+ <h3>Доступ как частичный морфизм</h3>
+ <p><code>r[i]</code> — частичная стрелка (может <code>abort</code>). <code>try_at(r,i): Option[T]</code> — её тотализация: стрелка <b>Клейсли</b> монады Option. Один и тот же доступ в двух обличьях.</p>`
+},
+
+functor:{
+ title:"Дженерики = функторы, параметричность = естественность",
+ tag:"functor / nat. transf.",
+ nodes:[
+  {id:"T",label:"T",g:"data"},{id:"U",label:"U",g:"data"},
+  {id:"HT",label:"Handle[T]",g:"func",info:"Объект-применение функтора Handle[-] к T."},
+  {id:"HU",label:"Handle[U]",g:"func"},
+  {id:"OT",label:"Option[T]",g:"func",info:"Ещё один эндофунктор. fmap поднимает f:T→U в Option[T]→Option[U]."},
+  {id:"id",label:"∀A. A→A",g:"eff",info:"Параметрическая ∀A.A→A — естественное преобразование Id⇒Id. По параметричности (Yoneda) у него ровно ОДИН элемент: id. Отсюда «free theorems»."},
+ ],
+ edges:[
+  {a:"T",b:"U",l:"f"},
+  {a:"HT",b:"HU",l:"fmap f"},
+  {a:"OT",b:"HT",l:"≅ структурно"},
+  {a:"T",b:"HT",l:"Handle[-]"},
+  {a:"U",b:"HU",l:"Handle[-]"},
+  {a:"id",b:"T",l:"компонент в T"},
+ ],
+ desc:`<h3>Generic-тип — это функтор</h3>
+ <p><code>Handle[-]</code>, <code>Option[-]</code>, <code>Result[-]</code> — <b>эндофункторы</b> на категории типов: переводят объект T в объект <code>Handle[T]</code> и стрелку f:T→U в <code>fmap f</code>, сохраняя <code>id</code> и композицию. Мономорфизация просто инстанцирует функтор на конкретном объекте.</p>
+ <h3>Параметричность = естественность</h3>
+ <p>Generic-функция, которая «не заглядывает внутрь T» (наш закон: T — запечатанная коробка), — это <b>естественное преобразование</b>. Квадрат естественности — это и есть «free theorem».</p>
+ <p><code>∀A. A→A</code> может быть только <code>id</code>; <code>∀A. [A]→[A]</code> — только перестановка, не трогая элементы. Это <b>не вежливость, а теорема</b> (Yoneda/параметричность).</p>
+ <h3>Почему нет classes/bounds</h3>
+ <p>Constraint <code>where T: Ord</code> = «я заглядываю внутрь T» = функция перестаёт быть естественным преобразованием и становится семейством, индексированным инстансом (ad-hoc). orto оставляет функцию честно естественной, поведение впрыскивает значением (<code>cmp</code> аргументом/полем). Поздно + явно = точнее.</p>`
+},
+
+async:{
+ title:"Async: один категория vs монада-раскраска",
+ tag:"нет Kleisli-раскола",
+ nodes:[
+  {id:"sync",label:"fn (база)",g:"data",info:"orto: обычная функция. Все функции в ОДНОЙ категории — свободно компонуются."},
+  {id:"aw",label:"await/spawn/yield",g:"eff",info:"Не монадические операторы, а маркеры точек приостановки для компилятора."},
+  {id:"sm",label:"state-machine",g:"eff",info:"Компилятор (CPS-подобно) режет функцию на сегменты между await — for(;;) switch. Эффект живёт в КОМПИЛЯЦИИ, не в типе."},
+  {id:"ring",label:"io_uring",g:"raw",info:"SQE подаётся, задача снимается; CQE будит. thread-per-core, shared-nothing."},
+  {id:"task",label:"Task[T]/Stream[T]",g:"func",info:"Линейные builtin-хендлы на слот в пуле. Не Future-монада: нет do-нотации, нет .and_then-цепочек в типах."},
+  {id:"future",label:"Future-монада (Rust/Haskell)",g:"lin",info:"Чужой подход: эффект = монада. async-функции живут в Kleisli-категории, sync — в базовой. Они НЕ компонуются напрямую → «раскраска функций»."},
+ ],
+ edges:[
+  {a:"aw",b:"sm",l:"lowering"},
+  {a:"sm",b:"ring",l:"SQE/CQE"},
+  {a:"sync",b:"aw",l:"тот же мир"},
+  {a:"sm",b:"task",l:"слот-пул"},
+  {a:"future",b:"sync",l:"раскол категории",neg:true},
+ ],
+ desc:`<h3>Проблема раскраски = раскол категории</h3>
+ <p>Монадический async (Rust <code>Future</code>, Haskell <code>IO</code>) кладёт эффект в <b>монаду</b>. Тогда async-функции живут в <b>Kleisli-категории</b> этой монады, а обычные — в базовой. Две категории <b>не компонуются напрямую</b>: нужно <code>await</code>/<code>lift</code> чтобы пересечь границу. Это и есть «function coloring».</p>
+ <h3>Выбор orto: одна категория</h3>
+ <p>orto <b>отказывается выносить эффект в типы</b>. <code>await</code>/<code>spawn</code>/<code>yield</code> — это маркеры для компилятора, который CPS-подобно превращает тело в state-machine (<code>for(;;) switch</code>) и привязывает к io_uring. В <b>исходной</b> категории типов нет async-монады — функции остаются обычными стрелками и свободно компонуются.</p>
+ <h3>Чем платим / почему так</h3>
+ <p>Go тоже избегает раскраски (одна категория), но ценой M:N-планировщика + GC. orto держит одну категорию И thread-per-core/io_uring (макс. скорость), а монаду-эффект просто <b>компилирует</b>, а не типизирует. <code>Task[T]</code>/<code>Stream[T]</code> — линейные хендлы на слот, а не монадические обёртки.</p>`
+},
+
+compare:{
+ title:"Сравнение языков как категорий",
+ tag:"структура vs структура",
+ nodes:[
+  {id:"orto",label:"orto",g:"lang",info:"Бикартезиан (данные) + моноидаль без cartesian (линейные ресурсы) + функторы (generics) + НЕТ effect-монады (async компилируется). Безопасность памяти — рантайм gen-check, не borrow-checker. Без GC."},
+  {id:"rust",label:"Rust",g:"lang",info:"Аффинные типы (ownership) + lifetimes (индексированная категория) + Future-монада (раскраска). Borrow-checker = ограничение на морфизмы на компиляции. Без GC."},
+  {id:"ocaml",label:"OCaml",g:"lang",info:"CCC + ADT (×,+) + функторы + GC: все объекты свободно копируемы/отбрасываемы (полностью cartesian). Эффекты по большей части вне типов, но GC = недетерминированный хвост."},
+  {id:"hs",label:"Haskell",g:"lang",info:"CCC + богатые функторы/монады; эффект В типах (IO-монада) → раскраска. GC."},
+  {id:"go",label:"Go",g:"lang",info:"CCC + GC; конкурентность вне категории типов (одна категория, как у нас), но M:N+GC, без суммы-типов первого класса."},
+  {id:"cart",label:"cartesian (Δ,!)",g:"data",info:"Свободное копирование/отбрасывание. У всех GC-языков — всё здесь."},
+  {id:"mono",label:"monoidal (нет Δ)",g:"lin",info:"Линейные/аффинные ресурсы. orto (линейные) и Rust (аффинные) — здесь."},
+  {id:"effm",label:"effect-монада",g:"eff",info:"Эффект в типах → раскраска функций. Rust/Haskell — да; orto/Go — нет."},
+ ],
+ edges:[
+  {a:"orto",b:"mono",l:"линейные ресурсы"},
+  {a:"orto",b:"cart",l:"данные"},
+  {a:"orto",b:"effm",l:"НЕ имеет",neg:true},
+  {a:"rust",b:"mono",l:"affine"},
+  {a:"rust",b:"effm",l:"Future"},
+  {a:"ocaml",b:"cart",l:"всё (GC)"},
+  {a:"hs",b:"effm",l:"IO"},
+  {a:"go",b:"cart",l:"всё (GC)"},
+  {a:"go",b:"effm",l:"НЕ имеет",neg:true},
+ ],
+ desc:`<h3>Где сидит каждый</h3>
+ <p><b>OCaml / Go</b> — полностью <b>cartesian</b> (GC: копируй/выбрасывай что угодно). Просты, но GC = недетерминированный хвост латентности.</p>
+ <p><b>Haskell</b> — cartesian + <b>effect-монада</b> (IO) → раскраска.</p>
+ <p><b>Rust</b> — <b>аффинная</b> структура (ownership) + lifetimes (индексированная категория, тяжёлая машинерия borrow-checker'а) + Future-монада → раскраска. Без GC.</p>
+ <p><b>orto</b> — единственная точка: <b>monoidal</b> для ресурсов (линейность = нет Δ), <b>cartesian</b> для данных, функторы для generics, <b>без</b> effect-монады (async компилируется), безопасность памяти — <b>рантайм gen-check</b>, не borrow-checker. Без GC.</p>
+ <h3>Одной строкой</h3>
+ <p>orto берёт системный домен Rust (без GC), простоту OCaml (без borrow-checker), отказ от раскраски Go (одна категория) — и склеивает это разделением cartesian/monoidal + рантайм-проверкой вместо доказательства на типах.</p>`
+}
+};
+
+const ORDER=[["overview","Обзор"],["base","Базовые типы"],["prodsum","× и + (struct/enum)"],
+ ["memory","Память: cart/monoidal"],["functor","Generics = функторы"],
+ ["async","Async"],["compare","Сравнение языков"]];
+
+/* ---------- движок силовых графов ---------- */
+const svg=document.getElementById("svg");
+const gE=document.getElementById("edges"), gL=document.getElementById("elabels"), gN=document.getElementById("nodes");
+let W=0,H=0, cur=null, drag=null, selected=null;
+function size(){const r=svg.getBoundingClientRect();W=r.width;H=r.height;}
+addEventListener("resize",()=>{size();});
+
+function load(key){
+  cur=JSON.parse(JSON.stringify(DATA[key]));
+  size();
+  const cx=W/2,cy=H/2;
+  cur.nodes.forEach((n,i)=>{
+    const a=i/cur.nodes.length*2*Math.PI;
+    n.x=cx+Math.cos(a)*120+(Math.random()-.5)*40;
+    n.y=cy+Math.sin(a)*100+(Math.random()-.5)*40;
+    n.vx=0;n.vy=0;n.r=Math.max(26,n.label.length*4.2);
+  });
+  // dedupe key for curve offset on parallel edges
+  cur.byId={}; cur.nodes.forEach(n=>cur.byId[n.id]=n);
+  build(); fillSide(key); fillLegend();
+  selected=null;
+}
+
+function build(){
+  gE.innerHTML="";gL.innerHTML="";gN.innerHTML="";
+  cur.edges.forEach((e,i)=>{
+    e.path=document.createElementNS(NS,"path");
+    e.path.setAttribute("class","edge"+(e.neg?" absent":""));
+    if(!e.neg) e.path.setAttribute("marker-end","url(#arr)");
+    gE.appendChild(e.path);
+    e.lab=document.createElementNS(NS,"text");
+    e.lab.setAttribute("class","elabel"+(e.neg?" neg":""));
+    e.lab.textContent=e.l; gL.appendChild(e.lab);
+  });
+  cur.nodes.forEach(n=>{
+    const g=document.createElementNS(NS,"g");
+    g.setAttribute("class","node"); n.el=g;
+    const c=document.createElementNS(NS,"circle");
+    c.setAttribute("r",n.r); c.setAttribute("fill",COL[n.g]||"#7aa2f7");
+    const t=document.createElementNS(NS,"text"); t.setAttribute("dy","4"); t.textContent=n.label;
+    g.appendChild(c);g.appendChild(t);gN.appendChild(g);
+    g.addEventListener("pointerdown",ev=>{drag=n;n.fixed=true;g.setPointerCapture(ev.pointerId);ev.stopPropagation();});
+    g.addEventListener("pointerup",()=>{drag=null;n.fixed=false;select(n);});
+    g.addEventListener("mouseenter",()=>showInfo(n));
+  });
+}
+
+svg.addEventListener("pointermove",ev=>{
+  if(!drag)return; const r=svg.getBoundingClientRect();
+  drag.x=ev.clientX-r.left; drag.y=ev.clientY-r.top;
+});
+svg.addEventListener("pointerup",()=>{if(drag){drag.fixed=false;drag=null;}});
+svg.addEventListener("pointerdown",()=>{select(null);});
+
+function step(){
+  if(!cur){requestAnimationFrame(step);return;}
+  const ns=cur.nodes, K=0.012, REP=42000, CEN=0.006, LEN=170;
+  for(let i=0;i<ns.length;i++){
+    const a=ns[i];
+    for(let j=i+1;j<ns.length;j++){
+      const b=ns[j]; let dx=a.x-b.x,dy=a.y-b.y; let d2=dx*dx+dy*dy||1;
+      let f=REP/d2; let d=Math.sqrt(d2); dx/=d;dy/=d;
+      a.vx+=dx*f*0.0016;a.vy+=dy*f*0.0016;
+      b.vx-=dx*f*0.0016;b.vy-=dy*f*0.0016;
+    }
+    a.vx+=(W/2-a.x)*CEN; a.vy+=(H/2-a.y)*CEN;
+  }
+  cur.edges.forEach(e=>{
+    const a=cur.byId[e.a],b=cur.byId[e.b]; if(!a||!b)return;
+    let dx=b.x-a.x,dy=b.y-a.y,d=Math.sqrt(dx*dx+dy*dy)||1;
+    let f=(d-LEN)*K; dx/=d;dy/=d;
+    a.vx+=dx*f;a.vy+=dy*f; b.vx-=dx*f;b.vy-=dy*f;
+  });
+  ns.forEach(n=>{
+    if(n===drag||n.fixed){n.vx=0;n.vy=0;}
+    else{ n.vx*=0.86;n.vy*=0.86; n.x+=n.vx;n.y+=n.vy;
+      n.x=Math.max(n.r+6,Math.min(W-n.r-6,n.x));
+      n.y=Math.max(n.r+6,Math.min(H-n.r-6,n.y)); }
+  });
+  render(); requestAnimationFrame(step);
+}
+
+function render(){
+  if(!cur)return;
+  const pairSeen={};
+  cur.edges.forEach(e=>{
+    const a=cur.byId[e.a],b=cur.byId[e.b]; if(!a||!b)return;
+    let dx=b.x-a.x,dy=b.y-a.y,d=Math.sqrt(dx*dx+dy*dy)||1;
+    // perpendicular offset so opposite/parallel edges don't overlap
+    const pk=[e.a,e.b].sort().join("|"); pairSeen[pk]=(pairSeen[pk]||0);
+    const dir = (e.a<e.b)?1:-1; const off=(pairSeen[pk]*1+ (countPair(pk)>1?dir*1:0))*22;
+    pairSeen[pk]++;
+    const mx=(a.x+b.x)/2 - dy/d*off, my=(a.y+b.y)/2 + dx/d*off;
+    // trim to circle borders
+    const ax=a.x+dx/d*a.r, ay=a.y+dy/d*a.r;
+    let bx2=b.x-dx/d*(b.r+8), by2=b.y-dy/d*(b.r+8);
+    e.path.setAttribute("d",`M${ax} ${ay} Q ${mx} ${my} ${bx2} ${by2}`);
+    e.lab.setAttribute("x",mx); e.lab.setAttribute("y",my-3);
+  });
+  cur.nodes.forEach(n=>{ n.el.setAttribute("transform",`translate(${n.x} ${n.y})`); });
+}
+function countPair(pk){return cur.edges.filter(e=>[e.a,e.b].sort().join("|")===pk).length;}
+
+function select(n){
+  selected=n;
+  const adj=new Set();
+  if(n){adj.add(n.id);cur.edges.forEach(e=>{if(e.a===n.id)adj.add(e.b);if(e.b===n.id)adj.add(e.a);});}
+  cur.nodes.forEach(m=>m.el.classList.toggle("dim", n&&!adj.has(m.id)));
+  cur.edges.forEach(e=>{
+    const on=n&&(e.a===n.id||e.b===n.id);
+    e.path.classList.toggle("hl",on&&!e.neg);
+    if(!e.neg)e.path.setAttribute("marker-end",on?"url(#arrhl)":"url(#arr)");
+  });
+  if(n)showInfo(n);
+}
+function showInfo(n){
+  if(!n.info)return;
+  document.getElementById("nodeinfo").innerHTML=
+    `<h3>${n.label} <span class="k">· ${GROUP_LABEL[n.g]||""}</span></h3><p>${n.info}</p>`;
+}
+
+function fillSide(key){
+  const d=DATA[key];
+  document.getElementById("side").innerHTML=
+   `<h2>${d.title}</h2><span class="tag">${d.tag}</span>${d.desc}
+    <div id="nodeinfo" style="margin-top:16px;border-top:1px dashed var(--line);padding-top:10px">
+    <p class="k">Наведи/кликни узел — пояснение здесь.</p></div>`;
+}
+function fillLegend(){
+  const gs=[...new Set(cur.nodes.map(n=>n.g))];
+  document.getElementById("legend").innerHTML=
+    gs.map(g=>`<div><i style="background:${COL[g]}"></i>${GROUP_LABEL[g]||g}</div>`).join("")
+    +`<div style="margin-top:5px;color:var(--lin)">— — — отсутствующая стрелка (запрет/нет)</div>`;
+}
+
+/* ---------- tabs ---------- */
+const tabs=document.getElementById("tabs");
+ORDER.forEach(([key,label],i)=>{
+  const t=document.createElement("div");t.className="tab"+(i===0?" on":"");t.textContent=label;
+  t.onclick=()=>{document.querySelectorAll(".tab").forEach(x=>x.classList.remove("on"));
+    t.classList.add("on");load(key);};
+  tabs.appendChild(t);
+});
+load("overview");
+requestAnimationFrame(step);
+</script>
+</body>
+</html>
