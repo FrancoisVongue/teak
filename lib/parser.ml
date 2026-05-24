@@ -425,7 +425,7 @@ and parse_atom st =
   | TIf | TMatch | TWhile | TBreak | TContinue | TFor | TReturn
   | TLen | TSlice
   | TToInt | TToByte | TToFloat
-  | TCAlloc | TCFree | TNullPtr | TIsNull | TArrayData | TPtrCast | TTryAt | TDrop | TReset
+  | TCAlloc | TCFree | TNullPtr | TIsNull | TAsPtr | TPtrCast | TTryAt | TDrop | TReset
   | TRegion | TStackRegion | TAlignedRegion
   | TPrint | TPrintln -> parse_atom_consume st
   | t -> raise (Parse_error
@@ -583,7 +583,7 @@ and parse_atom_consume st =
            ref(r, v)         — one cell holding v        (a "box")
            ref(r, n, init)   — n cells, each init        (a buffer)
            ref(r, [a, b, c]) — cells from a value list
-         All produce Ref[T] (a gen-checked handle to cell(s) in r). *)
+         All produce Handle[T] (a gen-checked handle to cell(s) in r). *)
       expect st TLParen;
       let r = parse_expr st in
       expect st TComma;
@@ -604,7 +604,7 @@ and parse_atom_consume st =
            in
            expect st TRBracket;
            expect st TRParen;
-           EArrayLit (r, elems)
+           EHandleLit (r, elems)
        | _ ->
            let first = parse_expr st in
            (match peek st with
@@ -612,10 +612,10 @@ and parse_atom_consume st =
                 advance st;
                 let init = parse_expr st in
                 expect st TRParen;
-                EArray (r, first, init)        (* ref(r, n, init) *)
+                EHandle (r, first, init)        (* ref(r, n, init) *)
             | _ ->
                 expect st TRParen;
-                EArray (r, EInt 1L, first)))    (* ref(r, v) — one cell *)
+                EHandle (r, EInt 1L, first)))    (* ref(r, v) — one cell *)
   | TIf -> parse_if_after_kw st
   | TMatch -> parse_match_after_kw st
   | TWhile ->
@@ -723,11 +723,11 @@ and parse_atom_consume st =
       let p = parse_expr st in
       expect st TRParen;
       EIsNull p
-  | TArrayData ->
+  | TAsPtr ->
       expect st TLParen;
       let a = parse_expr st in
       expect st TRParen;
-      EArrayData a
+      EHandleData a
   | TPtrCast ->
       expect st TLBracket;
       let t = parse_ty st in

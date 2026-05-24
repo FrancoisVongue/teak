@@ -49,7 +49,7 @@ type pat =
   | POr   of pat list                    (* a | b | c — all must be PCtor or literals, no bindings *)
   | PInt  of int                         (* literal int pattern *)
   | PBool of bool                        (* literal bool pattern *)
-  | PStr  of string                      (* literal Array[byte] pattern *)
+  | PStr  of string                      (* literal Handle[byte] pattern *)
   | PTuple of pat list                   (* (p1, p2, ..., pn) — destructure tuple scrutinee *)
 
 type binop =
@@ -99,8 +99,8 @@ type expr =
   | EReturn of expr                       (* return v; — early exit from enclosing fn *)
   | EMatch  of expr * (pat * expr option * expr) list
                                           (* (pattern, optional `if guard`, body) *)
-  | EArray  of expr * expr * expr         (* array(r, N, init) — allocate N slots in region r *)
-  | EArrayLit of expr * expr list         (* array(r, [v0, v1, ...]) — allocate and initialize *)
+  | EHandle  of expr * expr * expr         (* array(r, N, init) — allocate N slots in region r *)
+  | EHandleLit of expr * expr list         (* array(r, [v0, v1, ...]) — allocate and initialize *)
   | ERegion of expr                       (* region(N) — heap arena, malloc'd block *)
   | EStackRegion of expr                  (* stack_region(N) — N literal, block on stack *)
   | EAlignedRegion of expr * expr         (* aligned_region(N, A) — heap, A-byte aligned *)
@@ -116,7 +116,7 @@ type expr =
   | ECFree  of expr                       (* c_free(p) — free raw pointer *)
   | ENullPtr of ty                        (* null_ptr[T]() — typed NULL *)
   | EIsNull of expr                       (* is_null(p) — NULL check *)
-  | EArrayData of expr                    (* array_data(a) — *T view of Array[T] bytes *)
+  | EHandleData of expr                    (* as_ptr(a) — *T view of Handle[T] bytes *)
   | EPtrCast of ty * expr                 (* ptr_cast[T](e) — reinterpret raw pointer/address as *T *)
   | EReset of expr                        (* reset(r) — rewind region r, invalidate its refs *)
   | ETryAt  of expr * expr                (* try_at(a, i) — None on dangling/oob *)
@@ -200,7 +200,7 @@ type use_decl = {
   use_pub    : bool;
 }
 
-(* `type Bytes = Array[byte];` — a plain alias. Resolved away by the
+(* `type Bytes = Handle[byte];` — a plain alias. Resolved away by the
    resolver before type checking; no runtime presence. Non-generic only. *)
 type alias_decl = {
   alias_name : string;
@@ -359,9 +359,9 @@ let rec show_expr = function
       in
       Printf.sprintf "match %s { %s }"
         (show_expr e) (String.concat ", " arm_strs)
-  | EArray (r, n, v) ->
+  | EHandle (r, n, v) ->
       Printf.sprintf "array(%s, %s, %s)" (show_expr r) (show_expr n) (show_expr v)
-  | EArrayLit (r, elems) ->
+  | EHandleLit (r, elems) ->
       Printf.sprintf "array(%s, [%s])" (show_expr r)
         (String.concat ", " (List.map show_expr elems))
   | EStackRegion n -> Printf.sprintf "stack_region(%s)" (show_expr n)
@@ -384,7 +384,7 @@ let rec show_expr = function
   | ECFree p -> Printf.sprintf "c_free(%s)" (show_expr p)
   | ENullPtr t -> Printf.sprintf "null_ptr[%s]()" (show_ty t)
   | EIsNull p -> Printf.sprintf "is_null(%s)" (show_expr p)
-  | EArrayData a -> Printf.sprintf "array_data(%s)" (show_expr a)
+  | EHandleData a -> Printf.sprintf "as_ptr(%s)" (show_expr a)
   | EPtrCast (t, e) -> Printf.sprintf "ptr_cast[%s](%s)" (show_ty t) (show_expr e)
   | EReset e -> Printf.sprintf "reset(%s)" (show_expr e)
   | ETryAt (a, i) -> Printf.sprintf "try_at(%s, %s)" (show_expr a) (show_expr i)

@@ -41,9 +41,9 @@ module T = struct
                      Region bindings that are not consumed. *)
     | TEMatch  of expr * ty * (pat * expr option * expr) list * ty
                   (* scrut, scrut_ty, arms (pattern + optional guard + body), result_ty *)
-    | TEArray  of expr * expr * expr * ty
-                  (* array(r, N, init) — allocate in region r, result is Array[T] *)
-    | TEArrayLit of expr * expr list * ty
+    | TEHandle  of expr * expr * expr * ty
+                  (* array(r, N, init) — allocate in region r, result is Handle[T] *)
+    | TEHandleLit of expr * expr list * ty
                   (* array(r, [v0..vN]) — allocate in r, init each slot *)
     | TERegion of expr * ty
                   (* region(N) — heap arena *)
@@ -79,8 +79,8 @@ module T = struct
                   (* null_ptr[T]() — result type TyPtr T *)
     | TEIsNull of expr
                   (* is_null(p) -> bool *)
-    | TEArrayData of expr * ty
-                  (* array_data(a: Array[T]) -> TyPtr T *)
+    | TEHandleData of expr * ty
+                  (* array_data(a: Handle[T]) -> TyPtr T *)
     | TEPtrCast of expr * ty
                   (* ptr_cast[T](e) — source expr, result type TyPtr T *)
     | TETryAt of expr * expr * ty
@@ -349,7 +349,7 @@ let rec place_root_var = function
 let rec is_linear_ty (t : ty) : bool =
   match prune t with
   | TyApp ("Handle", [inner]) ->
-      (* Induced linearity: an Array of a linear element type is itself
+      (* Induced linearity: an Handle of a linear element type is itself
          linear — its drop frees the elements first. Builtin containers
          propagate; nominal user types do not (they declare linearity
          explicitly via `linear struct`). *)
@@ -530,7 +530,7 @@ let rec validate_ty
          Exception: Task[T] and Stream[T] are themselves linear, so a
          linear T is fine — the task/stream owns the inner value and
          transfers it via await/for-in. This is the first sliver of
-         "induced linearity" — the full version (Array[T] when T is
+         "induced linearity" — the full version (Handle[T] when T is
          linear) lands in phase 3. *)
       let propagates_linearity =
         (n = "Task" || n = "Stream" || n = "Handle") in
@@ -549,12 +549,12 @@ let rec validate_ty
                "type parameter %S cannot take type arguments" n));
         TyVar n
       end else if n = "Handle" then begin
-        (* Array[T] is a built-in unary type constructor — handle to a
+        (* Handle[T] is a built-in unary type constructor — handle to a
            region-allocated buffer. The wrapper is copyable. *)
         if List.length args <> 1 then
           raise (Type_error
             (Printf.sprintf
-               "Array expects exactly 1 type argument, got %d"
+               "Handle expects exactly 1 type argument, got %d"
                (List.length args)));
         TyApp ("Handle", args)
       end else if n = "Region" then begin
@@ -879,7 +879,7 @@ let check_no_recursive_types
         raise (Type_error
           (Printf.sprintf
              "recursive type %S (cycle: %s) — put the recursive field behind \
-              a region handle (Array[...] or Ref[...]) for indirection"
+              a region handle (Handle[...]) for indirection"
              root
              (String.concat " -> " (List.rev (dep :: path)))))
       else if not (List.mem dep path) then
@@ -899,7 +899,7 @@ type scrut_kind =
   | SK_Int                         (* int — literal patterns, default required *)
   | SK_Byte                        (* byte — same rules as int *)
   | SK_Bool                        (* bool — true/false, exhaustive if both covered *)
-  | SK_Bytes                       (* Array[byte] — string literal patterns *)
+  | SK_Bytes                       (* Handle[byte] — string literal patterns *)
   | SK_Tuple of ty list            (* tuple — PTuple of matching arity *)
 
 let scrutinee_kind (env : env) (t : ty) : scrut_kind =
@@ -918,14 +918,14 @@ let scrutinee_kind (env : env) (t : ty) : scrut_kind =
        | _ ->
            raise (Type_error
              (Printf.sprintf
-                "match scrutinee must be int, bool, byte, Array[byte], tuple, or an ADT, got %s"
+                "match scrutinee must be int, bool, byte, Handle[byte], tuple, or an ADT, got %s"
                 (show_ty (zonk t)))))
   | TyTuple ts -> SK_Tuple ts
   | TyApp (n, _) when List.mem_assoc n env.types -> SK_Adt n
   | _ ->
       raise (Type_error
         (Printf.sprintf
-           "match scrutinee must be int, bool, byte, Array[byte], tuple, or an ADT, got %s"
+           "match scrutinee must be int, bool, byte, Handle[byte], tuple, or an ADT, got %s"
            (show_ty (zonk t))))
 
 (* A pattern that always matches everything that reaches it.
@@ -961,7 +961,7 @@ let pat_kind_name = function
   | SK_Bool -> "bool"
   | SK_Tuple ts ->
       Printf.sprintf "tuple of arity %d" (List.length ts)
-  | SK_Bytes -> "Array[byte]"
+  | SK_Bytes -> "Handle[byte]"
 
 (* Walk arms left-to-right enforcing:
      - patterns suit the scrutinee kind
@@ -1143,7 +1143,7 @@ let rec infer (env : env) (tparams : string list)
   | EFloat f -> (T.TEFloat f, TyApp ("float", []))
   | EBool b -> (T.TEBool b, TyBool)
   | EStringLit s ->
-      (* "..." : Array[byte] — bytes live in the static region forever.
+      (* "..." : Handle[byte] — bytes live in the static region forever.
          The handle is copyable, the gen tag will always match. *)
       let result_ty = TyApp ("Handle", [TyApp ("byte", [])]) in
       (T.TEStringLit s, result_ty)
@@ -1791,10 +1791,10 @@ let rec infer (env : env) (tparams : string list)
       (T.TEMatch (tscrut, tscrut_ty, arms_out, first_ty), first_ty)
       end
 
-  | EArray (region_e, size_e, init_e) ->
-      (* array(r, N, v) : (Region, int, T) → Array[T].
+  | EHandle (region_e, size_e, init_e) ->
+      (* array(r, N, v) : (Region, int, T) → Handle[T].
          Bump-allocates N slots in region r, fills each with v.
-         The Array wrapper is copyable — its memory lives in r. *)
+         The Handle wrapper is copyable — its memory lives in r. *)
       let (tr, tr_ty) = infer env tparams vars region_e in
       (try unify tr_ty (TyApp ("Region", []))
        with Type_error _ ->
@@ -1816,10 +1816,10 @@ let rec infer (env : env) (tparams : string list)
              "array(_, _, v) : element type cannot contain a linear type (%s)"
              (show_ty (zonk tv_ty))));
       let result_ty = TyApp ("Handle", [tv_ty]) in
-      (T.TEArray (tr, tn, tv, result_ty), result_ty)
+      (T.TEHandle (tr, tn, tv, result_ty), result_ty)
 
-  | EArrayLit (region_e, elems) ->
-      (* array(r, [v0, ..., vN-1]) : Region, expr list → Array[T].
+  | EHandleLit (region_e, elems) ->
+      (* array(r, [v0, ..., vN-1]) : Region, expr list → Handle[T].
          All values must share one element type; result length = list length. *)
       if elems = [] then
         raise (Type_error
@@ -1848,7 +1848,7 @@ let rec infer (env : env) (tparams : string list)
          By contrast `array(r, N, init)` would copy `init` N times,
          which is forbidden for linear types. *)
       let result_ty = TyApp ("Handle", [elem_ty]) in
-      (T.TEArrayLit (tr, List.map fst typed_elems, result_ty), result_ty)
+      (T.TEHandleLit (tr, List.map fst typed_elems, result_ty), result_ty)
 
   | ERegion size_e ->
       (* region(N) : int → Region. Heap arena. Linear. *)
@@ -1898,7 +1898,7 @@ let rec infer (env : env) (tparams : string list)
       (T.TEAlignedRegion (tn, ta, result_ty), result_ty)
 
   | EIndex (arr_e, idx_e) ->
-      (* a[i] : Array[T] or *T, int → T. For Array, the read does a
+      (* a[i] : Handle[T] or *T, int → T. For Handle, the read does a
          gen+bounds check; for raw *T it's a plain C subscript. *)
       let (ta, ta_ty) = infer env tparams vars arr_e in
       let elem =
@@ -1910,7 +1910,7 @@ let rec infer (env : env) (tparams : string list)
              with Type_error _ ->
                raise (Type_error
                  (Printf.sprintf
-                    "indexing expects Array[T] or *T, got %s"
+                    "indexing expects Handle[T] or *T, got %s"
                     (show_ty (zonk ta_ty)))));
             elem
       in
@@ -1921,13 +1921,13 @@ let rec infer (env : env) (tparams : string list)
            (Printf.sprintf
               "index must be int, got %s"
               (show_ty (zonk ti_ty)))));
-      (* Reading from an Array[Linear] would copy a linear value out
+      (* Reading from an Handle[Linear] would copy a linear value out
          of its slot, leaving two owners. Forbid it — the elements
-         can only be consumed when the whole Array is dropped. *)
+         can only be consumed when the whole Handle is dropped. *)
       if is_linear_ty (zonk elem) then
         raise (Type_error
           (Printf.sprintf
-             "cannot read element of Array[%s] — that would copy a \
+             "cannot read element of Handle[%s] — that would copy a \
               linear value out of its slot. Elements are only consumed \
               when the whole array is dropped."
              (show_ty (zonk elem))));
@@ -1944,7 +1944,7 @@ let rec infer (env : env) (tparams : string list)
              with Type_error _ ->
                raise (Type_error
                  (Printf.sprintf
-                    "index-assignment expects Array[T] or *T, got %s"
+                    "index-assignment expects Handle[T] or *T, got %s"
                     (show_ty (zonk ta_ty)))));
             elem
       in
@@ -1962,31 +1962,31 @@ let rec infer (env : env) (tparams : string list)
            (Printf.sprintf
               "type mismatch in a[i] := v: element is %s, value is %s"
               (show_ty (zonk elem)) (show_ty (zonk tv_ty)))));
-      (* Writing to a slot of Array[Linear] would either drop the old
+      (* Writing to a slot of Handle[Linear] would either drop the old
          element or leak it. Both need machinery we don't have yet —
          forbid until phase 5/6 if ever. *)
       if is_linear_ty (zonk elem) then
         raise (Type_error
           (Printf.sprintf
-             "cannot assign element of Array[%s] — overwriting would \
+             "cannot assign element of Handle[%s] — overwriting would \
               either drop or leak the old linear value."
              (show_ty (zonk elem))));
       (T.TEAssignIdx (ta, ti, tv, TyTuple []), TyTuple [])
 
   | ELen arr_e ->
-      (* len(a) : Array[T] → int. *)
+      (* len(a) : Handle[T] → int. *)
       let (ta, ta_ty) = infer env tparams vars arr_e in
       let elem = TyMeta (fresh_meta ()) in
       (try unify ta_ty (TyApp ("Handle", [elem]))
        with Type_error _ ->
          raise (Type_error
            (Printf.sprintf
-              "len expects Array[T], got %s"
+              "len expects Handle[T], got %s"
               (show_ty (zonk ta_ty)))));
       (T.TELen (ta, TyInt), TyInt)
 
   | ESlice (arr_e, lo_e, hi_e) ->
-      (* slice(a, lo, hi) : Array[T], int, int → Array[T]. New handle
+      (* slice(a, lo, hi) : Handle[T], int, int → Handle[T]. New handle
          pointing at the same region, with offset += lo and len = hi - lo.
          Same gen, same slot — slice dies with the original region. *)
       let (ta, ta_ty) = infer env tparams vars arr_e in
@@ -1995,7 +1995,7 @@ let rec infer (env : env) (tparams : string list)
        with Type_error _ ->
          raise (Type_error
            (Printf.sprintf
-              "slice expects Array[T], got %s"
+              "slice expects Handle[T], got %s"
               (show_ty (zonk ta_ty)))));
       let (tlo, tlo_ty) = infer env tparams vars lo_e in
       (try unify tlo_ty TyInt
@@ -2011,12 +2011,12 @@ let rec infer (env : env) (tparams : string list)
            (Printf.sprintf
               "slice(_, _, hi) : hi must be int, got %s"
               (show_ty (zonk thi_ty)))));
-      (* Slicing an Array[Linear] would produce a second linear handle
+      (* Slicing an Handle[Linear] would produce a second linear handle
          viewing the same elements — two owners. Forbid. *)
       if is_linear_ty (zonk elem) then
         raise (Type_error
           (Printf.sprintf
-             "cannot slice Array[%s] — would create a second linear \
+             "cannot slice Handle[%s] — would create a second linear \
               handle over the same elements."
              (show_ty (zonk elem))));
       let result_ty = TyApp ("Handle", [elem]) in
@@ -2122,17 +2122,17 @@ let rec infer (env : env) (tparams : string list)
                 (show_ty (zonk tp_ty)))));
       (T.TEIsNull tp, TyBool)
 
-  | EArrayData a_e ->
+  | EHandleData a_e ->
       let (ta, ta_ty) = infer env tparams vars a_e in
       let elem = TyMeta (fresh_meta ()) in
       (try unify ta_ty (TyApp ("Handle", [elem]))
        with Type_error _ ->
          raise (Type_error
            (Printf.sprintf
-              "array_data expects Array[T], got %s"
+              "array_data expects Handle[T], got %s"
               (show_ty (zonk ta_ty)))));
       let result_ty = TyPtr elem in
-      (T.TEArrayData (ta, result_ty), result_ty)
+      (T.TEHandleData (ta, result_ty), result_ty)
 
   | EPtrCast (elem_t, sub_e) ->
       let elem_t = validate_ty_for_ascription env tparams elem_t in
@@ -2169,7 +2169,7 @@ let rec infer (env : env) (tparams : string list)
        with Type_error _ ->
          raise (Type_error
            (Printf.sprintf
-              "try_at expects Array[T], got %s"
+              "try_at expects Handle[T], got %s"
               (show_ty (zonk ta_ty)))));
       let (ti, ti_ty) = infer env tparams vars i_e in
       (try unify ti_ty TyInt
@@ -2208,8 +2208,8 @@ let rec infer (env : env) (tparams : string list)
   (* Stage 3 — concurrency. Phase 2 wires up types for the three
      fundamentals (await / spawn / yield); phases 4+ generate the
      state machine and runtime. await all { … } needs tuples; the
-     dynamic form Array[Task[T]] needs phase-3 induced linearity on
-     Array — both stay rejected for now. *)
+     dynamic form Handle[Task[T]] needs phase-3 induced linearity on
+     Handle — both stay rejected for now. *)
   | EAwait inner ->
       let (ti, ti_ty) = infer env tparams vars inner in
       let elem = TyMeta (fresh_meta ()) in
@@ -2409,7 +2409,7 @@ let rec infer (env : env) (tparams : string list)
             with Type_error _ ->
               raise (Type_error
                 (Printf.sprintf
-                   "`for %s in <expr>`: source must be Ref[T] or Stream[T], \
+                   "`for %s in <expr>`: source must be Handle[T] or Stream[T], \
                     got %s"
                    x (show_ty (zonk tsrc_ty)))));
            let body_vars =
@@ -2423,8 +2423,8 @@ let rec infer (env : env) (tparams : string list)
   | EPrint (nl, inner) -> infer_print env tparams vars nl inner
 
   | EAwaitAllDyn coll_e ->
-      (* `await all coll` requires coll : Array[Task[T]], returns
-         Array[Result[T]] — each Task is awaited, each result wrapped
+      (* `await all coll` requires coll : Handle[Task[T]], returns
+         Handle[Result[T]] — each Task is awaited, each result wrapped
          in Result the same way `await Task[T]` would. The original
          array is consumed (linear) by the join. *)
       let (tc, tc_ty) = infer env tparams vars coll_e in
@@ -2433,7 +2433,7 @@ let rec infer (env : env) (tparams : string list)
        with Type_error _ ->
          raise (Type_error
            (Printf.sprintf
-              "`await all <coll>` expects coll : Array[Task[T]], got %s"
+              "`await all <coll>` expects coll : Handle[Task[T]], got %s"
               (show_ty (zonk tc_ty)))));
       let wrapped = TyApp ("Result", [elem]) in
       let result_ty = TyApp ("Handle", [wrapped]) in
@@ -2466,7 +2466,7 @@ and infer_print env tparams vars nl inner =
       raise (Type_error
         (Printf.sprintf
            "print/println: component of type %s is not printable. \
-            Allowed: int, bool, byte, u16, u32, u64, float, Array[byte]"
+            Allowed: int, bool, byte, u16, u32, u64, float, Handle[byte]"
            (show_ty zt)));
     (te, zt)) parts
   in
@@ -2531,10 +2531,10 @@ let rec zonk_expr (e : T.expr) : T.expr =
         (p, Option.map zonk_expr g, zonk_expr b)) arms
       in
       T.TEMatch (zonk_expr s, zonk_expect st, arms, zonk_expect rt)
-  | T.TEArray (r, n, v, t) ->
-      T.TEArray (zonk_expr r, zonk_expr n, zonk_expr v, zonk_expect t)
-  | T.TEArrayLit (r, elems, t) ->
-      T.TEArrayLit (zonk_expr r, List.map zonk_expr elems, zonk_expect t)
+  | T.TEHandle (r, n, v, t) ->
+      T.TEHandle (zonk_expr r, zonk_expr n, zonk_expr v, zonk_expect t)
+  | T.TEHandleLit (r, elems, t) ->
+      T.TEHandleLit (zonk_expr r, List.map zonk_expr elems, zonk_expect t)
   | T.TERegion (n, t) -> T.TERegion (zonk_expr n, zonk_expect t)
   | T.TEStackRegion (n, t) ->
       T.TEStackRegion (zonk_expr n, zonk_expect t)
@@ -2558,7 +2558,7 @@ let rec zonk_expr (e : T.expr) : T.expr =
   | T.TECFree e -> T.TECFree (zonk_expr e)
   | T.TENullPtr t -> T.TENullPtr (zonk_expect t)
   | T.TEIsNull e -> T.TEIsNull (zonk_expr e)
-  | T.TEArrayData (a, t) -> T.TEArrayData (zonk_expr a, zonk_expect t)
+  | T.TEHandleData (a, t) -> T.TEHandleData (zonk_expr a, zonk_expect t)
   | T.TEPtrCast (e, t) -> T.TEPtrCast (zonk_expr e, zonk_expect t)
   | T.TEDeref (p, t) -> T.TEDeref (zonk_expr p, zonk_expect t)
   | T.TEAssign (x, v, t) -> T.TEAssign (x, zonk_expr v, zonk_expect t)
@@ -2807,19 +2807,19 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
            let arms' = List.map (fun (p, g, b, _) -> (p, g, b)) arm_data in
            (T.TEMatch (scrut', scrut_ty, arms', ty), first_live))
 
-  | T.TEArray (r, n, v, ty) ->
+  | T.TEHandle (r, n, v, ty) ->
       let (r', live) = check_moves_expr env live false r in
       let (n', live) = check_moves_expr env live false n in
       let (v', live) = check_moves_expr env live false v in
-      (T.TEArray (r', n', v', ty), live)
+      (T.TEHandle (r', n', v', ty), live)
 
-  | T.TEArrayLit (r, elems, ty) ->
+  | T.TEHandleLit (r, elems, ty) ->
       let (r', live) = check_moves_expr env live false r in
       let (elems_rev, live) = List.fold_left (fun (acc, l) e ->
         let (e', l) = check_moves_expr env l false e in
         (e' :: acc, l)) ([], live) elems
       in
-      (T.TEArrayLit (r', List.rev elems_rev, ty), live)
+      (T.TEHandleLit (r', List.rev elems_rev, ty), live)
 
   | T.TERegion (n, ty) ->
       let (n', live) = check_moves_expr env live false n in
@@ -2890,9 +2890,9 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       let (p', live) = check_moves_expr env live false p in
       (T.TEIsNull p', live)
 
-  | T.TEArrayData (a, t) ->
+  | T.TEHandleData (a, t) ->
       let (a', live) = check_moves_expr env live false a in
-      (T.TEArrayData (a', t), live)
+      (T.TEHandleData (a', t), live)
 
   | T.TEPtrCast (e, t) ->
       let (e', live) = check_moves_expr env live false e in
@@ -3084,10 +3084,10 @@ let rec body_has_suspension (e : T.expr) : bool =
       || List.exists (fun (_, g, b) ->
            (match g with None -> false | Some g -> body_has_suspension g)
            || body_has_suspension b) arms
-  | TEArray (r, n, v, _) ->
+  | TEHandle (r, n, v, _) ->
       body_has_suspension r
       || body_has_suspension n || body_has_suspension v
-  | TEArrayLit (r, es, _) ->
+  | TEHandleLit (r, es, _) ->
       body_has_suspension r || List.exists body_has_suspension es
   | TERegion (n, _) -> body_has_suspension n
   | TEStackRegion (n, _) -> body_has_suspension n
@@ -3108,7 +3108,7 @@ let rec body_has_suspension (e : T.expr) : bool =
   | TECAlloc (_, n, _) -> body_has_suspension n
   | TECFree e -> body_has_suspension e
   | TEIsNull e -> body_has_suspension e
-  | TEArrayData (a, _) -> body_has_suspension a
+  | TEHandleData (a, _) -> body_has_suspension a
   | TEPtrCast (e, _) -> body_has_suspension e
   | TEDeref (p, _) -> body_has_suspension p
   | TEAssign (_, v, _) -> body_has_suspension v

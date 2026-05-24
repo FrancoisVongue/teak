@@ -46,7 +46,7 @@ type token =
   | TCFree        (* c_free(p) — free a raw pointer *)
   | TNullPtr      (* null_ptr[T]() — typed NULL *)
   | TIsNull       (* is_null(p) — NULL check *)
-  | TArrayData    (* array_data(a) — *T pointing at the bytes of Array[T] *)
+  | TAsPtr    (* as_ptr(a) — *T pointing at the bytes of Handle[T] *)
   | TPtrCast      (* ptr_cast[T](e) — reinterpret a raw pointer/address as *T *)
   | TReset        (* reset(r) — rewind a region, invalidating its refs *)
   | TTryAt        (* try_at(a, i) — defensive read, returns Option[T] *)
@@ -65,7 +65,7 @@ type token =
   | TPrintln      (* println(expr)  — same, plus trailing '\n' *)
   | TArena        (* arena r = region(N); — scope-bound region binding *)
   | TClosure      (* closure(r, fn...) — capturing lambda, env in region r *)
-  | TRef          (* ref(r, v) — allocate cell(s) in region r, return Ref[T] *)
+  | TRef          (* ref(r, v) — allocate cell(s) in region r, return Handle[T] *)
   (* punctuation *)
   | TLParen
   | TRParen
@@ -150,7 +150,7 @@ let show = function
   | TCFree        -> "C_FREE"
   | TNullPtr      -> "NULL_PTR"
   | TIsNull       -> "IS_NULL"
-  | TArrayData    -> "ARRAY_DATA"
+  | TAsPtr    -> "AS_PTR"
   | TPtrCast      -> "PTR_CAST"
   | TReset        -> "RESET"
   | TTryAt        -> "TRY_AT"

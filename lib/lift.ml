@@ -63,8 +63,8 @@ let rec free_vars (e : expr) : SS.t =
         SS.diff (SS.union g (free_vars body)) bound
       in
       u (free_vars s :: List.map arm_fv arms)
-  | EArray (r, n, v) -> u [free_vars r; free_vars n; free_vars v]
-  | EArrayLit (r, elems) -> u (free_vars r :: List.map free_vars elems)
+  | EHandle (r, n, v) -> u [free_vars r; free_vars n; free_vars v]
+  | EHandleLit (r, elems) -> u (free_vars r :: List.map free_vars elems)
   | ERegion n | EStackRegion n -> free_vars n
   | EAlignedRegion (n, a) -> SS.union (free_vars n) (free_vars a)
   | EIndex (a, i) -> SS.union (free_vars a) (free_vars i)
@@ -75,7 +75,7 @@ let rec free_vars (e : expr) : SS.t =
   | EToInt e | EToByte e | EToFloat e ->
       free_vars e
   | ECAlloc (_, n) -> free_vars n
-  | ECFree p | EIsNull p | EArrayData p | EDeref p -> free_vars p
+  | ECFree p | EIsNull p | EHandleData p | EDeref p -> free_vars p
   | EPtrCast (_, e) -> free_vars e
   | ENullPtr _ -> SS.empty
   | ETryAt (a, i) -> SS.union (free_vars a) (free_vars i)
@@ -157,8 +157,8 @@ let lift (prog : program) : program =
         EMatch (xform s,
           List.map (fun (p, g, b) ->
             (p, Option.map xform g, xform b)) arms)
-    | EArray (r, n, v) -> EArray (xform r, xform n, xform v)
-    | EArrayLit (r, elems) -> EArrayLit (xform r, List.map xform elems)
+    | EHandle (r, n, v) -> EHandle (xform r, xform n, xform v)
+    | EHandleLit (r, elems) -> EHandleLit (xform r, List.map xform elems)
     | ERegion n -> ERegion (xform n)
     | EStackRegion n -> EStackRegion (xform n)
     | EAlignedRegion (n, a) -> EAlignedRegion (xform n, xform a)
@@ -173,7 +173,7 @@ let lift (prog : program) : program =
     | ECAlloc (t, n) -> ECAlloc (t, xform n)
     | ECFree p -> ECFree (xform p)
     | EIsNull p -> EIsNull (xform p)
-    | EArrayData a -> EArrayData (xform a)
+    | EHandleData a -> EHandleData (xform a)
     | EPtrCast (t, e) -> EPtrCast (t, xform e)
     | ETryAt (a, i) -> ETryAt (xform a, xform i)
     | EDrop e -> EDrop (xform e)

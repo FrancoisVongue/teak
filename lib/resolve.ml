@@ -12,7 +12,7 @@
 
    Mangling: decl `foo` in namespace `a::b` becomes `a__b__foo`.
    Externs are NOT mangled — their name is the C linker symbol and
-   must round-trip unchanged. Builtins (Array, Region, Option, byte,
+   must round-trip unchanged. Builtins (Handle, Region, Option, byte,
    Some, None, Result, Ok, Err) are never mangled.
 
    Within a namespace, references resolve in this order:
@@ -363,8 +363,8 @@ let rec resolve_expr
         (p', guard', resolve_expr map new_locals body)) arms
       in
       EMatch (s', arms')
-  | EArray (rg, n, v) -> EArray (r rg, r n, r v)
-  | EArrayLit (rg, elems) -> EArrayLit (r rg, List.map r elems)
+  | EHandle (rg, n, v) -> EHandle (r rg, r n, r v)
+  | EHandleLit (rg, elems) -> EHandleLit (r rg, List.map r elems)
   | ERegion n -> ERegion (r n)
   | EStackRegion n -> EStackRegion (r n)
   | EAlignedRegion (n, a) -> EAlignedRegion (r n, r a)
@@ -380,7 +380,7 @@ let rec resolve_expr
   | ECFree p -> ECFree (r p)
   | ENullPtr t -> ENullPtr (rt t)
   | EIsNull p -> EIsNull (r p)
-  | EArrayData a -> EArrayData (r a)
+  | EHandleData a -> EHandleData (r a)
   | EPtrCast (t, e) -> EPtrCast (rt t, r e)
   | EDeref p -> EDeref (r p)
   | ETryAt (a, i) -> ETryAt (r a, r i)
@@ -541,8 +541,8 @@ let expand_in_expr (aliases : (string * ty) list) (e : expr) : expr =
     | EMatch (s, arms) ->
         EMatch (ex s, List.map (fun (p, g, b) ->
           (p, Option.map ex g, ex b)) arms)
-    | EArray (r, n, v) -> EArray (ex r, ex n, ex v)
-    | EArrayLit (r, elems) -> EArrayLit (ex r, List.map ex elems)
+    | EHandle (r, n, v) -> EHandle (ex r, ex n, ex v)
+    | EHandleLit (r, elems) -> EHandleLit (ex r, List.map ex elems)
     | ERegion n -> ERegion (ex n)
     | EStackRegion n -> EStackRegion (ex n)
     | EAlignedRegion (n, a) -> EAlignedRegion (ex n, ex a)
@@ -558,7 +558,7 @@ let expand_in_expr (aliases : (string * ty) list) (e : expr) : expr =
     | ECFree p -> ECFree (ex p)
     | ENullPtr t -> ENullPtr (xt t)
     | EIsNull p -> EIsNull (ex p)
-    | EArrayData a -> EArrayData (ex a)
+    | EHandleData a -> EHandleData (ex a)
     | EPtrCast (t, e) -> EPtrCast (xt t, ex e)
     | EDeref p -> EDeref (ex p)
     | ETryAt (a, i) -> ETryAt (ex a, ex i)

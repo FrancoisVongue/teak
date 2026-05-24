@@ -115,11 +115,11 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
            failwith (Printf.sprintf
              "mono rewrite_ty: free type variable %S" n))
     | TyApp ("Handle", [inner]) ->
-        (* Array is structural — emit emits one wrapper+cell pair per
+        (* Handle is structural — emit emits one wrapper+cell pair per
            distinct element type. *)
         TyApp ("Handle", [rewrite_ty subst inner])
     | TyApp ("Handle", _) ->
-        failwith "mono rewrite_ty: Array with wrong arity (should be unary)"
+        failwith "mono rewrite_ty: Handle with wrong arity (should be unary)"
     | TyApp ("Region", []) ->
         (* Region is a structural nullary builtin — emit just typedefs it. *)
         TyApp ("Region", [])
@@ -127,7 +127,7 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         failwith "mono rewrite_ty: Region takes no type arguments"
     | TyApp ("Task", [inner]) ->
         (* Stage 3 builtin — slot-pool handle. emit phases (4–5) generate
-           one wrapper struct per distinct result type, just like Array. *)
+           one wrapper struct per distinct result type, just like Handle. *)
         TyApp ("Task", [rewrite_ty subst inner])
     | TyApp ("Task", _) ->
         failwith "mono rewrite_ty: Task with wrong arity (should be unary)"
@@ -219,12 +219,12 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
           (p, Option.map (rewrite_expr subst) g, rewrite_expr subst b)) arms in
         Check.T.TEMatch (rewrite_expr subst s, rt st, arms, rt rty)
 
-    | Check.T.TEArray (r, n, v, t) ->
-        Check.T.TEArray (rewrite_expr subst r,
+    | Check.T.TEHandle (r, n, v, t) ->
+        Check.T.TEHandle (rewrite_expr subst r,
                          rewrite_expr subst n,
                          rewrite_expr subst v, rt t)
-    | Check.T.TEArrayLit (r, elems, t) ->
-        Check.T.TEArrayLit (rewrite_expr subst r,
+    | Check.T.TEHandleLit (r, elems, t) ->
+        Check.T.TEHandleLit (rewrite_expr subst r,
                             List.map (rewrite_expr subst) elems,
                             rt t)
     | Check.T.TERegion (n, t) ->
@@ -264,8 +264,8 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         Check.T.TENullPtr (rt t)
     | Check.T.TEIsNull p ->
         Check.T.TEIsNull (rewrite_expr subst p)
-    | Check.T.TEArrayData (a, t) ->
-        Check.T.TEArrayData (rewrite_expr subst a, rt t)
+    | Check.T.TEHandleData (a, t) ->
+        Check.T.TEHandleData (rewrite_expr subst a, rt t)
     | Check.T.TEPtrCast (e, t) ->
         Check.T.TEPtrCast (rewrite_expr subst e, rt t)
     | Check.T.TEDeref (p, t) ->
