@@ -1,0 +1,11 @@
+// Regression: the wide end of the numeric tower compiles and runs.
+// i128/u128 -> __int128 / unsigned __int128; f16 -> _Float16;
+// f128 -> __float128. Arithmetic + to_int round-trip on each.
+
+fn main() -> int {
+    let i = to_int(to_i128(10) + to_i128(5));    // 15
+    let u = to_int(to_u128(20) + to_u128(2));    // 22
+    let h = to_int(to_f16(3) + to_f16(1));       // 4  (half-precision add)
+    let q = to_int(to_f128(7) + to_f128(0));     // 7  (quad-precision)
+    i + u + h + q                                 // 48
+}
