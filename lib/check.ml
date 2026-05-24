@@ -1661,10 +1661,25 @@ let rec infer (env : env) (tparams : string list)
       (T.TEReturn (tv, ret_ty), TyMeta (fresh_meta ()))
 
   | EMatch (scrut, arms) ->
-      if arms = [] then
-        raise (Type_error "match must have at least one arm");
       let (tscrut, tscrut_ty) = infer env tparams vars scrut in
       let kind = scrutinee_kind env tscrut_ty in
+      if arms = [] then begin
+        (* Absurd: the unique morphism 0 → A out of an uninhabited type.
+           Allowed only when the scrutinee's type has no inhabitants (an
+           enum with zero variants). The branch is unreachable, so the
+           result type is unconstrained (it unifies with whatever the
+           context demands). *)
+        (match kind with
+         | SK_Adt n
+           when (match List.assoc_opt n env.types with
+                 | Some td -> td.variants = [] | None -> false) ->
+             let result_ty = TyMeta (fresh_meta ()) in
+             (T.TEMatch (tscrut, tscrut_ty, [], result_ty), result_ty)
+         | _ ->
+             raise (Type_error
+               "empty `match {}` is only allowed on an uninhabited type \
+                (an enum with no variants) — the absurd eliminator"))
+      end else begin
       check_match_arms_structure env kind arms;
       (* v1 restriction: guards are only allowed on non-ADT match.
          For ADT match, the same effect is available by writing the
@@ -1774,6 +1789,7 @@ let rec infer (env : env) (tparams : string list)
       List.iter (fun (_, t) -> unify first_ty t) typed_arms;
       let arms_out = List.map fst typed_arms in
       (T.TEMatch (tscrut, tscrut_ty, arms_out, first_ty), first_ty)
+      end
 
   | EArray (region_e, size_e, init_e) ->
       (* array(r, N, v) : (Region, int, T) → Array[T].

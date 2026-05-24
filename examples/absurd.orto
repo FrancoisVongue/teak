@@ -1,0 +1,22 @@
+// The initial object 0: an uninhabited type and its unique morphism.
+//
+// `enum Void {}` has no constructors — no value can ever exist. The
+// empty `match v {}` is the absurd eliminator: the unique arrow 0 -> A
+// (for ANY result type A), the categorical dual of `()` (the terminal
+// object 1, with its unique arrow A -> () = discard).
+
+enum Void {}
+
+// 0 -> A for any A — unreachable, so it may claim any return type.
+fn absurd(v: Void) -> int { match v {} }
+fn absurd_bool(v: Void) -> bool { match v {} }
+
+// A -> 0 is only producible by non-termination (or other absurds).
+fn never() -> Void { never() }
+
+fn main() -> int {
+    // Nothing of type Void can be constructed, so absurd is never
+    // actually called; this only proves the eliminator type-checks
+    // and lowers to a valid (unreachable) abort.
+    42
+}

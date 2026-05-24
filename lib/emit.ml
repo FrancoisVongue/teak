@@ -1412,6 +1412,12 @@ let rec emit_expr
       let result_decl =
         Printf.sprintf "%s %s;" (c_type result_ty) result_var
       in
+      if arms = [] then
+        (* Absurd: scrutinee is uninhabited, so this is unreachable.
+           Evaluate the scrutinee (for any side effects) and abort. *)
+        { stmts = cs.stmts @ [ scrut_decl; "abort();"; result_decl ];
+          value = result_var }
+      else
       (* Dispatch by scrutinee shape. After mono, an ADT shows up as
          TyApp(name, []) where name is in the ADT environment, i.e.
          present in ctor_map under at least one ctor name. We detect
