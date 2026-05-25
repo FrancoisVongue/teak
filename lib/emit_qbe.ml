@@ -65,6 +65,24 @@ let ty_of (e : expr) : A.ty =
   | TEReturn _ -> A.TyInt
   | _ -> A.TyInt
 
+(* ---------- numeric conversion: produce v as dst qbe type ---------- *)
+let convert (sq : string) (dq : string) (v : string) : string =
+  if sq = dq then v
+  else begin
+    let r = fresh () in
+    (match sq, dq with
+     | "w", "l"            -> ins "%s =l extsw %s" r v        (* widen (bit31 of our ws is 0) *)
+     | "l", "w"            -> ins "%s =w copy %s" r v         (* truncate: low word *)
+     | ("w"|"l"), "d"      -> ins "%s =d s%stof %s" r sq v    (* swtof / sltof *)
+     | ("w"|"l"), "s"      -> ins "%s =s s%stof %s" r sq v
+     | "d", ("w"|"l")      -> ins "%s =%s dtosi %s" r dq v
+     | "s", ("w"|"l")      -> ins "%s =%s stosi %s" r dq v
+     | "s", "d"            -> ins "%s =d exts %s" r v
+     | "d", "s"            -> ins "%s =s truncd %s" r v
+     | _                   -> ins "%s =%s copy %s" r dq v);
+    r
+  end
+
 (* ---------- lower an expression to a QBE operand ---------- *)
 let rec lower (e : expr) : string =
   match e with
@@ -153,6 +171,14 @@ let rec lower (e : expr) : string =
   | TEBreak    -> let (_, b) = List.hd !loops in term "jmp %s" b; "0"
   | TEContinue -> let (c, _) = List.hd !loops in term "jmp %s" c; "0"
   | TEReturn (v, _) -> let vv = lower v in term "ret %s" vv; "0"
+
+  | TEToInt e          -> convert (qty (ty_of e)) "l" (lower e)
+  | TEToIntFromFloat e -> convert (qty (ty_of e)) "l" (lower e)
+  | TEToFloat e        -> convert (qty (ty_of e)) "d" (lower e)
+  | TEToByte e ->
+      let v = lower e in let r = fresh () in ins "%s =w and %s, 255" r v; r
+  | TECast (target, e) ->
+      convert (qty (ty_of e)) (qty (A.TyApp (target, []))) (lower e)
 
   (* Direct call (callee is a function/extern name after mono). First-class
      function pointers / closures are M5. *)
