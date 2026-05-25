@@ -23,6 +23,7 @@ let rec is_agg (t : A.ty) : bool =
   | A.TyApp (n, _) when is_record n || is_enum n -> true
   | A.TyApp ("Handle", _) | A.TyApp ("Region", []) -> true
   | A.TyTuple (_ :: _) -> true
+  | A.TyFun _ -> true        (* function value = fat pointer {env, code} *)
   | _ -> false
 
 and scalar_size (t : A.ty) : int =
@@ -49,6 +50,7 @@ and round_up x a = if a <= 0 then x else (x + a - 1) / a * a
 and size_of (t : A.ty) : int =
   match t with
   | _ when not (is_agg t) -> scalar_size t
+  | A.TyFun _ -> 16          (* {env: l; code: l} *)
   | A.TyApp ("Region", []) -> 16
   | A.TyApp ("Handle", _) -> 32
   | A.TyApp (n, _) when is_record n ->
@@ -189,6 +191,17 @@ let ty_of (e : expr) : A.ty =
 
 let handle_elem (t : A.ty) : A.ty =
   match t with A.TyApp ("Handle", [e]) -> e | _ -> A.TyApp ("byte", [])
+
+(* closure environment layout (captures laid out like a struct) *)
+let capture_layout (caps : (string * A.ty) list) : (string * A.ty * int) list =
+  let (_, rev) = List.fold_left (fun (off, acc) (n, t) ->
+    let o = round_up off (align_of t) in (o + size_of t, (n, t, o) :: acc)) (0, []) caps in
+  List.rev rev
+let capture_size caps =
+  List.fold_left (fun m (_, t, o) -> max m (o + size_of t)) 8 (capture_layout caps)
+
+(* plain top-level fns used as values need an env-adapting wrapper *)
+let wrappers : (string, A.ty) Hashtbl.t = Hashtbl.create 16
 
 (* string literals -> data labels, deduped; emitted at top of the module *)
 let strings : (string, string) Hashtbl.t = Hashtbl.create 32
@@ -488,6 +501,53 @@ let rec lower (e : expr) : string =
         r
       end
 
+  (* ----- closures (M5) ----- *)
+  | TEFnRef (name, _, fnty) ->
+      (* a plain fn as a value: fat pointer {env=0, code=wrapper} *)
+      Hashtbl.replace wrappers name fnty;
+      let p = fresh () in ins "%s =l alloc8 16" p;
+      ins "storel 0, %s" p;
+      let c8 = fresh () in ins "%s =l add %s, 8" c8 p;
+      let ca = fresh () in ins "%s =l copy $fnval_%s" ca name;
+      ins "storel %s, %s" ca c8; p
+
+  | TEMakeClosure (name, _, captures, region_e, _) ->
+      let rp = lower region_e in
+      let lay = capture_layout captures in
+      let envsize = capture_size captures in
+      let hbuf = fresh () in ins "%s =l alloc8 32" hbuf;
+      ins "call $orto_rt_ref(l %s, l 1, l %d, l 0, l %s)" rp envsize hbuf;
+      let envp = fresh () in ins "%s =l call $orto_rt_data(l %s)" envp hbuf;
+      List.iter (fun (cn, ct, off) ->
+        let v = lower (TEVar (cn, ct)) in
+        let fp = fresh () in ins "%s =l add %s, %d" fp envp off;
+        if is_agg ct then ins "blit %s, %s, %d" v fp (size_of ct)
+        else ins "%s %s, %s" (store_ty ct) v fp) lay;
+      let p = fresh () in ins "%s =l alloc8 16" p;
+      ins "storel %s, %s" envp p;
+      let c8 = fresh () in ins "%s =l add %s, 8" c8 p;
+      let ca = fresh () in ins "%s =l copy $%s" ca name;
+      ins "storel %s, %s" ca c8; p
+
+  (* indirect call: callee is a fat pointer value {env, code} *)
+  | TECall (callee, args, ret) ->
+      let fp = lower callee in
+      let envp = fresh () in ins "%s =l loadl %s" envp fp;
+      let c8 = fresh () in ins "%s =l add %s, 8" c8 fp;
+      let code = fresh () in ins "%s =l loadl %s" code c8;
+      let avs = List.map (fun a -> (qty (ty_of a), lower a)) args in
+      let tail = List.map (fun (q, v) -> Printf.sprintf "%s %s" q v) avs in
+      if is_agg ret then begin
+        let sz = size_of ret in
+        let sp = fresh () in ins "%s =l alloc8 %d" sp sz;
+        let argstr = String.concat ", " ((Printf.sprintf "l %s" envp) :: (Printf.sprintf "l %s" sp) :: tail) in
+        ins "call %s(%s)" code argstr; sp
+      end else begin
+        let argstr = String.concat ", " ((Printf.sprintf "l %s" envp) :: tail) in
+        let rq = qty ret in let r = fresh () in
+        ins "%s =%s call %s(%s)" r rq code argstr; r
+      end
+
   (* ----- regions & handles (M3b) ----- *)
   | TERegion (n, _) | TEStackRegion (n, _) ->
       let nv = lower n in
@@ -694,7 +754,25 @@ let emit_func (f : func) : string =
         Printf.sprintf "%s %%a%d" q i
       end) f.params
   in
-  let sig_params = String.concat ", " (List.filter (fun s -> s <> "") (sret_sig :: param_sigs)) in
+  (* closure body: leading env pointer, captures unpacked from it *)
+  let env_sig =
+    if f.takes_env then begin
+      List.iter (fun (cn, ct, off) ->
+        let fp = fresh () in ins "%s =l add %%.env, %d" fp off;
+        if is_agg ct then Hashtbl.replace locals cn (Agg (fp, size_of ct))
+        else begin
+          let slot = fresh () in ins "%s =l alloc8 8" slot;
+          let q = qty ct in
+          let lv = fresh () in ins "%s =%s %s %s" lv q (load_ty ct) fp;
+          ins "%s %s, %s" (store_ty ct) lv slot;
+          Hashtbl.replace locals cn (Scal (slot, ct))
+        end) (capture_layout f.captures);
+      "l %.env"
+    end else ""
+  in
+  let sig_params =
+    String.concat ", " (List.filter (fun s -> s <> "") (env_sig :: sret_sig :: param_sigs))
+  in
   let v = lower f.body in
   let body = Buffer.contents buf in
   let header, ret_line =
@@ -716,10 +794,33 @@ let emit_func (f : func) : string =
     rtystr f.name sig_params (Buffer.contents prologue) body ret_line
 
 let emit (prog : program) : string =
-  Hashtbl.clear records; Hashtbl.clear enums; Hashtbl.clear strings;
+  Hashtbl.clear records; Hashtbl.clear enums; Hashtbl.clear strings; Hashtbl.clear wrappers;
   List.iter (fun (rd : A.record_decl) -> Hashtbl.replace records rd.A.rec_name rd) prog.records;
   List.iter (fun (td : A.type_decl) -> Hashtbl.replace enums td.A.type_name td) prog.types;
   let fns = String.concat "\n" (List.map emit_func prog.funcs) in
+  (* env-adapting wrappers for plain fns used as values (TEFnRef) *)
+  let wraps =
+    Hashtbl.fold (fun name fnty acc ->
+      let (args, ret) = match fnty with A.TyFun (a, r) -> (a, r) | _ -> ([], A.TyInt) in
+      let agg = is_agg ret in
+      let tparams = List.mapi (fun i t -> Printf.sprintf "%s %%a%d" (qty t) i) args in
+      let tvals = String.concat ", " tparams in
+      let sigp =
+        String.concat ", "
+          ((if agg then ["l %.env"; "l %.sret"] else ["l %.env"]) @ tparams)
+      in
+      let body, rsig =
+        if agg then
+          (Printf.sprintf "\tcall $%s(%s)\n\tret\n" name
+             (String.concat ", " (("l %.sret") :: tparams)), "")
+        else
+          (Printf.sprintf "\t%%r =%s call $%s(%s)\n\tret %%r\n" (qty ret) name tvals,
+           qty ret ^ " ")
+      in
+      Printf.sprintf "function %s$fnval_%s(%s) {\n@start\n%s}\n" rsig name sigp body :: acc)
+      wrappers []
+  in
+  let fns = String.concat "\n" (wraps @ [fns]) in
   (* string literal data defs (strings interned during emit_func) *)
   let datas =
     Hashtbl.fold (fun s lab acc ->
