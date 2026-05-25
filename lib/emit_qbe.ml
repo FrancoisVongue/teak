@@ -134,11 +134,14 @@ let load_ty (t : A.ty) : string =
 
 (* ===== per-function emit state ===== *)
 let buf = Buffer.create 1024
+let slots_buf = Buffer.create 256   (* alloc8 lines, hoisted to @start (never inside a loop) *)
 let tmp = ref 0
 let lbl = ref 0
 let fresh () = incr tmp; Printf.sprintf "%%.t%d" !tmp
 let flabel p = incr lbl; Printf.sprintf "@.%s%d" p !lbl
 let ins fmt = Printf.ksprintf (fun s -> Buffer.add_string buf ("\t" ^ s ^ "\n")) fmt
+(* alloc instructions go here so they execute once at entry, not per loop iteration *)
+let ains fmt = Printf.ksprintf (fun s -> Buffer.add_string slots_buf ("\t" ^ s ^ "\n")) fmt
 let label l = Buffer.add_string buf (l ^ "\n")
 let term fmt =
   Printf.ksprintf (fun s ->
@@ -247,13 +250,13 @@ let rec lower (e : expr) : string =
            e.g. `let t = xs[i]` must not alias the buffer cell. *)
         let v = lower value in
         let sz = size_of vty in
-        let p = fresh () in ins "%s =l alloc8 %d" p sz;
+        let p = fresh () in ains "%s =l alloc8 %d" p sz;
         ins "blit %s, %s, %d" v p sz;
         Hashtbl.replace locals name (Agg (p, sz))
       end else begin
         let v = lower value in
         let slot = fresh () in
-        ins "%s =l alloc8 8" slot;
+        ains "%s =l alloc8 8" slot;
         ins "%s %s, %s" (store_ty vty) v slot;
         Hashtbl.replace locals name (Scal (slot, vty))
       end;
@@ -283,7 +286,7 @@ let rec lower (e : expr) : string =
 
   (* short-circuit && and || *)
   | TEBinop (A.OpAnd, a, b, _) ->
-      let rslot = fresh () in ins "%s =l alloc8 8" rslot;
+      let rslot = fresh () in ains "%s =l alloc8 8" rslot;
       let va = lower a in
       let lb = flabel "andb" and lf = flabel "andf" and le = flabel "ande" in
       ins "jnz %s, %s, %s" va lb lf;
@@ -291,7 +294,7 @@ let rec lower (e : expr) : string =
       label lf; ins "storew 0, %s" rslot; ins "jmp %s" le;
       label le; let r = fresh () in ins "%s =w loadw %s" r rslot; r
   | TEBinop (A.OpOr, a, b, _) ->
-      let rslot = fresh () in ins "%s =l alloc8 8" rslot;
+      let rslot = fresh () in ains "%s =l alloc8 8" rslot;
       let va = lower a in
       let lt = flabel "ort" and lb = flabel "orb" and le = flabel "ore" in
       ins "jnz %s, %s, %s" va lt lb;
@@ -339,7 +342,7 @@ let rec lower (e : expr) : string =
       let agg = is_agg t in
       let q = qty t in
       let rslot = fresh () in
-      if agg then ins "%s =l alloc8 8" rslot else ins "%s =l alloc8 8" rslot;
+      if agg then ains "%s =l alloc8 8" rslot else ains "%s =l alloc8 8" rslot;
       let lt = flabel "then" and le = flabel "else" and lj = flabel "join" in
       let vc = lower c in
       ins "jnz %s, %s, %s" vc lt le;
@@ -381,7 +384,7 @@ let rec lower (e : expr) : string =
   (* ----- aggregates ----- *)
   | TERecord (name, _, fields, _) ->
       let sz = size_of (A.TyApp (name, [])) in
-      let p = fresh () in ins "%s =l alloc8 %d" p sz;
+      let p = fresh () in ains "%s =l alloc8 %d" p sz;
       let layout = record_fields name in
       List.iter (fun (fn, ft, off) ->
         let value = List.assoc fn fields in
@@ -413,7 +416,7 @@ let rec lower (e : expr) : string =
       let en = enum_name_of ret in
       let (tag, arglay) = ctor_layout en c in
       let sz = size_of ret in
-      let p = fresh () in ins "%s =l alloc8 %d" p sz;
+      let p = fresh () in ains "%s =l alloc8 %d" p sz;
       ins "storel %d, %s" tag p;        (* tag at offset 0 *)
       List.iter2 (fun a (aty, off) ->
         let v = lower a in
@@ -426,7 +429,7 @@ let rec lower (e : expr) : string =
       let p = lower scrut in
       let agg = is_agg rty in
       let rq = if agg then "l" else qty rty in
-      let rslot = fresh () in ins "%s =l alloc8 8" rslot;
+      let rslot = fresh () in ains "%s =l alloc8 8" rslot;
       let lj = flabel "mjoin" in
       if arms = [] then (term "call $abort()")     (* absurd *)
       else begin
@@ -458,7 +461,7 @@ let rec lower (e : expr) : string =
               let fp = fresh () in ins "%s =l add %s, %d" fp p off;
               if is_agg aty then Hashtbl.replace locals v (Agg (fp, size_of aty))
               else begin
-                let slot = fresh () in ins "%s =l alloc8 8" slot;
+                let slot = fresh () in ains "%s =l alloc8 8" slot;
                 let q = qty aty in
                 let lv = fresh () in ins "%s =%s %s %s" lv q (load_ty aty) fp;
                 ins "%s %s, %s" (store_ty aty) lv slot;
@@ -485,7 +488,7 @@ let rec lower (e : expr) : string =
                | A.PBind x when x <> "_" ->
                    if is_agg scrut_ty then Hashtbl.replace locals x (Agg (p, size_of scrut_ty))
                    else begin
-                     let slot = fresh () in ins "%s =l alloc8 8" slot;
+                     let slot = fresh () in ains "%s =l alloc8 8" slot;
                      Hashtbl.replace locals x (Scal (slot, scrut_ty));
                      ins "%s %s, %s" (store_ty scrut_ty) p slot
                    end
@@ -512,7 +515,7 @@ let rec lower (e : expr) : string =
       if is_agg ret then begin
         (* sret: caller allocates, passes hidden ptr first, callee fills it *)
         let sz = size_of ret in
-        let p = fresh () in ins "%s =l alloc8 %d" p sz;
+        let p = fresh () in ains "%s =l alloc8 %d" p sz;
         let argstr = if argstr = "" then Printf.sprintf "l %s" p
                      else Printf.sprintf "l %s, %s" p argstr in
         ins "call $%s(%s)" name argstr;
@@ -528,7 +531,7 @@ let rec lower (e : expr) : string =
   | TEFnRef (name, _, fnty) ->
       (* a plain fn as a value: fat pointer {env=0, code=wrapper} *)
       Hashtbl.replace wrappers name fnty;
-      let p = fresh () in ins "%s =l alloc8 16" p;
+      let p = fresh () in ains "%s =l alloc8 16" p;
       ins "storel 0, %s" p;
       let c8 = fresh () in ins "%s =l add %s, 8" c8 p;
       let ca = fresh () in ins "%s =l copy $fnval_%s" ca name;
@@ -538,7 +541,7 @@ let rec lower (e : expr) : string =
       let rp = lower region_e in
       let lay = capture_layout captures in
       let envsize = capture_size captures in
-      let hbuf = fresh () in ins "%s =l alloc8 32" hbuf;
+      let hbuf = fresh () in ains "%s =l alloc8 32" hbuf;
       ins "call $orto_rt_ref(l %s, l 1, l %d, l 0, l %s)" rp envsize hbuf;
       let envp = fresh () in ins "%s =l call $orto_rt_data(l %s)" envp hbuf;
       List.iter (fun (cn, ct, off) ->
@@ -546,7 +549,7 @@ let rec lower (e : expr) : string =
         let fp = fresh () in ins "%s =l add %s, %d" fp envp off;
         if is_agg ct then ins "blit %s, %s, %d" v fp (size_of ct)
         else ins "%s %s, %s" (store_ty ct) v fp) lay;
-      let p = fresh () in ins "%s =l alloc8 16" p;
+      let p = fresh () in ains "%s =l alloc8 16" p;
       ins "storel %s, %s" envp p;
       let c8 = fresh () in ins "%s =l add %s, 8" c8 p;
       let ca = fresh () in ins "%s =l copy $%s" ca name;
@@ -562,7 +565,7 @@ let rec lower (e : expr) : string =
       let tail = List.map (fun (q, v) -> Printf.sprintf "%s %s" q v) avs in
       if is_agg ret then begin
         let sz = size_of ret in
-        let sp = fresh () in ins "%s =l alloc8 %d" sp sz;
+        let sp = fresh () in ains "%s =l alloc8 %d" sp sz;
         let argstr = String.concat ", " ((Printf.sprintf "l %s" envp) :: (Printf.sprintf "l %s" sp) :: tail) in
         ins "call %s(%s)" code argstr; sp
       end else begin
@@ -574,11 +577,11 @@ let rec lower (e : expr) : string =
   (* ----- regions & handles (M3b) ----- *)
   | TERegion (n, _) | TEStackRegion (n, _) ->
       let nv = lower n in
-      let p = fresh () in ins "%s =l alloc8 16" p;
+      let p = fresh () in ains "%s =l alloc8 16" p;
       ins "call $orto_rt_region(l %s, l %s)" nv p; p
   | TEAlignedRegion (n, _a, _) ->
       let nv = lower n in
-      let p = fresh () in ins "%s =l alloc8 16" p;
+      let p = fresh () in ains "%s =l alloc8 16" p;
       ins "call $orto_rt_region(l %s, l %s)" nv p; p
 
   | TEHandle (r, n, init, hty) ->
@@ -587,10 +590,10 @@ let rec lower (e : expr) : string =
       let rp = lower r in
       let nv = lower n in
       let iv = lower init in
-      let ip = fresh () in ins "%s =l alloc8 %d" ip (if es < 8 then 8 else es);
+      let ip = fresh () in ains "%s =l alloc8 %d" ip (if es < 8 then 8 else es);
       if is_agg elemt then ins "blit %s, %s, %d" iv ip es
       else ins "%s %s, %s" (store_ty elemt) iv ip;
-      let h = fresh () in ins "%s =l alloc8 32" h;
+      let h = fresh () in ains "%s =l alloc8 32" h;
       ins "call $orto_rt_ref(l %s, l %s, l %d, l %s, l %s)" rp nv es ip h;
       h
 
@@ -599,7 +602,7 @@ let rec lower (e : expr) : string =
       let es = size_of elemt in
       let rp = lower r in
       let n = List.length elems in
-      let h = fresh () in ins "%s =l alloc8 32" h;
+      let h = fresh () in ains "%s =l alloc8 32" h;
       ins "call $orto_rt_ref(l %s, l %d, l %d, l 0, l %s)" rp n es h;
       List.iteri (fun i el ->
         let ev = lower el in
@@ -643,7 +646,7 @@ let rec lower (e : expr) : string =
   | TESlice (a, lo, hi, sty) ->
       let elemt = handle_elem sty in let es = size_of elemt in
       let av = lower a in let lov = lower lo in let hiv = lower hi in
-      let out = fresh () in ins "%s =l alloc8 32" out;
+      let out = fresh () in ains "%s =l alloc8 32" out;
       ins "call $orto_rt_slice(l %s, l %s, l %s, l %d, l %s)" av lov hiv es out; out
 
   | TEReset r -> let rp = lower r in ins "call $orto_rt_reset(l %s)" rp; "0"
@@ -658,7 +661,7 @@ let rec lower (e : expr) : string =
   | TEStringLit s ->
       let lab = intern_string s in
       let len = String.length s in
-      let h = fresh () in ins "%s =l alloc8 32" h;
+      let h = fresh () in ains "%s =l alloc8 32" h;
       ins "call $orto_rt_wrap(l %s, l %d, l %s)" lab len h; h
 
   (* ----- raw pointers ----- *)
@@ -683,7 +686,7 @@ let rec lower (e : expr) : string =
       let en = enum_name_of optty in
       let (some_tag, some_lay) = ctor_layout en "Some" in
       let (none_tag, _) = ctor_layout en "None" in
-      let outp = fresh () in ins "%s =l alloc8 %d" outp (size_of optty);
+      let outp = fresh () in ains "%s =l alloc8 %d" outp (size_of optty);
       let lsome = flabel "some" and lnone = flabel "none" and lj = flabel "tj" in
       ins "jnz %s, %s, %s" addr lsome lnone;
       label lsome;
@@ -701,7 +704,7 @@ let rec lower (e : expr) : string =
 
   (* ----- tuples ----- *)
   | TETuple (es, tty) ->
-      let p = fresh () in ins "%s =l alloc8 %d" p (size_of tty);
+      let p = fresh () in ains "%s =l alloc8 %d" p (size_of tty);
       ignore (List.fold_left (fun off e ->
         let ev = lower e in let et = ty_of e in
         let fp = fresh () in ins "%s =l add %s, %d" fp p off;
@@ -729,7 +732,7 @@ let rec lower (e : expr) : string =
           let fp = fresh () in ins "%s =l add %s, %d" fp p off;
           if is_agg ct then Hashtbl.replace locals name (Agg (fp, size_of ct))
           else begin
-            let slot = fresh () in ins "%s =l alloc8 8" slot;
+            let slot = fresh () in ains "%s =l alloc8 8" slot;
             let q = qty ct in
             let lv = fresh () in ins "%s =%s %s %s" lv q (load_ty ct) fp;
             ins "%s %s, %s" (store_ty ct) lv slot;
@@ -750,7 +753,7 @@ let rec lower (e : expr) : string =
 
 (* ===== a function ===== *)
 let emit_func (f : func) : string =
-  Buffer.clear buf; tmp := 0; lbl := 0;
+  Buffer.clear buf; Buffer.clear slots_buf; tmp := 0; lbl := 0;
   Hashtbl.clear locals; loops := [];
   let agg_ret = is_agg f.return_ty && f.name <> "main" in
   cur_sret := None; cur_ret_size := 0;
@@ -784,7 +787,7 @@ let emit_func (f : func) : string =
         let fp = fresh () in ins "%s =l add %%.env, %d" fp off;
         if is_agg ct then Hashtbl.replace locals cn (Agg (fp, size_of ct))
         else begin
-          let slot = fresh () in ins "%s =l alloc8 8" slot;
+          let slot = fresh () in ains "%s =l alloc8 8" slot;
           let q = qty ct in
           let lv = fresh () in ins "%s =%s %s %s" lv q (load_ty ct) fp;
           ins "%s %s, %s" (store_ty ct) lv slot;
@@ -813,8 +816,8 @@ let emit_func (f : func) : string =
       (qty f.return_ty, Printf.sprintf "\tret %s\n" v)
   in
   let rtystr = if header = "" then "" else header ^ " " in
-  Printf.sprintf "export function %s$%s(%s) {\n@start\n%s%s%s}\n"
-    rtystr f.name sig_params (Buffer.contents prologue) body ret_line
+  Printf.sprintf "export function %s$%s(%s) {\n@start\n%s%s%s%s}\n"
+    rtystr f.name sig_params (Buffer.contents slots_buf) (Buffer.contents prologue) body ret_line
 
 let emit (prog : program) : string =
   Hashtbl.clear records; Hashtbl.clear enums; Hashtbl.clear strings; Hashtbl.clear wrappers;
