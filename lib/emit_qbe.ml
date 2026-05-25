@@ -25,34 +25,64 @@ let rec is_agg (t : A.ty) : bool =
   | A.TyTuple (_ :: _) -> true
   | _ -> false
 
+and scalar_size (t : A.ty) : int =
+  match t with
+  | A.TyBool | A.TyApp (("byte"|"u8"|"i8"), []) -> 1
+  | A.TyApp (("u16"|"i16"), []) -> 2
+  | A.TyApp (("u32"|"i32"|"f32"), []) -> 4
+  | A.TyApp (("u128"|"i128"|"f128"), []) -> 16
+  | _ -> 8
+
+and align_of (t : A.ty) : int =
+  if not (is_agg t) then scalar_size t
+  else match t with
+    | A.TyApp ("Region", []) | A.TyApp ("Handle", _) -> 8
+    | A.TyApp (n, _) when is_record n ->
+        List.fold_left (fun m (_, ft) -> max m (align_of ft)) 1
+          (Hashtbl.find records n).A.rec_fields
+    | A.TyApp (n, _) when is_enum n -> 8
+    | A.TyTuple ts -> List.fold_left (fun m ft -> max m (align_of ft)) 1 ts
+    | _ -> 8
+
+and round_up x a = if a <= 0 then x else (x + a - 1) / a * a
+
 and size_of (t : A.ty) : int =
   match t with
-  | _ when not (is_agg t) -> 8
-  | A.TyApp ("Handle", _) | A.TyApp ("Region", []) -> 16
+  | _ when not (is_agg t) -> scalar_size t
+  | A.TyApp ("Region", []) -> 16
+  | A.TyApp ("Handle", _) -> 32
   | A.TyApp (n, _) when is_record n ->
-      List.fold_left (fun a (_, ft) -> a + size_of ft) 0
-        (Hashtbl.find records n).A.rec_fields
+      let off = List.fold_left (fun off (_, ft) ->
+        round_up off (align_of ft) + size_of ft) 0
+        (Hashtbl.find records n).A.rec_fields in
+      round_up off (align_of t)
   | A.TyApp (n, _) when is_enum n ->
       let td = Hashtbl.find enums n in
       let payload =
         List.fold_left (fun m v ->
-          max m (List.fold_left (fun a ft -> a + size_of ft) 0 v.A.arg_tys))
-          0 td.A.variants
+          let off = List.fold_left (fun off ft ->
+            round_up off (align_of ft) + size_of ft) 0 v.A.arg_tys in
+          max m off) 0 td.A.variants
       in
-      8 + payload
-  | A.TyTuple ts -> List.fold_left (fun a ft -> a + size_of ft) 0 ts
+      round_up (8 + payload) 8
+  | A.TyTuple ts ->
+      let off = List.fold_left (fun off ft ->
+        round_up off (align_of ft) + size_of ft) 0 ts in
+      round_up off (align_of t)
   | _ -> 8
 
-(* record fields: (name, field_ty, offset) in declaration order *)
+(* record fields: (name, field_ty, offset), naturally aligned *)
 let record_fields (n : string) : (string * A.ty * int) list =
   let rd = Hashtbl.find records n in
   let (_, rev) =
     List.fold_left (fun (off, acc) (fn, ft) ->
-      (off + size_of ft, (fn, ft, off) :: acc)) (0, []) rd.A.rec_fields
+      let o = round_up off (align_of ft) in
+      (o + size_of ft, (fn, ft, o) :: acc)) (0, []) rd.A.rec_fields
   in
   List.rev rev
 
-(* enum constructor: tag index + payload arg layout [(arg_ty, offset)] *)
+(* enum constructor: tag index + payload arg layout [(arg_ty, offset)],
+   payload after the 8-byte tag, naturally aligned. *)
 let ctor_layout (enum_name : string) (ctor : string) : int * (A.ty * int) list =
   let td = Hashtbl.find enums enum_name in
   let rec find i = function
@@ -63,7 +93,8 @@ let ctor_layout (enum_name : string) (ctor : string) : int * (A.ty * int) list =
   let (idx, v) = find 0 td.A.variants in
   let (_, rev) =
     List.fold_left (fun (off, acc) ft ->
-      (off + size_of ft, (ft, off) :: acc)) (8, []) v.A.arg_tys
+      let o = round_up off (align_of ft) in
+      (o + size_of ft, (ft, o) :: acc)) (8, []) v.A.arg_tys
   in
   (idx, List.rev rev)
 
@@ -87,6 +118,18 @@ let qty (t : A.ty) : string =
 let store_op = function "w"->"storew" | "d"->"stored" | "s"->"stores" | _->"storel"
 let load_op  = function "w"->"loadw"  | "d"->"loadd"  | "s"->"loads"  | _->"loadl"
 
+(* width-correct store/load for a scalar of a given orto type *)
+let store_ty (t : A.ty) : string =
+  match scalar_size t, qty t with
+  | 1, _ -> "storeb" | 2, _ -> "storeh"
+  | 4, "s" -> "stores" | 4, _ -> "storew"
+  | _, "d" -> "stored" | _, "s" -> "stores" | _ -> "storel"
+let load_ty (t : A.ty) : string =
+  match scalar_size t, qty t with
+  | 1, _ -> "loadub" | 2, _ -> "loaduh"
+  | 4, "s" -> "loads" | 4, _ -> "loadw"
+  | _, "d" -> "loadd" | _, "s" -> "loads" | _ -> "loadl"
+
 (* ===== per-function emit state ===== *)
 let buf = Buffer.create 1024
 let tmp = ref 0
@@ -100,7 +143,7 @@ let term fmt =
     Buffer.add_string buf ("\t" ^ s ^ "\n");
     label (flabel "dead")) fmt
 
-type local = Scal of string * string | Agg of string * int
+type local = Scal of string * A.ty | Agg of string * int
 let locals : (string, local) Hashtbl.t = Hashtbl.create 16
 let loops : (string * string) list ref = ref []
 let cur_sret : string option ref = ref None     (* Some ptr if fn returns an aggregate *)
@@ -129,7 +172,31 @@ let ty_of (e : expr) : A.ty =
   | TEMatch (_, _, _, t) -> t
   | TEReturn _ -> A.TyInt
   | TEFloat _ -> A.TyApp ("float", [])
+  | TEIndex (_, _, t) -> t
+  | TEDeref (_, t) -> t
+  | TEHandle (_, _, _, t) -> t
+  | TEHandleLit (_, _, t) -> t
+  | TERegion (_, t) | TEStackRegion (_, t) | TEAlignedRegion (_, _, t) -> t
+  | TESlice (_, _, _, t) -> t
+  | TEHandleData (_, t) -> t
+  | TEPtrCast (_, t) -> t
+  | TECAlloc (_, _, t) -> t
+  | TENullPtr t -> t
+  | TETryAt (_, _, t) -> t
+  | TETuple (_, t) -> t
+  | TETupleIdx (_, _, t) -> t
   | _ -> A.TyInt
+
+let handle_elem (t : A.ty) : A.ty =
+  match t with A.TyApp ("Handle", [e]) -> e | _ -> A.TyApp ("byte", [])
+
+(* string literals -> data labels, deduped; emitted at top of the module *)
+let strings : (string, string) Hashtbl.t = Hashtbl.create 32
+let intern_string (s : string) : string =
+  match Hashtbl.find_opt strings s with
+  | Some lab -> lab
+  | None -> let lab = Printf.sprintf "$str.%d" (Hashtbl.length strings) in
+            Hashtbl.replace strings s lab; lab
 
 (* ===== numeric conversion ===== *)
 let convert (sq : string) (dq : string) (v : string) : string =
@@ -158,7 +225,7 @@ let rec lower (e : expr) : string =
   | TEVar (name, _) ->
       (match Hashtbl.find locals name with
        | Agg (ptr, _) -> ptr                       (* value of an aggregate = its address *)
-       | Scal (slot, q) -> let r = fresh () in ins "%s =%s %s %s" r q (load_op q) slot; r)
+       | Scal (slot, ty) -> let q = qty ty in let r = fresh () in ins "%s =%s %s %s" r q (load_ty ty) slot; r)
 
   | TELet (name, vty, value, body, _, _) ->
       if is_agg vty then begin
@@ -166,19 +233,34 @@ let rec lower (e : expr) : string =
         Hashtbl.replace locals name (Agg (v, size_of vty))
       end else begin
         let v = lower value in
-        let q = qty vty in
         let slot = fresh () in
         ins "%s =l alloc8 8" slot;
-        ins "%s %s, %s" (store_op q) v slot;
-        Hashtbl.replace locals name (Scal (slot, q))
+        ins "%s %s, %s" (store_ty vty) v slot;
+        Hashtbl.replace locals name (Scal (slot, vty))
       end;
       lower body
 
   | TEAssign (name, value, _) ->
       (match Hashtbl.find locals name with
-       | Scal (slot, q) -> let v = lower value in ins "%s %s, %s" (store_op q) v slot
+       | Scal (slot, ty) -> let v = lower value in ins "%s %s, %s" (store_ty ty) v slot
        | Agg (ptr, sz)  -> let v = lower value in ins "blit %s, %s, %d" v ptr sz);
       "0"
+
+  (* pointer arithmetic: p ± n advances by n elements; p - q is element diff *)
+  | TEBinop ((A.OpAdd | A.OpSub) as op, a, b, _)
+    when (match ty_of a with A.TyPtr _ -> true | _ -> false)
+      && (match ty_of b with A.TyPtr _ -> false | _ -> true) ->
+      let es = (match ty_of a with A.TyPtr e -> size_of e | _ -> 1) in
+      let pv = lower a in let nv = lower b in
+      let scaled = fresh () in ins "%s =l mul %s, %d" scaled nv es;
+      let r = fresh () in
+      ins "%s =l %s %s, %s" r (if op = A.OpAdd then "add" else "sub") pv scaled; r
+  | TEBinop (A.OpSub, a, b, _)
+    when (match ty_of a, ty_of b with A.TyPtr _, A.TyPtr _ -> true | _ -> false) ->
+      let es = (match ty_of a with A.TyPtr e -> size_of e | _ -> 1) in
+      let pa = lower a in let pb = lower b in
+      let d = fresh () in ins "%s =l sub %s, %s" d pa pb;
+      let r = fresh () in ins "%s =l div %s, %d" r d es; r
 
   | TEBinop (op, a, b, t) ->
       let va = lower a in
@@ -223,11 +305,11 @@ let rec lower (e : expr) : string =
       let vc = lower c in
       ins "jnz %s, %s, %s" vc lt le;
       label lt;
-      let vt = lower th in ins "%s %s, %s" (store_op (if agg then "l" else q)) vt rslot; ins "jmp %s" lj;
+      let vt = lower th in ins "%s %s, %s" (if agg then "storel" else store_ty t) vt rslot; ins "jmp %s" lj;
       label le;
-      let ve = lower el in ins "%s %s, %s" (store_op (if agg then "l" else q)) ve rslot; ins "jmp %s" lj;
+      let ve = lower el in ins "%s %s, %s" (if agg then "storel" else store_ty t) ve rslot; ins "jmp %s" lj;
       label lj;
-      let r = fresh () in ins "%s =%s %s %s" r (if agg then "l" else q) (load_op (if agg then "l" else q)) rslot; r
+      let r = fresh () in ins "%s =%s %s %s" r (if agg then "l" else q) (if agg then "loadl" else load_ty t) rslot; r
 
   | TEWhile (c, body) ->
       let lc = flabel "loop" and lb = flabel "body" and le = flabel "end" in
@@ -267,7 +349,7 @@ let rec lower (e : expr) : string =
         let v = lower value in
         let fp = fresh () in ins "%s =l add %s, %d" fp p off;
         if is_agg ft then ins "blit %s, %s, %d" v fp (size_of ft)
-        else ins "%s %s, %s" (store_op (qty ft)) v fp) layout;
+        else ins "%s %s, %s" (store_ty ft) v fp) layout;
       p
 
   | TEField (e, fname, fty) ->
@@ -276,7 +358,7 @@ let rec lower (e : expr) : string =
       let (_, _, off) = List.find (fun (n,_,_) -> n = fname) (record_fields rn) in
       let fp = fresh () in ins "%s =l add %s, %d" fp base off;
       if is_agg fty then fp
-      else (let r = fresh () in ins "%s =%s %s %s" r (qty fty) (load_op (qty fty)) fp; r)
+      else (let r = fresh () in ins "%s =%s %s %s" r (qty fty) (load_ty fty) fp; r)
 
   | TEAssignField (place, fname, value) ->
       let base = lower place in
@@ -285,7 +367,7 @@ let rec lower (e : expr) : string =
       let v = lower value in
       let fp = fresh () in ins "%s =l add %s, %d" fp base off;
       if is_agg ft then ins "blit %s, %s, %d" v fp (size_of ft)
-      else ins "%s %s, %s" (store_op (qty ft)) v fp;
+      else ins "%s %s, %s" (store_ty ft) v fp;
       "0"
 
   | TECtor (c, _, args, ret) ->
@@ -298,7 +380,7 @@ let rec lower (e : expr) : string =
         let v = lower a in
         let fp = fresh () in ins "%s =l add %s, %d" fp p off;
         if is_agg aty then ins "blit %s, %s, %d" v fp (size_of aty)
-        else ins "%s %s, %s" (store_op (qty aty)) v fp) args arglay;
+        else ins "%s %s, %s" (store_ty aty) v fp) args arglay;
       p
 
   | TEMatch (scrut, scrut_ty, arms, rty) ->
@@ -339,9 +421,9 @@ let rec lower (e : expr) : string =
                        else begin
                          let slot = fresh () in ins "%s =l alloc8 8" slot;
                          let q = qty aty in
-                         let lv = fresh () in ins "%s =%s %s %s" lv q (load_op q) fp;
-                         ins "%s %s, %s" (store_op q) lv slot;
-                         Hashtbl.replace locals v (Scal (slot, q))
+                         let lv = fresh () in ins "%s =%s %s %s" lv q (load_ty aty) fp;
+                         ins "%s %s, %s" (store_ty aty) lv slot;
+                         Hashtbl.replace locals v (Scal (slot, aty))
                        end
                      end) vars;
                    bind_then_body ();
@@ -353,8 +435,8 @@ let rec lower (e : expr) : string =
                      if is_agg scrut_ty then Hashtbl.replace locals x (Agg (p, size_of scrut_ty))
                      else begin
                        let slot = fresh () in ins "%s =l alloc8 8" slot;
-                       Hashtbl.replace locals x (Scal (slot, qty scrut_ty));
-                       ins "%s %s, %s" (store_op (qty scrut_ty)) p slot
+                       Hashtbl.replace locals x (Scal (slot, scrut_ty));
+                       ins "%s %s, %s" (store_ty scrut_ty) p slot
                      end
                    end;
                    bind_then_body ()
@@ -388,6 +470,174 @@ let rec lower (e : expr) : string =
         r
       end
 
+  (* ----- regions & handles (M3b) ----- *)
+  | TERegion (n, _) | TEStackRegion (n, _) ->
+      let nv = lower n in
+      let p = fresh () in ins "%s =l alloc8 16" p;
+      ins "call $orto_rt_region(l %s, l %s)" nv p; p
+  | TEAlignedRegion (n, _a, _) ->
+      let nv = lower n in
+      let p = fresh () in ins "%s =l alloc8 16" p;
+      ins "call $orto_rt_region(l %s, l %s)" nv p; p
+
+  | TEHandle (r, n, init, hty) ->
+      let elemt = handle_elem hty in
+      let es = size_of elemt in
+      let rp = lower r in
+      let nv = lower n in
+      let iv = lower init in
+      let ip = fresh () in ins "%s =l alloc8 %d" ip (if es < 8 then 8 else es);
+      if is_agg elemt then ins "blit %s, %s, %d" iv ip es
+      else ins "%s %s, %s" (store_ty elemt) iv ip;
+      let h = fresh () in ins "%s =l alloc8 32" h;
+      ins "call $orto_rt_ref(l %s, l %s, l %d, l %s, l %s)" rp nv es ip h;
+      h
+
+  | TEHandleLit (r, elems, hty) ->
+      let elemt = handle_elem hty in
+      let es = size_of elemt in
+      let rp = lower r in
+      let n = List.length elems in
+      let h = fresh () in ins "%s =l alloc8 32" h;
+      ins "call $orto_rt_ref(l %s, l %d, l %d, l 0, l %s)" rp n es h;
+      List.iteri (fun i el ->
+        let ev = lower el in
+        let addr = fresh () in ins "%s =l call $orto_rt_at(l %s, l %d, l %d)" addr h i es;
+        if is_agg elemt then ins "blit %s, %s, %d" ev addr es
+        else ins "%s %s, %s" (store_ty elemt) ev addr) elems;
+      h
+
+  | TEIndex (a, i, elemt) ->
+      let av = lower a in let iv = lower i in let es = size_of elemt in
+      let addr =
+        match ty_of a with
+        | A.TyPtr _ ->
+            let off = fresh () in ins "%s =l mul %s, %d" off iv es;
+            let ad = fresh () in ins "%s =l add %s, %s" ad av off; ad
+        | _ ->
+            let ad = fresh () in ins "%s =l call $orto_rt_at(l %s, l %s, l %d)" ad av iv es; ad
+      in
+      if is_agg elemt then addr
+      else (let r = fresh () in ins "%s =%s %s %s" r (qty elemt) (load_ty elemt) addr; r)
+
+  | TEAssignIdx (a, i, v, _) ->
+      let elemt = (match ty_of a with A.TyPtr e -> e | t -> handle_elem t) in
+      let av = lower a in let iv = lower i in let es = size_of elemt in
+      let addr =
+        match ty_of a with
+        | A.TyPtr _ ->
+            let off = fresh () in ins "%s =l mul %s, %d" off iv es;
+            let ad = fresh () in ins "%s =l add %s, %s" ad av off; ad
+        | _ ->
+            let ad = fresh () in ins "%s =l call $orto_rt_at(l %s, l %s, l %d)" ad av iv es; ad
+      in
+      let vv = lower v in
+      if is_agg elemt then ins "blit %s, %s, %d" vv addr es
+      else ins "%s %s, %s" (store_ty elemt) vv addr;
+      "0"
+
+  | TELen (a, _) ->
+      let av = lower a in let r = fresh () in ins "%s =l call $orto_rt_len(l %s)" r av; r
+
+  | TESlice (a, lo, hi, sty) ->
+      let elemt = handle_elem sty in let es = size_of elemt in
+      let av = lower a in let lov = lower lo in let hiv = lower hi in
+      let out = fresh () in ins "%s =l alloc8 32" out;
+      ins "call $orto_rt_slice(l %s, l %s, l %s, l %d, l %s)" av lov hiv es out; out
+
+  | TEReset r -> let rp = lower r in ins "call $orto_rt_reset(l %s)" rp; "0"
+
+  | TEDrop (e, t) ->
+      let v = lower e in
+      (match t with
+       | A.TyApp ("Region", []) -> ins "call $orto_rt_drop(l %s)" v
+       | _ -> ());   (* user-linear drops: side effect only, no exit-code impact *)
+      "0"
+
+  | TEStringLit s ->
+      let lab = intern_string s in
+      let len = String.length s in
+      let h = fresh () in ins "%s =l alloc8 32" h;
+      ins "call $orto_rt_wrap(l %s, l %d, l %s)" lab len h; h
+
+  (* ----- raw pointers ----- *)
+  | TECAlloc (elemt, n, _) ->
+      let es = size_of elemt in let nv = lower n in
+      let bytes = fresh () in ins "%s =l mul %s, %d" bytes nv es;
+      let r = fresh () in ins "%s =l call $malloc(l %s)" r bytes; r
+  | TECFree p -> let v = lower p in ins "call $free(l %s)" v; "0"
+  | TENullPtr _ -> "0"
+  | TEIsNull p -> let v = lower p in let r = fresh () in ins "%s =w ceql %s, 0" r v; r
+  | TEHandleData (h, _) ->
+      let v = lower h in let r = fresh () in ins "%s =l call $orto_rt_data(l %s)" r v; r
+  | TEPtrCast (e, _) -> lower e
+  | TEDeref (p, elemt) ->
+      let v = lower p in let r = fresh () in
+      ins "%s =%s %s %s" r (qty elemt) (load_ty elemt) v; r
+
+  | TETryAt (a, i, optty) ->
+      let elemt = handle_elem (ty_of a) in let es = size_of elemt in
+      let av = lower a in let iv = lower i in
+      let addr = fresh () in ins "%s =l call $orto_rt_try(l %s, l %s, l %d)" addr av iv es;
+      let en = enum_name_of optty in
+      let (some_tag, some_lay) = ctor_layout en "Some" in
+      let (none_tag, _) = ctor_layout en "None" in
+      let outp = fresh () in ins "%s =l alloc8 %d" outp (size_of optty);
+      let lsome = flabel "some" and lnone = flabel "none" and lj = flabel "tj" in
+      ins "jnz %s, %s, %s" addr lsome lnone;
+      label lsome;
+        ins "storel %d, %s" some_tag outp;
+        let (aty, off) = List.hd some_lay in
+        let fp = fresh () in ins "%s =l add %s, %d" fp outp off;
+        (if is_agg aty then ins "blit %s, %s, %d" addr fp es
+         else (let lv = fresh () in ins "%s =%s %s %s" lv (qty aty) (load_ty aty) addr;
+               ins "%s %s, %s" (store_ty aty) lv fp));
+        ins "jmp %s" lj;
+      label lnone; ins "storel %d, %s" none_tag outp; ins "jmp %s" lj;
+      label lj; outp
+
+  | TEPrint (_, exprs, _) -> List.iter (fun e -> ignore (lower e)) exprs; "0"
+
+  (* ----- tuples ----- *)
+  | TETuple (es, tty) ->
+      let p = fresh () in ins "%s =l alloc8 %d" p (size_of tty);
+      ignore (List.fold_left (fun off e ->
+        let ev = lower e in let et = ty_of e in
+        let fp = fresh () in ins "%s =l add %s, %d" fp p off;
+        (if is_agg et then ins "blit %s, %s, %d" ev fp (size_of et)
+         else ins "%s %s, %s" (store_ty et) ev fp);
+        off + size_of et) 0 es);
+      p
+  | TETupleIdx (e, idx, comp_ty) ->
+      let base = lower e in
+      let tys = match ty_of e with A.TyTuple ts -> ts | _ -> [] in
+      let rec off_of i acc = function
+        | _ when i = 0 -> acc
+        | x :: rest -> off_of (i-1) (acc + size_of x) rest
+        | [] -> acc
+      in
+      let off = off_of idx 0 tys in
+      let fp = fresh () in ins "%s =l add %s, %d" fp base off;
+      if is_agg comp_ty then fp
+      else (let r = fresh () in ins "%s =%s %s %s" r (qty comp_ty) (load_ty comp_ty) fp; r)
+  | TELetTuple (names, tty, value, body, _, _) ->
+      let p = lower value in
+      let tys = match tty with A.TyTuple ts -> ts | _ -> [] in
+      ignore (List.fold_left2 (fun off name ct ->
+        if name <> "_" then begin
+          let fp = fresh () in ins "%s =l add %s, %d" fp p off;
+          if is_agg ct then Hashtbl.replace locals name (Agg (fp, size_of ct))
+          else begin
+            let slot = fresh () in ins "%s =l alloc8 8" slot;
+            let q = qty ct in
+            let lv = fresh () in ins "%s =%s %s %s" lv q (load_ty ct) fp;
+            ins "%s %s, %s" (store_ty ct) lv slot;
+            Hashtbl.replace locals name (Scal (slot, ct))
+          end
+        end;
+        off + size_of ct) 0 names tys);
+      lower body
+
   | _ -> failwith "qbe: unimplemented expression (milestone in progress)"
 
 (* ===== a function ===== *)
@@ -414,8 +664,8 @@ let emit_func (f : func) : string =
       end else begin
         let slot = Printf.sprintf "%%.s_%d" i in
         Buffer.add_string prologue (Printf.sprintf "\t%s =l alloc8 8\n" slot);
-        Buffer.add_string prologue (Printf.sprintf "\t%s %%a%d, %s\n" (store_op q) i slot);
-        Hashtbl.replace locals name (Scal (slot, q));
+        Buffer.add_string prologue (Printf.sprintf "\t%s %%a%d, %s\n" (store_ty t) i slot);
+        Hashtbl.replace locals name (Scal (slot, t));
         Printf.sprintf "%s %%a%d" q i
       end) f.params
   in
@@ -428,7 +678,7 @@ let emit_func (f : func) : string =
       let rl =
         if q <> "w" then
           Printf.sprintf "\t%%.rs =l alloc8 8\n\t%s %s, %%.rs\n\t%%.rw =w loadw %%.rs\n\tret %%.rw\n"
-            (store_op q) v
+            (store_ty f.return_ty) v
         else Printf.sprintf "\tret %s\n" v
       in ("w", rl)
     end else if agg_ret then
@@ -441,7 +691,17 @@ let emit_func (f : func) : string =
     rtystr f.name sig_params (Buffer.contents prologue) body ret_line
 
 let emit (prog : program) : string =
-  Hashtbl.clear records; Hashtbl.clear enums;
+  Hashtbl.clear records; Hashtbl.clear enums; Hashtbl.clear strings;
   List.iter (fun (rd : A.record_decl) -> Hashtbl.replace records rd.A.rec_name rd) prog.records;
   List.iter (fun (td : A.type_decl) -> Hashtbl.replace enums td.A.type_name td) prog.types;
-  String.concat "\n" (List.map emit_func prog.funcs)
+  let fns = String.concat "\n" (List.map emit_func prog.funcs) in
+  (* string literal data defs (strings interned during emit_func) *)
+  let datas =
+    Hashtbl.fold (fun s lab acc ->
+      let bytes =
+        String.to_seq s |> Seq.map (fun c -> Printf.sprintf "b %d" (Char.code c)) |> List.of_seq
+      in
+      let body = String.concat ", " (bytes @ ["b 0"]) in
+      Printf.sprintf "data %s = { %s }" lab body :: acc) strings []
+  in
+  String.concat "\n" datas ^ (if datas = [] then "" else "\n") ^ fns

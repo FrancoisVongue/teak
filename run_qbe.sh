@@ -14,7 +14,7 @@ for f in examples/*.orto; do
   err=$("$ORTO" "$f" --backend qbe -o /tmp/q.ssa 2>&1 || true)
   echo "$err" | grep -q "wrote" || { unsup=$((unsup+1)); continue; }
   "$QBE" /tmp/q.ssa > /tmp/q.s 2>/dev/null || { toolfail=$((toolfail+1)); echo "QBEFAIL $name"; continue; }
-  cc /tmp/q.s -lm -o /tmp/q 2>/dev/null || { toolfail=$((toolfail+1)); echo "CCFAIL $name"; continue; }
+  cc /tmp/q.s runtime_qbe.c -lm -o /tmp/q 2>/dev/null || { toolfail=$((toolfail+1)); echo "CCFAIL $name"; continue; }
   timeout 5 /tmp/q >/dev/null 2>&1; got=$? || true
   if [ "$got" = "$exp" ]; then pass=$((pass+1)); else mismatch=$((mismatch+1)); echo "MISMATCH $name got=$got exp=$exp"; fi
 done
