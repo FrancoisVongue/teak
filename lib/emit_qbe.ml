@@ -243,8 +243,13 @@ let rec lower (e : expr) : string =
 
   | TELet (name, vty, value, body, _, _) ->
       if is_agg vty then begin
+        (* copy the aggregate so the binding is independent (value semantics);
+           e.g. `let t = xs[i]` must not alias the buffer cell. *)
         let v = lower value in
-        Hashtbl.replace locals name (Agg (v, size_of vty))
+        let sz = size_of vty in
+        let p = fresh () in ins "%s =l alloc8 %d" p sz;
+        ins "blit %s, %s, %d" v p sz;
+        Hashtbl.replace locals name (Agg (p, sz))
       end else begin
         let v = lower value in
         let slot = fresh () in
@@ -275,6 +280,24 @@ let rec lower (e : expr) : string =
       let pa = lower a in let pb = lower b in
       let d = fresh () in ins "%s =l sub %s, %s" d pa pb;
       let r = fresh () in ins "%s =l div %s, %d" r d es; r
+
+  (* short-circuit && and || *)
+  | TEBinop (A.OpAnd, a, b, _) ->
+      let rslot = fresh () in ins "%s =l alloc8 8" rslot;
+      let va = lower a in
+      let lb = flabel "andb" and lf = flabel "andf" and le = flabel "ande" in
+      ins "jnz %s, %s, %s" va lb lf;
+      label lb; let vb = lower b in ins "storew %s, %s" vb rslot; ins "jmp %s" le;
+      label lf; ins "storew 0, %s" rslot; ins "jmp %s" le;
+      label le; let r = fresh () in ins "%s =w loadw %s" r rslot; r
+  | TEBinop (A.OpOr, a, b, _) ->
+      let rslot = fresh () in ins "%s =l alloc8 8" rslot;
+      let va = lower a in
+      let lt = flabel "ort" and lb = flabel "orb" and le = flabel "ore" in
+      ins "jnz %s, %s, %s" va lt lb;
+      label lt; ins "storew 1, %s" rslot; ins "jmp %s" le;
+      label lb; let vb = lower b in ins "storew %s, %s" vb rslot; ins "jmp %s" le;
+      label le; let r = fresh () in ins "%s =w loadw %s" r rslot; r
 
   | TEBinop (op, a, b, t) ->
       let va = lower a in
