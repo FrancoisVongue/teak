@@ -221,6 +221,7 @@ let rec lower (e : expr) : string =
   match e with
   | TEInt n  -> Int64.to_string n
   | TEBool b -> if b then "1" else "0"
+  | TEFloat f -> Printf.sprintf "d_%.17g" f
 
   | TEVar (name, _) ->
       (match Hashtbl.find locals name with
@@ -267,6 +268,7 @@ let rec lower (e : expr) : string =
       let vb = lower b in
       let aq = qty (ty_of a) in
       let rq = qty t in
+      let cp = if aq = "d" || aq = "s" then "" else "s" in   (* float: no signed prefix *)
       let r = fresh () in
       (match op with
        | A.OpAdd  -> ins "%s =%s add %s, %s"  r rq va vb
@@ -279,12 +281,13 @@ let rec lower (e : expr) : string =
        | A.OpBXor -> ins "%s =%s xor %s, %s"  r rq va vb
        | A.OpShl  -> ins "%s =%s shl %s, %s"  r rq va vb
        | A.OpShr  -> ins "%s =%s sar %s, %s"  r rq va vb
+       (* float comparisons have no signed/unsigned prefix (cltd, not csltd) *)
        | A.OpEq   -> ins "%s =w ceq%s %s, %s"  r aq va vb
        | A.OpNeq  -> ins "%s =w cne%s %s, %s"  r aq va vb
-       | A.OpLt   -> ins "%s =w cslt%s %s, %s" r aq va vb
-       | A.OpLe   -> ins "%s =w csle%s %s, %s" r aq va vb
-       | A.OpGt   -> ins "%s =w csgt%s %s, %s" r aq va vb
-       | A.OpGe   -> ins "%s =w csge%s %s, %s" r aq va vb);
+       | A.OpLt   -> ins "%s =w c%slt%s %s, %s" r cp aq va vb
+       | A.OpLe   -> ins "%s =w c%sle%s %s, %s" r cp aq va vb
+       | A.OpGt   -> ins "%s =w c%sgt%s %s, %s" r cp aq va vb
+       | A.OpGe   -> ins "%s =w c%sge%s %s, %s" r cp aq va vb);
       r
 
   | TEUnop (op, a, t) ->
@@ -392,61 +395,76 @@ let rec lower (e : expr) : string =
       if arms = [] then (term "call $abort()")     (* absurd *)
       else begin
         let en = (match scrut_ty with A.TyApp (n,_) when is_enum n -> Some n | _ -> None) in
-        let tagv =
-          match en with
-          | Some _ -> let t = fresh () in ins "%s =l loadl %s" t p; Some t
-          | None -> None
+        let tagv = match en with
+          | Some _ -> let t = fresh () in ins "%s =l loadl %s" t p; t | None -> "" in
+        (* boolean test (w 1/0) for a non-binding pattern *)
+        let single_cmp pat =
+          match pat, en with
+          | A.PCtor (c, _), Some e ->
+              let (tag, _) = ctor_layout e c in
+              let r = fresh () in ins "%s =w ceql %s, %d" r tagv tag; r
+          | A.PInt n, _ ->
+              let r = fresh () in ins "%s =w ceq%s %s, %d" r (qty scrut_ty) p n; r
+          | A.PBool b, _ ->
+              let r = fresh () in ins "%s =w ceqw %s, %d" r p (if b then 1 else 0); r
+          | A.PStr s, _ ->
+              let lab = intern_string s in
+              let r = fresh () in
+              ins "%s =w call $orto_rt_streq(l %s, l %s, l %d)" r p lab (String.length s); r
+          | _ -> failwith "qbe: unsupported pattern"
+        in
+        let bind_ctor c vars =
+          let e = match en with Some e -> e | None -> failwith "qbe: ctor pat on non-enum" in
+          let (_, arglay) = ctor_layout e c in
+          List.iteri (fun i v ->
+            if v <> "_" then begin
+              let (aty, off) = List.nth arglay i in
+              let fp = fresh () in ins "%s =l add %s, %d" fp p off;
+              if is_agg aty then Hashtbl.replace locals v (Agg (fp, size_of aty))
+              else begin
+                let slot = fresh () in ins "%s =l alloc8 8" slot;
+                let q = qty aty in
+                let lv = fresh () in ins "%s =%s %s %s" lv q (load_ty aty) fp;
+                ins "%s %s, %s" (store_ty aty) lv slot;
+                Hashtbl.replace locals v (Scal (slot, aty))
+              end
+            end) vars
         in
         let rec go = function
-          | [] -> ()
-          | (pat, _guard, body) :: rest ->
-              let lnext = flabel "marm" in
-              let bind_then_body () =
-                let v = lower body in
-                ins "%s %s, %s" (store_op rq) v rslot;
-                ins "jmp %s" lj
-              in
-              (match pat, en, tagv with
-               | A.PCtor (c, vars), Some en, Some tv ->
-                   let (tag, arglay) = ctor_layout en c in
-                   let cmp = fresh () in ins "%s =w ceql %s, %d" cmp tv tag;
-                   let lhit = flabel "mhit" in
-                   ins "jnz %s, %s, %s" cmp lhit lnext;
-                   label lhit;
-                   List.iteri (fun i v ->
-                     if v <> "_" then begin
-                       let (aty, off) = List.nth arglay i in
-                       let fp = fresh () in ins "%s =l add %s, %d" fp p off;
-                       if is_agg aty then Hashtbl.replace locals v (Agg (fp, size_of aty))
-                       else begin
-                         let slot = fresh () in ins "%s =l alloc8 8" slot;
-                         let q = qty aty in
-                         let lv = fresh () in ins "%s =%s %s %s" lv q (load_ty aty) fp;
-                         ins "%s %s, %s" (store_ty aty) lv slot;
-                         Hashtbl.replace locals v (Scal (slot, aty))
-                       end
-                     end) vars;
-                   bind_then_body ();
-                   label lnext;
-                   go rest
-               | A.PBind x, _, _ ->
-                   (* wildcard / catch-all: bind whole scrutinee *)
-                   if x <> "_" then begin
-                     if is_agg scrut_ty then Hashtbl.replace locals x (Agg (p, size_of scrut_ty))
-                     else begin
-                       let slot = fresh () in ins "%s =l alloc8 8" slot;
-                       Hashtbl.replace locals x (Scal (slot, scrut_ty));
-                       ins "%s %s, %s" (store_ty scrut_ty) p slot
-                     end
-                   end;
-                   bind_then_body ()
-                   (* no lnext jump needed: catch-all is terminal *)
-               | _ -> failwith "qbe: match pattern not yet supported")
+          | [] -> term "call $abort()"
+          | (pat, guard, body) :: rest ->
+              let lnext = flabel "marm" and lhit = flabel "mhit" in
+              (match pat with
+               | A.PBind _ -> ins "jmp %s" lhit
+               | A.POr pats ->
+                   let conds = List.map single_cmp pats in
+                   let cond = List.fold_left (fun acc c ->
+                     match acc with "" -> c
+                     | x -> let r = fresh () in ins "%s =w or %s, %s" r x c; r) "" conds in
+                   ins "jnz %s, %s, %s" cond lhit lnext
+               | _ -> let c = single_cmp pat in ins "jnz %s, %s, %s" c lhit lnext);
+              label lhit;
+              (match pat with
+               | A.PCtor (c, vars) -> bind_ctor c vars
+               | A.PBind x when x <> "_" ->
+                   if is_agg scrut_ty then Hashtbl.replace locals x (Agg (p, size_of scrut_ty))
+                   else begin
+                     let slot = fresh () in ins "%s =l alloc8 8" slot;
+                     Hashtbl.replace locals x (Scal (slot, scrut_ty));
+                     ins "%s %s, %s" (store_ty scrut_ty) p slot
+                   end
+               | _ -> ());
+              (match guard with
+               | Some g -> let gv = lower g in let lb = flabel "gbody" in
+                           ins "jnz %s, %s, %s" gv lb lnext; label lb
+               | None -> ());
+              let v = lower body in
+              ins "%s %s, %s" (store_op rq) v rslot;
+              ins "jmp %s" lj;
+              label lnext;
+              go rest
         in
-        go arms;
-        (* fell through all arms without catch-all: abort (shouldn't happen
-           for exhaustive matches) *)
-        term "call $abort()"
+        go arms
       end;
       label lj;
       let r = fresh () in ins "%s =%s %s %s" r rq (load_op rq) rslot; r
@@ -638,7 +656,14 @@ let rec lower (e : expr) : string =
         off + size_of ct) 0 names tys);
       lower body
 
-  | _ -> failwith "qbe: unimplemented expression (milestone in progress)"
+  | e ->
+      let tag = match e with
+        | TEMakeClosure _ -> "TEMakeClosure" | TECall _ -> "TECall-indirect"
+        | TEFnRef _ -> "TEFnRef" | TEAwait _ -> "TEAwait" | TESpawn _ -> "TESpawn"
+        | TEForStream _ -> "TEForStream" | TEAwaitAll _ -> "TEAwaitAll"
+        | TEFloat _ -> "TEFloat" | _ -> "other"
+      in
+      failwith (Printf.sprintf "qbe: unimplemented %s" tag)
 
 (* ===== a function ===== *)
 let emit_func (f : func) : string =

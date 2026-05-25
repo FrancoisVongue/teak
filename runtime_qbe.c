@@ -88,3 +88,11 @@ void orto_rt_wrap(void *data, long len, long *out) {
   RT[s].gen += 1; RT[s].live = 1;
   out[0] = s; out[1] = 0; out[2] = len; out[3] = RT[s].gen;
 }
+
+/* string-literal equality for `match s { "lit" => ... }`. h = Handle to
+   the scrutinee bytes; data/len = the literal. */
+long orto_rt_streq(long *h, void *data, long len) {
+  if (RT[h[0]].gen != h[3] || !RT[h[0]].live) return 0;
+  if (h[2] != len) return 0;
+  return memcmp(RT[h[0]].buf + h[1], data, (size_t)len) == 0 ? 1 : 0;
+}
