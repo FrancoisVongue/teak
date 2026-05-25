@@ -58,6 +58,11 @@ let ty_of (e : expr) : A.ty =
   | TEToInt _ | TEToIntFromFloat _ -> A.TyInt
   | TEToByte _ -> A.TyApp ("byte", [])
   | TEToFloat _ -> A.TyApp ("float", [])
+  | TECall (_, _, t) -> t
+  | TEFnRef (_, _, t) -> t
+  | TEStringLit _ -> A.TyApp ("Handle", [A.TyApp ("byte", [])])
+  | TEField (_, _, t) -> t
+  | TEReturn _ -> A.TyInt
   | _ -> A.TyInt
 
 (* ---------- lower an expression to a QBE operand ---------- *)
@@ -148,6 +153,19 @@ let rec lower (e : expr) : string =
   | TEBreak    -> let (_, b) = List.hd !loops in term "jmp %s" b; "0"
   | TEContinue -> let (c, _) = List.hd !loops in term "jmp %s" c; "0"
   | TEReturn (v, _) -> let vv = lower v in term "ret %s" vv; "0"
+
+  (* Direct call (callee is a function/extern name after mono). First-class
+     function pointers / closures are M5. *)
+  | TECall (TEFnRef (name, _, _), args, ret) ->
+      let avs = List.map (fun a -> (qty (ty_of a), lower a)) args in
+      let argstr =
+        String.concat ", "
+          (List.map (fun (q, v) -> Printf.sprintf "%s %s" q v) avs)
+      in
+      let rq = qty ret in
+      let r = fresh () in
+      ins "%s =%s call $%s(%s)" r rq name argstr;
+      r
 
   | _ -> failwith "qbe: unimplemented expression (milestone in progress)"
 
