@@ -256,16 +256,56 @@ let subexprs (e : expr) : expr list =
 let rec walk (f : expr -> unit) (e : expr) : unit =
   f e; List.iter (walk f) (subexprs e)
 
-(* a node inside the body that could reset/drop a region (so a hoisted handle
-   resolution would become stale). Calls are conservative — the callee might. *)
-let node_unsafe = function
-  | TECall _ | TEReset _ | TEDrop _
-  | TEAwait _ | TESpawn _ | TEForStream _ | TEAwaitAll _ -> true
-  | _ -> false
+(* region_safe[name] = the function provably never (transitively) resets or
+   drops a region and makes no indirect (closure) call. Computed once per
+   program in `emit`. Externs (absent here) are treated as safe — foreign C
+   can't touch our region runtime's gen/used/free state. *)
+let region_safe : (string, bool) Hashtbl.t = Hashtbl.create 64
 
+(* a node that directly resets/drops a region or hides an unknown callee *)
+let directly_region_affecting (body : expr) : bool =
+  let bad = ref false in
+  walk (fun e -> match e with
+    | TEReset _ | TEDrop _ | TESpawn _ | TEAwait _ | TEForStream _ | TEAwaitAll _ -> bad := true
+    | TECall (TEFnRef _, _, _) -> ()          (* direct call: handled by propagation *)
+    | TECall (_, _, _) -> bad := true         (* indirect call: unknown target *)
+    | _ -> ()) body;
+  !bad
+
+let direct_callees (body : expr) : string list =
+  let acc = ref [] in
+  walk (fun e -> match e with
+    | TECall (TEFnRef (n, _, _), _, _) -> if not (List.mem n !acc) then acc := n :: !acc
+    | _ -> ()) body;
+  !acc
+
+(* a loop body is safe to hoist a handle resolution out of iff nothing in it
+   could reset/drop the region (directly or via a called function). *)
 let body_hoist_safe (body : expr) : bool =
   let bad = ref false in
-  walk (fun e -> if node_unsafe e then bad := true) body; not !bad
+  walk (fun e -> match e with
+    | TEReset _ | TEDrop _ | TESpawn _ | TEAwait _ | TEForStream _ | TEAwaitAll _ -> bad := true
+    | TECall (TEFnRef (n, _, _), _, _) ->
+        (match Hashtbl.find_opt region_safe n with Some false -> bad := true | _ -> ())
+    | TECall (_, _, _) -> bad := true
+    | _ -> ()) body;
+  not !bad
+
+(* fixpoint over the call graph: a function is region-unsafe if it directly
+   resets/drops/indirect-calls, or calls another region-unsafe function. *)
+let compute_region_safe (funcs : func list) : unit =
+  Hashtbl.clear region_safe;
+  let unsafe : (string, unit) Hashtbl.t = Hashtbl.create 64 in
+  List.iter (fun (f : func) -> if directly_region_affecting f.body then Hashtbl.replace unsafe f.name ()) funcs;
+  let changed = ref true in
+  while !changed do
+    changed := false;
+    List.iter (fun (f : func) ->
+      if not (Hashtbl.mem unsafe f.name)
+      && List.exists (fun c -> Hashtbl.mem unsafe c) (direct_callees f.body)
+      then (Hashtbl.replace unsafe f.name (); changed := true)) funcs
+  done;
+  List.iter (fun (f : func) -> Hashtbl.replace region_safe f.name (not (Hashtbl.mem unsafe f.name))) funcs
 
 let reassigned_in (body : expr) : (string, unit) Hashtbl.t =
   let s = Hashtbl.create 8 in
@@ -971,6 +1011,7 @@ let emit (prog : program) : string =
   Hashtbl.clear records; Hashtbl.clear enums; Hashtbl.clear strings; Hashtbl.clear wrappers;
   List.iter (fun (rd : A.record_decl) -> Hashtbl.replace records rd.A.rec_name rd) prog.records;
   List.iter (fun (td : A.type_decl) -> Hashtbl.replace enums td.A.type_name td) prog.types;
+  compute_region_safe prog.funcs;
   let fns = String.concat "\n" (List.map emit_func prog.funcs) in
   (* env-adapting wrappers for plain fns used as values (TEFnRef) *)
   let wraps =
