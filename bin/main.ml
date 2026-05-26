@@ -170,8 +170,9 @@ let () =
     let out =
       match backend with
       | "qbe" -> Orto.Emit_qbe.emit mono
+      | "clif" -> Orto.Emit_clif.emit mono
       | "c" -> Orto.Emit.emit ~slots ~cores ~ring_entries ~test_mode mono
-      | b -> failwith (Printf.sprintf "unknown --backend %S (use c or qbe)" b)
+      | b -> failwith (Printf.sprintf "unknown --backend %S (use c, qbe, or clif)" b)
     in
     write_file output out;
     Printf.printf "wrote %s\n" output
