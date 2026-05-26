@@ -1,0 +1,18 @@
+[package]
+name = "orto_clif"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "orto-clif"
+path = "src/main.rs"
+
+[dependencies]
+cranelift-codegen = "0.132"
+cranelift-reader = "0.132"
+cranelift-object = "0.132"
+cranelift-module = "0.132"
+target-lexicon = "0.13"
+
+[profile.release]
+opt-level = 3
