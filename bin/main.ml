@@ -4,8 +4,11 @@
    any referenced modules from the same directory, runs the full
    pipeline (parse → resolve → check → mono → emit), writes a .c file.
 
-   A module's name is the basename of its .orto file. `use foo::bar;`
-   loads `<entry_dir>/foo.orto`. Cycles are rejected.
+   A `use` path maps to a file by joining its segments: `use a::b::c;`
+   loads `a/b/c.orto`, searched in the entry dir first then the library
+   root (ORTO_ROOT, default "."). The loaded module's namespace IS that
+   path, so the standard library under std/ is addressed as `std::vec`,
+   `std::map`, etc. Cycles are handled by memoization.
 
    Usage: orto INPUT.orto [-o OUTPUT.c] *)
 
@@ -26,36 +29,43 @@ let default_output input =
   then Filename.chop_suffix input ".orto" ^ ".c"
   else input ^ ".c"
 
+(* The entry file's namespace is its bare basename (a single segment);
+   it is given directly, not `use`d. *)
 let module_name_of_path path =
-  Filename.basename path |> Filename.chop_extension
+  [ Filename.basename path |> Filename.chop_extension ]
 
-(* Memoized loader. modules_loaded keeps insertion order; visiting
-   tracks the current DFS path for cycle detection. *)
-let modules_loaded : (string, Orto.Ast.program) Hashtbl.t = Hashtbl.create 8
+(* A `use` path maps directly to a file: a::b::c -> a/b/c.orto, and the
+   loaded module's namespace IS that path. Single-segment paths (e.g.
+   `use sys`) stay project-local; `std::vec` lives under std/. *)
+let path_key (segs : string list) = String.concat "::" segs
+let path_to_file (segs : string list) = String.concat "/" segs ^ ".orto"
+
+(* Memoized loader. modules_loaded maps a module's path-key to its
+   (path, parsed program); load_order keeps insertion order. *)
+let modules_loaded : (string, string list * Orto.Ast.program) Hashtbl.t =
+  Hashtbl.create 8
 let load_order : string list ref = ref []
 
 (* Recursively walk all top-level decls including inside namespace
-   blocks, returning every `use` path's first component (= file name
-   to load). *)
+   blocks, returning every `use` path (= module to load). *)
 let rec collect_use_files decls =
   List.concat_map (function
     | Orto.Ast.TopUse u ->
-        (match u.Orto.Ast.use_module with
-         | first :: _ -> [first]
-         | [] -> [])
+        (match u.Orto.Ast.use_module with [] -> [] | segs -> [segs])
     | Orto.Ast.TopNamespace (_, inner) -> collect_use_files inner
     | _ -> []) decls
 
-(* Search path for a `use`d module: the entry program's directory first
-   (so a project can shadow / provide its own modules), then the standard
-   library directory (ORTO_STD, default "std" relative to the cwd). *)
-let std_dir =
-  try Sys.getenv "ORTO_STD" with Not_found -> "std"
+(* Search roots for a `use`d module path: the entry program's directory
+   first (so a project can shadow / provide its own modules), then the
+   library root (ORTO_ROOT, default "." — std/ lives directly under it,
+   so `use std::vec` resolves to <root>/std/vec.orto). *)
+let lib_root =
+  try Sys.getenv "ORTO_ROOT" with Not_found -> "."
 
-let find_module entry_dir mod_name =
+let find_module entry_dir segs =
+  let rel = path_to_file segs in
   let candidates =
-    [ Filename.concat entry_dir (mod_name ^ ".orto");
-      Filename.concat std_dir   (mod_name ^ ".orto") ]
+    [ Filename.concat entry_dir rel; Filename.concat lib_root rel ]
   in
   let rec first = function
     | [] -> None
@@ -63,29 +73,30 @@ let find_module entry_dir mod_name =
   in
   first candidates
 
-let rec load_module entry_dir mod_name visiting =
+let rec load_module entry_dir segs visiting =
   (* Memoization handles mutual references — A imports B imports A is
      fine, both end up loaded once. `visiting` is kept for future
      debugging but no longer used to reject cycles. *)
   let _ = visiting in
-  if Hashtbl.mem modules_loaded mod_name then ()
+  let key = path_key segs in
+  if Hashtbl.mem modules_loaded key then ()
   else begin
     let path =
-      match find_module entry_dir mod_name with
+      match find_module entry_dir segs with
       | Some p -> p
       | None ->
           failwith (Printf.sprintf
-            "module %S referenced via `use`, but %s.orto not found \
+            "module %S referenced via `use`, but %s not found \
              (searched %s and %s)"
-            mod_name mod_name entry_dir std_dir)
+            key (path_to_file segs) entry_dir lib_root)
     in
     let src = read_file path in
     let toks = Orto.Lexer.lex src in
     let ast = Orto.Parser.parse toks in
-    Hashtbl.add modules_loaded mod_name ast;
-    load_order := mod_name :: !load_order;
+    Hashtbl.add modules_loaded key (segs, ast);
+    load_order := key :: !load_order;
     List.iter (fun child ->
-      load_module entry_dir child (mod_name :: visiting))
+      load_module entry_dir child (key :: visiting))
       (collect_use_files ast)
   end
 
@@ -152,15 +163,16 @@ let () =
     let src = read_file input in
     let toks = Orto.Lexer.lex src in
     let ast = Orto.Parser.parse toks in
-    Hashtbl.add modules_loaded entry_module ast;
-    load_order := entry_module :: !load_order;
+    let entry_key = path_key entry_module in
+    Hashtbl.add modules_loaded entry_key (entry_module, ast);
+    load_order := entry_key :: !load_order;
     List.iter (fun child ->
-      load_module entry_dir child [entry_module])
+      load_module entry_dir child [entry_key])
       (collect_use_files ast);
     (* Preserve insertion order (entry first, dependencies after);
        resolve.ml doesn't care about order, only about completeness. *)
     let modules =
-      List.rev_map (fun mn -> (mn, Hashtbl.find modules_loaded mn))
+      List.rev_map (fun key -> Hashtbl.find modules_loaded key)
         !load_order
     in
     let merged = Orto.Resolve.resolve modules in

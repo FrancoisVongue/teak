@@ -4,9 +4,9 @@
 // it never wraps in practice). Durations are plain int nanoseconds; the
 // unit helpers below name them like Go (time.Second, time.Millisecond).
 //
-//     let t0 = time::now();
+//     let t0 = std::time::now();
 //     ... work ...
-//     let elapsed_ms = time::since(t0) / time::millisecond();
+//     let elapsed_ms = std::time::since(t0) / std::time::millisecond();
 
 extern fn orto_now_ns() -> i64
 extern fn orto_now_us() -> i32

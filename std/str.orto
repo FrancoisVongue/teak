@@ -4,9 +4,9 @@
 // return views (no copy); building a new string copies into the region.
 //
 // `hash`/`compare` make Handle[byte] usable as a map key and as a sort key
-// (inject str::hash + str::eq into map::new, str::compare into sort::sort).
+// (inject std::str::hash + std::str::eq into std::map::new, std::str::compare into std::sort::sort).
 
-use vec::{Vec, new, push, slice_of};
+use std::vec::{Vec, new, push, slice_of};
 
 // ---------- predicates / inspection ----------
 
@@ -41,7 +41,7 @@ fn compare(a: Handle[byte], b: Handle[byte]) -> int {
 }
 
 // FNV-1a (32-bit constants, accumulated in a 64-bit int — wraps, fine
-// for hashing). Pair with str::eq when using strings as map keys.
+// for hashing). Pair with std::str::eq when using strings as map keys.
 fn hash(s: Handle[byte]) -> int {
     let mut h = 2166136261;
     let mut i = 0;

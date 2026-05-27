@@ -1,5 +1,5 @@
 // Regression: std::raw byte codec over raw *byte + bswap.
-use raw::{write_u64_le, read_u64_le, write_u64_be, read_u64_be,
+use std::raw::{write_u64_le, read_u64_le, write_u64_be, read_u64_be,
           write_u32_be, read_u32_be, bswap32, bswap16};
 
 fn main() -> int {

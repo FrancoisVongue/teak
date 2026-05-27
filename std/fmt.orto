@@ -1,10 +1,10 @@
 // std/fmt.orto — string formatting with `{}` placeholders. No printf
 // mini-language and no type-directed magic: you convert your values to
-// strings yourself (e.g. str::from_int) and pass them as `parts`. The
+// strings yourself (e.g. std::str::from_int) and pass them as `parts`. The
 // formatter just walks the template and drops each part into the next
 // `{}` slot, in order. `{{` is a literal `{`, `}}` a literal `}`.
 
-use vec::{Vec, new, push, slice_of};
+use std::vec::{Vec, new, push, slice_of};
 
 fn format(r: Region, template: Handle[byte], parts: Handle[Handle[byte]]) -> Handle[byte] {
     let mut out = new(r, len(template) + 8, to_byte(0));

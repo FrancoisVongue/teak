@@ -73,12 +73,13 @@ type module_summary = {
 }
 
 (* Flatten one file's program into (namespace_path, decls) pairs.
-   The default namespace = [file_name] catches decls outside any
+   The default namespace = the file's path (dirs as segments, e.g.
+   std/vec.orto -> ["std";"vec"]) catches decls outside any
    `namespace { ... }` block; explicit blocks contribute their own
    paths. Nested namespace blocks are not supported syntactically
    (parse_namespace_path consumes the whole dotted path inline);
    if one appears anyway we still flatten it conservatively. *)
-let flatten_namespaces (file_name : string) (prog : program)
+let flatten_namespaces (file_path : string list) (prog : program)
   : (string list * top_decl list) list =
   let buckets : (string list, top_decl list ref) Hashtbl.t = Hashtbl.create 4 in
   let order : string list list ref = ref [] in
@@ -99,7 +100,7 @@ let flatten_namespaces (file_name : string) (prog : program)
           let r = bucket_for path in
           r := d :: !r) decls
   in
-  visit [file_name] prog;
+  visit file_path prog;
   List.rev_map (fun path ->
     let r = Hashtbl.find buckets path in
     (path, List.rev !r)) !order
@@ -605,7 +606,7 @@ let expand_in_decl (aliases : (string * ty) list) (d : top_decl) : top_decl =
    flatten namespace blocks into per-namespace decl lists, resolve all
    references, return one merged program ready for the type checker.
    Externs are deduplicated by name. *)
-let resolve (modules : (string * program) list) : program =
+let resolve (modules : (string list * program) list) : program =
   Hashtbl.clear const_set;
   (* Step 1: each file → list of (namespace_path, decls). Multiple
      files contributing to the same namespace path are merged. *)

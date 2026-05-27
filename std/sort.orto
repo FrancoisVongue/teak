@@ -1,7 +1,7 @@
 // std/sort.orto — in-place sort of a Handle[T] (or slice) with an explicit
 // comparator. cmp(a, b) < 0 means a comes before b, 0 equal, > 0 after.
 // The comparator is injected — no ordering is baked into any type
-// (use str::compare for strings, a field-projecting closure for records).
+// (use std::str::compare for strings, a field-projecting closure for records).
 //
 // Quicksort with a median-of-three pivot (so already-sorted and
 // reverse-sorted inputs don't degrade to O(n^2)), falling back to

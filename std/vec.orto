@@ -2,7 +2,7 @@
 //
 // Vec is a value (a small handle struct). Allocating operations take the
 // region explicitly and RETURN the updated Vec — like Go's append:
-//     v = vec::push(v, r, x);
+//     v = std::vec::push(v, r, x);
 // `zero` is a sample value of T used to fill freshly grown backing cells
 // (a generic T has no implicit default, so the caller provides one once).
 //
