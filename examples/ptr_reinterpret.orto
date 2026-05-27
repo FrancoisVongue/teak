@@ -1,0 +1,22 @@
+// ptr_cast[T](e) — raw reinterpret. Two uses:
+//   *U -> *T   : view the same bytes as another type (zero-copy)
+//   int -> *T  : a pointer at a fixed address (MMIO / device registers)
+//
+// This is the raw world: no gen-check, no bounds-check. The type `*T`
+// (vs `Handle[T]`) already says "you are on your own".
+
+fn main() -> int {
+    // 4 raw bytes, little-endian, spelling the u32 value 7.
+    let p = c_alloc[byte](4);
+    p[0] := to_byte(7);
+    p[1] := to_byte(0);
+    p[2] := to_byte(0);
+    p[3] := to_byte(0);
+
+    // Reinterpret the byte buffer as one u32 and read it. Zero copy.
+    let as_u32 = ptr_cast[u32](p);
+    let v = *as_u32;             // 7
+
+    c_free(p);
+    to_int(v)                    // exit code 7
+}

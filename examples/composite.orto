@@ -1,0 +1,127 @@
+// Composite stress test: closures inside closures, closures stored in
+// structs, stateful closures over a region cell, generic higher-order
+// combinators over Ref, eager map / fold, a lazy closure-iterator with a
+// map adapter, place-path assignment on Ref elements, slices, for-in-ref.
+// If any of these axes failed to compose, this wouldn't compile or would
+// give the wrong number. Expected result: 964.
+
+struct Rec  { id: int, amount: int }
+struct Pipe { transform: fn(int) -> int, keep: fn(int) -> bool }
+
+// generic eager map: Handle[A] -> Handle[int]
+fn map_int[A](r: Region, xs: Handle[A], f: fn(A) -> int) -> Handle[int] {
+    let n = len(xs);
+    let out = ref(r, n, 0);
+    let mut i = 0;
+    while i < n {
+        out[i] := f(xs[i]);
+        i := i + 1;
+    }
+    out
+}
+
+// generic fold using for-in-ref
+fn fold_int[A](xs: Handle[A], init: int, step: fn(int, A) -> int) -> int {
+    let mut acc = init;
+    for x in xs {
+        acc := step(acc, x);
+    }
+    acc
+}
+
+// closure factory — captures `factor`
+fn scaler(r: Region, factor: int) -> fn(int) -> int {
+    closure(r, fn(x: int) -> int { x * factor })
+}
+
+// closure that returns a closure — captures base, then step
+fn shifter(r: Region, base: int) -> fn(int) -> fn(int) -> int {
+    closure(r, fn(step: int) -> fn(int) -> int {
+        closure(r, fn(x: int) -> int { base + step * x })
+    })
+}
+
+// stateful closure: counter living in a region cell
+fn make_counter(r: Region) -> fn() -> int {
+    let c = ref(r, 0);
+    closure(r, fn() -> int { c[0] := c[0] + 1; c[0] })
+}
+
+// run a struct-held pipeline: transform, keep, produce a new Ref
+fn run_pipe(r: Region, p: Pipe, xs: Handle[int]) -> Handle[int] {
+    let mut cnt = 0;
+    for x in xs {
+        if (p.keep)((p.transform)(x)) { cnt := cnt + 1; }
+    }
+    let out = ref(r, cnt, 0);
+    let mut j = 0;
+    for x in xs {
+        let t = (p.transform)(x);
+        if (p.keep)(t) { out[j] := t; j := j + 1; }
+    }
+    out
+}
+
+// lazy closure-iterator + map adapter (polymorphic)
+fn count_iter(r: Region, hi: int) -> fn() -> Option[int] {
+    let cur = ref(r, 0);
+    closure(r, fn() -> Option[int] {
+        let i = cur[0];
+        if i < hi { cur[0] := i + 1; Some(i) } else { None }
+    })
+}
+fn map_iter[A, B](r: Region, it: fn() -> Option[A], f: fn(A) -> B)
+    -> fn() -> Option[B] {
+    closure(r, fn() -> Option[B] {
+        match it() { None => None, Some(a) => Some(f(a)) }
+    })
+}
+
+fn main() -> int {
+    arena r = region(16384);
+
+    // (1) records in a Ref, bumped IN PLACE via place-path assignment
+    let recs = ref(r, [Rec{id:1, amount:10}, Rec{id:2, amount:20},
+                       Rec{id:3, amount:30}]);
+    let mut i = 0;
+    while i < len(recs) {
+        recs[i].amount := recs[i].amount + recs[i].id;   // 11, 22, 33
+        i := i + 1;
+    }
+
+    // (2) generic map with a closure that CAPTURES another closure
+    let triple = scaler(r, 3);
+    let amounts = map_int(r, recs,
+        closure(r, fn(rc: Rec) -> int { triple(rc.amount) }));  // 33, 66, 99
+
+    // (3) fold with a stateful counter closure mixed into the step
+    let counter = make_counter(r);
+    let total = fold_int(amounts, 0,
+        closure(r, fn(acc: int, x: int) -> int {
+            acc + x + counter()        // +1, +2, +3 over the three steps
+        }));                            // 204
+
+    // (4) struct holding two closures
+    let pipe = Pipe {
+        transform: scaler(r, 2),
+        keep: closure(r, fn(x: int) -> bool { x > 100 })
+    };
+    let kept = run_pipe(r, pipe, amounts);   // [66,132,198] keep>100 -> [132,198]
+    let kept_sum = fold_int(kept, 0,
+        closure(r, fn(a: int, x: int) -> int { a + x }));   // 330
+
+    // (5) closure-returning-closure + lazy iterator + map adapter
+    let by5 = (shifter(r, 100))(5);          // fn(x) -> 100 + 5*x
+    let it = map_iter(r, count_iter(r, 4), by5);  // 100,105,110,115
+    let mut lazy_sum = 0;
+    let mut go = 1;
+    while go == 1 {
+        let s = match it() {
+            None => 0,
+            Some(v) => { lazy_sum := lazy_sum + v; 1 }
+        };
+        go := s;
+    }                                         // 430
+
+    total + kept_sum + lazy_sum               // 204 + 330 + 430 = 964
+}

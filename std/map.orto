@@ -1,0 +1,174 @@
+// std/map.orto — an open-addressing hash map (linear probing) with
+// power-of-two capacity, so the slot index is a single bitwise AND
+// (`h & (cap-1)`) instead of a modulo. Grows and rehashes at ~75% load.
+// Deletion uses tombstones; a grow drops them.
+//
+// Behaviour is injected, not baked into types: the map stores its own
+// `hash` and `eq` as closures — the explicit, visible form of a
+// type-class dictionary, chosen per map. Keys and values are copied in.
+// `zk`/`zv` are sample zero values used to fill backing slots.
+
+use vec::{Vec};
+
+// slot state: 0 = empty, 1 = used, 2 = tombstone
+struct Entry[K, V] { state: int, key: K, val: V }
+
+struct Map[K, V] {
+    slots : Handle[Entry[K, V]],
+    cap   : int,           // always a power of two
+    count : int,           // live entries
+    occ   : int,           // used + tombstones (probe-chain occupancy)
+    hash  : fn(K) -> int,
+    eq    : fn(K, K) -> bool,
+    ze    : Entry[K, V]
+}
+
+fn pow2_at_least(n: int) -> int {
+    let mut p = 4;
+    while p < n { p := p << 1; }
+    p
+}
+
+// Slot index from a hash. cap is a power of two, so the low bits are a
+// uniform index even when h is negative (two's-complement low bits).
+fn slot(h: int, cap: int) -> int { h & (cap - 1) }
+
+fn new[K, V](r: Region, cap: int, zk: K, zv: V,
+             hash: fn(K) -> int, eq: fn(K, K) -> bool) -> Map[K, V] {
+    let c = pow2_at_least(cap);
+    let ze = Entry { state: 0, key: zk, val: zv };
+    Map { slots: ref(r, c, ze), cap: c, count: 0, occ: 0,
+          hash: hash, eq: eq, ze: ze }
+}
+
+// Index of the used slot holding k, or -1 if absent.
+fn find_slot[K, V](m: Map[K, V], k: K) -> int {
+    let mut i = slot((m.hash)(k), m.cap);
+    let mut steps = 0;
+    let mut res = 0 - 1;
+    let mut done = false;
+    while !done && steps < m.cap {
+        let e = m.slots[i];
+        if e.state == 0 { done := true; }
+        else {
+            if e.state == 1 && (m.eq)(e.key, k) { res := i; done := true; }
+            else { i := slot(i + 1, m.cap); steps := steps + 1; }
+        }
+    }
+    res
+}
+
+fn grow[K, V](m: Map[K, V], r: Region) -> Map[K, V] {
+    let mut nm = new(r, m.cap * 2, m.ze.key, m.ze.val, m.hash, m.eq);
+    let mut i = 0;
+    while i < m.cap {
+        let e = m.slots[i];
+        if e.state == 1 { nm := insert(nm, r, e.key, e.val); }
+        i := i + 1;
+    }
+    nm
+}
+
+fn insert[K, V](m0: Map[K, V], r: Region, k: K, v: V) -> Map[K, V] {
+    let m = if (m0.occ + 1) * 4 >= m0.cap * 3 { grow(m0, r) } else { m0 };
+    let mut i = slot((m.hash)(k), m.cap);
+    let mut first_tomb = 0 - 1;
+    let mut placed = false;
+    let mut newcount = m.count;
+    let mut newocc = m.occ;
+    while !placed {
+        let e = m.slots[i];
+        if e.state == 0 {
+            let dst = if first_tomb >= 0 { first_tomb } else { i };
+            if dst == i { newocc := m.occ + 1; }     // consumed a fresh empty
+            m.slots[dst] := Entry { state: 1, key: k, val: v };
+            newcount := m.count + 1;
+            placed := true;
+        } else {
+            if e.state == 2 {
+                if first_tomb < 0 { first_tomb := i; }
+                i := slot(i + 1, m.cap);
+            } else {
+                if (m.eq)(e.key, k) {
+                    m.slots[i] := Entry { state: 1, key: k, val: v };   // overwrite
+                    placed := true;
+                } else {
+                    i := slot(i + 1, m.cap);
+                }
+            }
+        }
+    }
+    Map { ..m, count: newcount, occ: newocc }
+}
+
+fn get[K, V](m: Map[K, V], k: K) -> Option[V] {
+    let i = find_slot(m, k);
+    if i < 0 { None } else { Some(m.slots[i].val) }
+}
+
+fn get_or[K, V](m: Map[K, V], k: K, fallback: V) -> V {
+    match get(m, k) { Some(v) => v, None => fallback }
+}
+
+fn contains[K, V](m: Map[K, V], k: K) -> bool { find_slot(m, k) >= 0 }
+
+fn remove[K, V](m: Map[K, V], k: K) -> Map[K, V] {
+    let i = find_slot(m, k);
+    if i < 0 {
+        m
+    } else {
+        m.slots[i] := Entry { state: 2, key: m.ze.key, val: m.ze.val };  // tombstone
+        Map { ..m, count: m.count - 1 }
+    }
+}
+
+fn size[K, V](m: Map[K, V]) -> int { m.count }
+fn is_empty[K, V](m: Map[K, V]) -> bool { m.count == 0 }
+
+fn clear[K, V](m: Map[K, V]) -> Map[K, V] {
+    let mut i = 0;
+    while i < m.cap { m.slots[i] := m.ze; i := i + 1; }
+    Map { ..m, count: 0, occ: 0 }
+}
+
+fn each[K, V](m: Map[K, V], f: fn(K, V) -> ()) -> () {
+    let mut i = 0;
+    while i < m.cap {
+        let e = m.slots[i];
+        if e.state == 1 { f(e.key, e.val); }
+        i := i + 1;
+    }
+}
+
+fn fold[A, K, V](m: Map[K, V], init: A, step: fn(A, K, V) -> A) -> A {
+    let mut acc = init;
+    let mut i = 0;
+    while i < m.cap {
+        let e = m.slots[i];
+        if e.state == 1 { acc := step(acc, e.key, e.val); }
+        i := i + 1;
+    }
+    acc
+}
+
+fn keys[K, V](m: Map[K, V], r: Region, zk: K) -> Vec[K] {
+    let mut out = vec::new(r, m.count + 1, zk);
+    let mut i = 0;
+    while i < m.cap {
+        let e = m.slots[i];
+        if e.state == 1 { out := vec::push(out, r, e.key); }
+        i := i + 1;
+    }
+    out
+}
+
+fn values[K, V](m: Map[K, V], r: Region, zv: V) -> Vec[V] {
+    let mut out = vec::new(r, m.count + 1, zv);
+    let mut i = 0;
+    while i < m.cap {
+        let e = m.slots[i];
+        if e.state == 1 { out := vec::push(out, r, e.val); }
+        i := i + 1;
+    }
+    out
+}

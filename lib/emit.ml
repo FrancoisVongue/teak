@@ -29,6 +29,133 @@ let fresh prefix =
   Printf.sprintf "%s_%d" prefix !counter
 let reset_counter () = counter := 0
 
+(* ---------- gen-check elision (local provenance) ----------
+   A Ref access needs no generation check when the Ref provably points
+   into a region that is alive at the access. The trivial, structural
+   case: in straight-line synchronous code, the Ref was derived
+   (ref/slice) from a region that is alive for the whole call — a Region
+   *parameter* (borrowed; the owner is up the stack and cannot free it
+   before we return) or a local arena still in scope. We track this per
+   function; when we can't prove it, the gen-check stays (safe fallback).
+   Only the synchronous emitter turns this on — async frames can outlive
+   the owning scope, so they always keep the check. *)
+let elide_enabled    = ref false
+(* Escape hatch for A/B benchmarking: ORTO_NO_ELIDE=1 keeps every check. *)
+let elide_off_env = (try Sys.getenv "ORTO_NO_ELIDE" <> "" with Not_found -> false)
+let live_regions  : (string, unit) Hashtbl.t = Hashtbl.create 16
+let safe_refs     : (string, unit) Hashtbl.t = Hashtbl.create 16
+let assigned_vars : (string, unit) Hashtbl.t = Hashtbl.create 16
+let func_unsafe   = ref false   (* a region is explicitly dropped → bail out *)
+let elided_count  = ref 0
+
+let reset_provenance () =
+  Hashtbl.clear live_regions;
+  Hashtbl.clear safe_refs;
+  Hashtbl.clear assigned_vars;
+  func_unsafe := false
+
+(* Names ever reassigned (`x := ...`); an explicit region drop disables
+   elision for the whole function. Exhaustive on purpose: missing a node
+   that hides an assignment / drop could let us elide a check we must
+   keep. *)
+let rec collect_unsafe (e : Check.T.expr) : unit =
+  let open Check.T in
+  let go = collect_unsafe in
+  match e with
+  | TEAssign (x, v, _) -> Hashtbl.replace assigned_vars x (); go v
+  | TEDrop (sub, ty) ->
+      (match ty with TyApp ("Region", []) -> func_unsafe := true | _ -> ());
+      go sub
+  | TEReset sub ->
+      (* reset bumps the region's generation at runtime; be conservative
+         and disable gen-check elision in functions that reset. *)
+      func_unsafe := true;
+      go sub
+  | TEInt _ | TEBool _ | TEVar _ | TEStringLit _ | TEFnRef _
+  | TEFloat _ | TENullPtr _ | TEBreak | TEContinue -> ()
+  | TECall (c, args, _) -> go c; List.iter go args
+  | TEBinop (_, a, b, _) -> go a; go b
+  | TEUnop (_, a, _) -> go a
+  | TECtor (_, _, args, _) -> List.iter go args
+  | TERecord (_, _, fs, _) -> List.iter (fun (_, e) -> go e) fs
+  | TEField (a, _, _) -> go a
+  | TEIf (c, t, el, _) -> go c; go t; go el
+  | TELet (_, _, v, b, _, _) -> go v; go b
+  | TEMatch (s, _, arms, _) ->
+      go s; List.iter (fun (_, g, b) -> Option.iter go g; go b) arms
+  | TEHandle (a, b, c, _) -> go a; go b; go c
+  | TEHandleLit (a, es, _) -> go a; List.iter go es
+  | TERegion (a, _) | TEStackRegion (a, _) -> go a
+  | TEAlignedRegion (a, b, _) -> go a; go b
+  | TEIndex (a, i, _) -> go a; go i
+  | TEAssignIdx (a, i, v, _) -> go a; go i; go v
+  | TELen (a, _) -> go a
+  | TESlice (a, lo, hi, _) -> go a; go lo; go hi
+  | TEToInt a | TEToByte a
+  | TEToFloat a | TEToIntFromFloat a -> go a
+  | TECast (_, a) -> go a
+  | TECAlloc (_, n, _) -> go n
+  | TECFree a | TEIsNull a -> go a
+  | TEHandleData (a, _) -> go a
+  | TEPtrCast (a, _) -> go a
+  | TETryAt (a, b, _) -> go a; go b
+  | TEDeref (a, _) -> go a
+  | TEAssignField (p, _, v) -> go p; go v
+  | TEWhile (c, b) -> go c; go b
+  | TEReturn (a, _) -> go a
+  | TEAwait (a, _, _) -> go a
+  | TESpawn (a, _) -> go a
+  | TEForStream (_, _, a, b) -> go a; go b
+  | TETuple (es, _) -> List.iter go es
+  | TETupleIdx (a, _, _) -> go a
+  | TELetTuple (_, _, v, b, _, _) -> go v; go b
+  | TEAwaitAll (es, _, _) -> List.iter go es
+  | TEPrint (_, es, _) -> List.iter go es
+  | TEMakeClosure (_, _, _, region, _) -> go region
+
+(* Provenance of a let-bound value: does it name a live region, a Ref
+   safely derived from one, or neither? *)
+let provenance_of (v : Check.T.expr) : [ `Region | `SafeRef | `Other ] =
+  let open Check.T in
+  let live_region = function
+    | TEVar (r, _) -> Hashtbl.mem live_regions r | _ -> false in
+  let safe_ref = function
+    | TEVar (x, _) -> Hashtbl.mem safe_refs x | _ -> false in
+  match v with
+  | TERegion _ | TEStackRegion _ | TEAlignedRegion _ -> `Region
+  | TEHandle (r, _, _, _)  when live_region r -> `SafeRef
+  | TEHandleLit (r, _, _)  when live_region r -> `SafeRef
+  | TESlice (a, _, _, _)  when safe_ref a    -> `SafeRef
+  | TEVar (x, _) when Hashtbl.mem safe_refs x    -> `SafeRef
+  | TEVar (x, _) when Hashtbl.mem live_regions x -> `Region
+  | _ -> `Other
+
+(* The gen-check on indexing `arr_e` can be dropped iff elision is on,
+   the function has no explicit region drop, and arr_e is a Ref variable
+   proven to come from a live region. *)
+let gen_check_needed (arr_e : Check.T.expr) : bool =
+  if !elide_enabled && not !func_unsafe && not elide_off_env then
+    match arr_e with
+    | Check.T.TEVar (v, _) when Hashtbl.mem safe_refs v ->
+        incr elided_count; false
+    | _ -> true
+  else true
+
+(* The bounds check on `src[i]` can be dropped iff it is a for-loop
+   access the lowering recorded as safe-by-construction: i is the
+   compiler-generated index for exactly this src, so 0 <= i < len(src)
+   always holds. User-written loops are never recorded → always checked. *)
+let bounds_check_needed (arr_e : Check.T.expr) (idx_e : Check.T.expr) : bool =
+  if !elide_enabled && not elide_off_env then
+    match arr_e, idx_e with
+    | Check.T.TEVar (src, _), Check.T.TEVar (i, _) ->
+        (match Hashtbl.find_opt Check.bounds_safe_index i with
+         | Some s when s = src -> incr elided_count; false
+         | _ -> true)
+    | _ -> true
+  else true
+
+
 (* ---------- collect distinct TyFun types ---------- *)
 
 (* Mangled name -> the structural TyFun. Used to emit a typedef per
@@ -53,7 +180,7 @@ let register_fnval (name : string) (t : ty) : unit =
     fnval_order := (name, t) :: !fnval_order
   end
 
-(* Array[T] instantiations: emit one typedef per distinct element type. *)
+(* Handle[T] instantiations: emit one typedef per distinct element type. *)
 let array_types_seen : (string, unit) Hashtbl.t = Hashtbl.create 8
 let array_types_order : (string * ty) list ref = ref []
 
@@ -92,7 +219,7 @@ let register_stream_wrapper (inner_mangled : string) =
 (* String literal pool. Every "..." in the program is deduplicated and
    assigned a byte-offset into one shared static buffer. The buffer
    sits at region slot 0 (reserved at startup, never freed). Each
-   literal emits to an Array[byte] handle with .slot=0, the offset,
+   literal emits to an Handle[byte] handle with .slot=0, the offset,
    length, and the static gen=1. *)
 let string_pool : (string, int) Hashtbl.t = Hashtbl.create 16
 let string_pool_order : (string * int) list ref = ref []
@@ -142,7 +269,7 @@ let async_func_return_ty (name : string) : ty option =
 
 (* Is the type scalar-shaped — fits in long long, can be assigned via
    implicit C conversion? Aggregate types (Region, Task[T], records,
-   Arrays) need memcpy to / from the long long header slot. *)
+   Handles) need memcpy to / from the long long header slot. *)
 let scalar_like (t : ty) : bool =
   match t with
   | TyInt | TyBool -> true
@@ -161,8 +288,8 @@ let register_string (s : string) : int =
       string_pool_size := off + String.length s;
       off
 
-let mangle_array_name (inner : ty) : string =
-  "Array_" ^ Mono.mangle_ty inner
+let mangle_handle_name (inner : ty) : string =
+  "Handle_" ^ Mono.mangle_ty inner
 
 let register_array (mangled : string) (inner : ty) =
   if not (Hashtbl.mem array_types_seen mangled) then begin
@@ -175,11 +302,11 @@ let rec collect_ty (t : ty) : unit =
   | TyInt | TyBool -> ()
   | TyVar n ->
       failwith (Printf.sprintf "emit collect_ty: TyVar %S after mono" n)
-  | TyApp ("Array", [inner]) ->
+  | TyApp ("Handle", [inner]) ->
       collect_ty inner;
-      register_array (mangle_array_name inner) inner
-  | TyApp ("Array", _) ->
-      failwith "emit collect_ty: Array with wrong arity"
+      register_array (mangle_handle_name inner) inner
+  | TyApp ("Handle", _) ->
+      failwith "emit collect_ty: Handle with wrong arity"
   | TyApp ("Region", []) -> ()
       (* Region runtime is emitted unconditionally at the top of the file. *)
   | TyApp ("Region", _) ->
@@ -214,6 +341,7 @@ let rec collect_ty (t : ty) : unit =
   | TyApp (_, []) -> ()
   | TyApp (n, _) ->
       failwith (Printf.sprintf "emit collect_ty: %S still has args" n)
+  | TyTuple [] -> ()   (* unit — represented as C int, no typedef *)
   | TyTuple ts ->
       List.iter collect_ty ts;
       register_tuple (Mono.mangle_ty t) ts
@@ -233,9 +361,9 @@ let rec collect_expr (e : Check.T.expr) : unit =
   | Check.T.TEInt _ | Check.T.TEFloat _ | Check.T.TEBool _ -> ()
   | Check.T.TEStringLit s ->
       let _ = register_string s in
-      (* String literal materialises as an Array[byte] handle — make
-         sure the Array_byte typedef is emitted. *)
-      collect_ty (TyApp ("Array", [TyApp ("byte", [])]))
+      (* String literal materialises as an Handle[byte] handle — make
+         sure the Handle_byte typedef is emitted. *)
+      collect_ty (TyApp ("Handle", [TyApp ("byte", [])]))
   | Check.T.TEVar (_, t) -> collect_ty t
   | Check.T.TEFnRef (_, _, t) -> collect_ty t
   | Check.T.TECall (callee, args, t) ->
@@ -263,9 +391,9 @@ let rec collect_expr (e : Check.T.expr) : unit =
         Option.iter collect_expr g;
         collect_expr body) arms;
       collect_ty rt
-  | Check.T.TEArray (r, n, v, t) ->
+  | Check.T.TEHandle (r, n, v, t) ->
       collect_expr r; collect_expr n; collect_expr v; collect_ty t
-  | Check.T.TEArrayLit (r, elems, t) ->
+  | Check.T.TEHandleLit (r, elems, t) ->
       collect_expr r; List.iter collect_expr elems; collect_ty t
   | Check.T.TERegion (n, t) -> collect_expr n; collect_ty t
   | Check.T.TEStackRegion (n, t) -> collect_expr n; collect_ty t
@@ -280,23 +408,24 @@ let rec collect_expr (e : Check.T.expr) : unit =
       collect_expr a; collect_expr lo; collect_expr hi; collect_ty t
   | Check.T.TEToInt e  -> collect_expr e
   | Check.T.TEToByte e -> collect_expr e
-  | Check.T.TEToU16 e  -> collect_expr e
-  | Check.T.TEToU32 e  -> collect_expr e
-  | Check.T.TEToU64 e  -> collect_expr e
   | Check.T.TEToFloat e -> collect_expr e
+  | Check.T.TECast (_, e) -> collect_expr e
   | Check.T.TEToIntFromFloat e -> collect_expr e
   | Check.T.TECAlloc (et, n, t) -> collect_ty et; collect_expr n; collect_ty t
   | Check.T.TECFree p -> collect_expr p
   | Check.T.TENullPtr t -> collect_ty t
   | Check.T.TEIsNull p -> collect_expr p
-  | Check.T.TEArrayData (a, t) -> collect_expr a; collect_ty t
+  | Check.T.TEHandleData (a, t) -> collect_expr a; collect_ty t
+  | Check.T.TEPtrCast (e, t) -> collect_expr e; collect_ty t
   | Check.T.TEDeref (p, t) -> collect_expr p; collect_ty t
   | Check.T.TEAssign (_, v, t) -> collect_expr v; collect_ty t
+  | Check.T.TEAssignField (p, _, v) -> collect_expr p; collect_expr v
   | Check.T.TEWhile (c, b) -> collect_expr c; collect_expr b
   | Check.T.TEBreak | Check.T.TEContinue -> ()
   | Check.T.TEReturn (v, t) -> collect_expr v; collect_ty t
   | Check.T.TETryAt (a, i, t) -> collect_expr a; collect_expr i; collect_ty t
   | Check.T.TEDrop (e, t) -> collect_expr e; collect_ty t
+  | Check.T.TEReset e -> collect_expr e
   | Check.T.TEAwait (e, t, p) -> collect_expr e; collect_ty t; collect_ty p
   | Check.T.TESpawn (e, t) -> collect_expr e; collect_ty t
   | Check.T.TEForStream (_, et, s, b) ->
@@ -339,25 +468,29 @@ let rec scan_fnvals (e : Check.T.expr) : unit =
   | TEMatch (s, _, arms, _) ->
       scan_fnvals s;
       List.iter (fun (_, g, body) -> Option.iter scan_fnvals g; scan_fnvals body) arms
-  | TEArray (r, n, v, _) -> scan_fnvals r; scan_fnvals n; scan_fnvals v
-  | TEArrayLit (r, elems, _) -> scan_fnvals r; List.iter scan_fnvals elems
+  | TEHandle (r, n, v, _) -> scan_fnvals r; scan_fnvals n; scan_fnvals v
+  | TEHandleLit (r, elems, _) -> scan_fnvals r; List.iter scan_fnvals elems
   | TERegion (n, _) | TEStackRegion (n, _) -> scan_fnvals n
   | TEAlignedRegion (n, a, _) -> scan_fnvals n; scan_fnvals a
   | TEIndex (a, i, _) -> scan_fnvals a; scan_fnvals i
   | TEAssignIdx (a, i, v, _) -> scan_fnvals a; scan_fnvals i; scan_fnvals v
   | TELen (e, _) -> scan_fnvals e
   | TESlice (a, lo, hi, _) -> scan_fnvals a; scan_fnvals lo; scan_fnvals hi
-  | TEToInt e | TEToByte e | TEToU16 e | TEToU32 e | TEToU64 e
+  | TEToInt e | TEToByte e
   | TEToFloat e | TEToIntFromFloat e -> scan_fnvals e
+  | TECast (_, e) -> scan_fnvals e
   | TECAlloc (_, n, _) -> scan_fnvals n
   | TECFree p | TEIsNull p -> scan_fnvals p
-  | TEArrayData (a, _) -> scan_fnvals a
+  | TEHandleData (a, _) -> scan_fnvals a
+  | TEPtrCast (e, _) -> scan_fnvals e
   | TEDeref (p, _) -> scan_fnvals p
   | TEAssign (_, v, _) -> scan_fnvals v
+  | TEAssignField (p, _, v) -> scan_fnvals p; scan_fnvals v
   | TEWhile (c, b) -> scan_fnvals c; scan_fnvals b
   | TEReturn (v, _) -> scan_fnvals v
   | TETryAt (a, i, _) -> scan_fnvals a; scan_fnvals i
   | TEDrop (e, _) -> scan_fnvals e
+  | TEReset e -> scan_fnvals e
   | TEAwait (e, _, _) -> scan_fnvals e
   | TESpawn (e, _) -> scan_fnvals e
   | TEForStream (_, _, s, b) -> scan_fnvals s; scan_fnvals b
@@ -410,18 +543,15 @@ let collect_program (prog : Check.T.program) : unit =
 
 let rec c_type (t : ty) : string =
   match t with
-  | TyInt -> "int"
+  | TyInt -> "long long"
   | TyBool -> "int"
-  | TyApp ("byte", []) -> "uint8_t"
-  | TyApp ("u16", [])  -> "uint16_t"
-  | TyApp ("u32", [])  -> "uint32_t"
-  | TyApp ("u64", [])  -> "uint64_t"
-  | TyApp ("float", []) -> "double"
+  | TyApp (n, []) when List.mem_assoc n numeric_c_type ->
+      List.assoc n numeric_c_type
   (* Compiler-internal pseudo-type. Never appears in user surface;
      used by emit to mark frame fields that must hold a 64-bit gen
      counter so per-slot wrap can't false-match an old handle. *)
   | TyApp ("__cll", []) -> "long long"
-  | TyApp ("Array", [inner]) -> mangle_array_name inner
+  | TyApp ("Handle", [inner]) -> mangle_handle_name inner
   | TyApp ("Region", []) -> "Region"
   | TyApp ("Task", [inner]) ->
       (* Stage 3 phase 2 placeholder: the concrete C struct for a
@@ -433,6 +563,7 @@ let rec c_type (t : ty) : string =
   | TyApp (n, []) -> n
   | TyFun _ -> Mono.mangle_ty t
   | TyPtr inner -> c_type inner ^ "*"
+  | TyTuple [] -> "int"   (* unit *)
   | TyTuple _ -> Mono.mangle_ty t
   | TyApp (n, _) ->
       failwith (Printf.sprintf "emit: %S still has type args" n)
@@ -440,10 +571,22 @@ let rec c_type (t : ty) : string =
       failwith (Printf.sprintf "emit: TyVar %S after mono" n)
   | TyMeta _ -> failwith "emit: TyMeta after mono"
 
+(* C types for FFI (extern) signatures. orto `int` is 64-bit, but C's
+   `int` is 32-bit and that's what libc uses — so at the FFI boundary
+   `int` maps to C `int`. The C prototype then drives the conversions:
+   a 64-bit orto arg is narrowed to int at the call, an int return is
+   sign-extended back to 64-bit — no churn at call sites. For 64-bit C
+   params/returns, declare the extern with `i64`/`u64`. *)
+let rec c_type_ffi (t : ty) : string =
+  match t with
+  | TyInt -> "int"
+  | TyPtr inner -> c_type_ffi inner ^ "*"
+  | _ -> c_type t
+
 let emit_fn_typedefs () : string list =
   (* A function value is a fat pointer: a code pointer plus a reference
      to its captured environment. The environment, when present, lives
-     in a region exactly like an Array's elements do — so the env
+     in a region exactly like an Handle's elements do — so the env
      reference is the same {slot, offset, expected_gen} handle, and
      calling a closure whose region has been dropped is caught by the
      same generation check that guards array access. env_slot = -1
@@ -464,13 +607,19 @@ let emit_fn_typedefs () : string list =
     | _ -> failwith "emit_fn_typedefs: non-fn type in list")
     !fn_types_order
 
-(* One typedef per distinct Array[T] element type. The handle carries
+(* One typedef per distinct Handle[T] element type. The handle carries
    the region slot, byte-offset of this slice within the region's
    block, length, and the slot's expected generation. *)
 let emit_array_forwards () : string list =
   List.rev_map (fun (mangled, _inner) ->
     Printf.sprintf
-      "typedef struct { int slot; int offset; int len; long long expected_gen; } %s;"
+      (* 16-byte handle (was 24): halves the cell size of nodes that hold
+         Refs, which roughly halves allocation memory traffic. gen is
+         32-bit here — a slot's generation wraps after 2^32 region
+         recycles (~billions); the wrap-proof form is to pack slot+gen
+         into one 64-bit word (48-bit gen), a follow-up that keeps 16
+         bytes AND full safety. *)
+      "typedef struct { int slot; int offset; int len; int expected_gen; } %s;"
       mangled)
     !array_types_order
 
@@ -498,6 +647,14 @@ let emit_task_forwards () : string list =
    only when one tuple type appears as a field type of another; we emit
    in reverse-insertion order (deepest child first), same trick as the
    array typedefs. *)
+(* Forward declarations for every tuple type, emitted early so that fn
+   typedefs (and anything else) can name a tuple before its full body is
+   given. Mirrors how ADT/record structs are forward-declared. *)
+let emit_tuple_fwd_decls () : string list =
+  List.rev_map (fun (mangled, _) ->
+    Printf.sprintf "typedef struct %s %s;" mangled mangled)
+    !tuple_types_order
+
 let emit_tuple_forwards () : string list =
   List.rev_map (fun (mangled, ts) ->
     let fields =
@@ -505,7 +662,7 @@ let emit_tuple_forwards () : string list =
         (List.mapi (fun i ty ->
           Printf.sprintf "%s f%d;" (c_type ty) i) ts)
     in
-    Printf.sprintf "typedef struct { %s } %s;" fields mangled)
+    Printf.sprintf "struct %s { %s };" mangled fields)
     !tuple_types_order
 
 (* drop_<TupleX> for every tuple shape that contains a linear component.
@@ -528,8 +685,8 @@ let emit_tuple_drop_defs () : string list =
             Some (Printf.sprintf "    %s"
                     (let _ = ty in
                      let fn_call = match ty with
-                       | TyApp ("Array", [inner]) ->
-                           Printf.sprintf "drop_%s(t.f%d);" (mangle_array_name inner) i
+                       | TyApp ("Handle", [inner]) ->
+                           Printf.sprintf "drop_%s(t.f%d);" (mangle_handle_name inner) i
                        | TyApp ("Task", [inner]) ->
                            Printf.sprintf "drop_Task_%s(t.f%d);" (Mono.mangle_ty inner) i
                        | TyApp ("Stream", [inner]) ->
@@ -597,12 +754,12 @@ let emit_stream_drop_forwards () : string list =
 (* Emit a call to the right drop function for a linear type. After mono,
    the type name carries its module mangling (`net__Socket`); the helper
    in check.ml derives the matching drop fn name. For Region the runtime
-   supplies `drop_Region` directly. Array[Linear T] gets a generated
-   drop_Array_<T> per instantiation (phase 3 induced linearity). *)
+   supplies `drop_Region` directly. Handle[Linear T] gets a generated
+   drop_Handle_<T> per instantiation (phase 3 induced linearity). *)
 let drop_call_stmt (var_name : string) (t : ty) : string =
   match t with
-  | TyApp ("Array", [inner]) ->
-      let fn = "drop_" ^ mangle_array_name inner in
+  | TyApp ("Handle", [inner]) ->
+      let fn = "drop_" ^ mangle_handle_name inner in
       Printf.sprintf "%s(%s);" fn var_name
   | TyApp ("Task", [inner]) ->
       let fn = "drop_Task_" ^ Mono.mangle_ty inner in
@@ -620,9 +777,9 @@ let drop_call_stmt (var_name : string) (t : ty) : string =
       failwith
         (Printf.sprintf "emit: drop on non-TyApp type %s" (Ast.show_ty t))
 
-(* Forward declarations for every drop_Array_<T> we'll emit, so they
+(* Forward declarations for every drop_Handle_<T> we'll emit, so they
    can be referenced before their definition (e.g. nested
-   Array[Array[Linear]] drops the inner array). *)
+   Handle[Handle[Linear]] drops the inner array). *)
 let emit_array_drop_forwards () : string list =
   List.rev_map (fun (mangled, inner) ->
     if Check.is_linear_ty inner then
@@ -631,7 +788,7 @@ let emit_array_drop_forwards () : string list =
     !array_types_order
   |> List.filter_map (fun x -> x)
 
-(* Cascade drop for Array[T] when T is linear: walks the live slots
+(* Cascade drop for Handle[T] when T is linear: walks the live slots
    of the element backing buffer (gen-checked) and drops each. The
    array handle itself doesn't free memory — the surrounding Region
    does that. *)
@@ -712,6 +869,14 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
           TELet ("_", vt, v', rn env body, bt, ad)
         else
           let x' = fresh x in
+          (* Carry for-loop bounds-safety across the rename: if x is a
+             recorded for-index, register the renamed index against the
+             renamed source (already in env, bound by the outer let). *)
+          (match Hashtbl.find_opt Check.bounds_safe_index x with
+           | Some src ->
+               let src' = try List.assoc src env with Not_found -> src in
+               Hashtbl.replace Check.bounds_safe_index x' src'
+           | None -> ());
           let env' = (x, x') :: env in
           TELet (x', vt, v', rn env' body, bt, ad)
     | TEMatch (s, st, arms, rt) ->
@@ -754,10 +919,10 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
                 rn_arm (p, guard, body) (p', env')) arms
         in
         TEMatch (s', st, arms', rt)
-    | TEArray (r, n, v, t) ->
-        TEArray (rn env r, rn env n, rn env v, t)
-    | TEArrayLit (r, elems, t) ->
-        TEArrayLit (rn env r, List.map (rn env) elems, t)
+    | TEHandle (r, n, v, t) ->
+        TEHandle (rn env r, rn env n, rn env v, t)
+    | TEHandleLit (r, elems, t) ->
+        TEHandleLit (rn env r, List.map (rn env) elems, t)
     | TERegion (n, t) -> TERegion (rn env n, t)
     | TEStackRegion (n, t) -> TEStackRegion (rn env n, t)
     | TEAlignedRegion (n, a, t) ->
@@ -770,25 +935,26 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
         TESlice (rn env a, rn env lo, rn env hi, t)
     | TEToInt e  -> TEToInt (rn env e)
     | TEToByte e -> TEToByte (rn env e)
-    | TEToU16 e  -> TEToU16 (rn env e)
-    | TEToU32 e  -> TEToU32 (rn env e)
-    | TEToU64 e  -> TEToU64 (rn env e)
     | TEToFloat e -> TEToFloat (rn env e)
+    | TECast (t, e) -> TECast (t, rn env e)
     | TEToIntFromFloat e -> TEToIntFromFloat (rn env e)
     | TECAlloc (et, n, t) -> TECAlloc (et, rn env n, t)
     | TECFree p -> TECFree (rn env p)
     | TENullPtr t -> TENullPtr t
     | TEIsNull p -> TEIsNull (rn env p)
-    | TEArrayData (a, t) -> TEArrayData (rn env a, t)
+    | TEHandleData (a, t) -> TEHandleData (rn env a, t)
+    | TEPtrCast (e, t) -> TEPtrCast (rn env e, t)
     | TEDeref (p, t) -> TEDeref (rn env p, t)
     | TEAssign (x, v, t) ->
         let x' = try List.assoc x env with Not_found -> x in
         TEAssign (x', rn env v, t)
+    | TEAssignField (p, f, v) -> TEAssignField (rn env p, f, rn env v)
     | TEWhile (c, b) -> TEWhile (rn env c, rn env b)
     | TEBreak | TEContinue -> e
     | TEReturn (v, t) -> TEReturn (rn env v, t)
     | TETryAt (a, i, t) -> TETryAt (rn env a, rn env i, t)
     | TEDrop (e, t) -> TEDrop (rn env e, t)
+    | TEReset e -> TEReset (rn env e)
     | TEAwait (e, t, p) -> TEAwait (rn env e, t, p)
     | TESpawn (e, t) -> TESpawn (rn env e, t)
     | TEForStream (x, et, s, b) ->
@@ -944,7 +1110,7 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TEInt _ -> TyInt
   | Check.T.TEFloat _ -> TyApp ("float", [])
   | Check.T.TEBool _ -> TyBool
-  | Check.T.TEStringLit _ -> TyApp ("Array", [TyApp ("byte", [])])
+  | Check.T.TEStringLit _ -> TyApp ("Handle", [TyApp ("byte", [])])
   | Check.T.TEVar (_, t) -> t
   | Check.T.TEFnRef (_, _, t) -> t
   | Check.T.TECall (_, _, t) -> t
@@ -956,8 +1122,8 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TEIf (_, _, _, t) -> t
   | Check.T.TELet (_, _, _, _, t, _) -> t
   | Check.T.TEMatch (_, _, _, t) -> t
-  | Check.T.TEArray (_, _, _, t) -> t
-  | Check.T.TEArrayLit (_, _, t) -> t
+  | Check.T.TEHandle (_, _, _, t) -> t
+  | Check.T.TEHandleLit (_, _, t) -> t
   | Check.T.TERegion (_, t) -> t
   | Check.T.TEStackRegion (_, t) -> t
   | Check.T.TEAlignedRegion (_, _, t) -> t
@@ -967,31 +1133,32 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TESlice (_, _, _, t) -> t
   | Check.T.TEToInt _  -> TyInt
   | Check.T.TEToByte _ -> TyApp ("byte", [])
-  | Check.T.TEToU16 _  -> TyApp ("u16", [])
-  | Check.T.TEToU32 _  -> TyApp ("u32", [])
-  | Check.T.TEToU64 _  -> TyApp ("u64", [])
   | Check.T.TEToFloat _ -> TyApp ("float", [])
+  | Check.T.TECast (t, _) -> TyApp (t, [])
   | Check.T.TEToIntFromFloat _ -> TyInt
   | Check.T.TECAlloc (_, _, t) -> t
   | Check.T.TECFree _ -> TyInt
   | Check.T.TENullPtr t -> t
   | Check.T.TEIsNull _ -> TyBool
-  | Check.T.TEArrayData (_, t) -> t
+  | Check.T.TEHandleData (_, t) -> t
+  | Check.T.TEPtrCast (_, t) -> t
   | Check.T.TEDeref (_, t) -> t
-  | Check.T.TEAssign (_, _, _) -> TyInt
-  | Check.T.TEWhile (_, _) -> TyInt
+  | Check.T.TEAssign (_, _, _) -> TyTuple []
+  | Check.T.TEAssignField (_, _, _) -> TyTuple []
+  | Check.T.TEWhile (_, _) -> TyTuple []
   | Check.T.TEBreak | Check.T.TEContinue -> TyInt
   | Check.T.TEReturn (_, _) -> TyInt
   | Check.T.TETryAt (_, _, t) -> t
-  | Check.T.TEDrop (_, _) -> TyInt
+  | Check.T.TEDrop (_, _) -> TyTuple []
+  | Check.T.TEReset _ -> TyTuple []
   | Check.T.TEAwait (_, t, _) -> t
   | Check.T.TESpawn (_, t) -> t
-  | Check.T.TEForStream _ -> TyInt
+  | Check.T.TEForStream _ -> TyTuple []
   | Check.T.TETuple (_, t) -> t
   | Check.T.TETupleIdx (_, _, t) -> t
   | Check.T.TELetTuple (_, _, _, _, t, _) -> t
   | Check.T.TEAwaitAll (_, t, _) -> t
-  | Check.T.TEPrint _ -> TyInt
+  | Check.T.TEPrint _ -> TyTuple []
   | Check.T.TEMakeClosure (_, _, _, _, fn_ty) -> fn_ty
 
 (* C name of a lifted closure's environment struct. *)
@@ -1011,7 +1178,10 @@ let rec emit_expr
   (ctor_map : (string, type_decl * variant * int) Hashtbl.t)
   (e : Check.T.expr) : c_code =
   match e with
-  | Check.T.TEInt n      -> { stmts = []; value = string_of_int n }
+  | Check.T.TEInt n      ->
+      (* int is 64-bit; emit a long long literal so literal arithmetic
+         (e.g. 1000000000 * 3) computes in 64-bit, not C's 32-bit int. *)
+      { stmts = []; value = Printf.sprintf "%LdLL" n }
   | Check.T.TEFloat f    ->
       (* Use enough digits to round-trip a double exactly. Force a
          decimal point so `1.0` doesn't emit as `1` (which C parses
@@ -1029,7 +1199,7 @@ let rec emit_expr
       let off = register_string s in
       let len = String.length s in
       let value = Printf.sprintf
-        "((Array_byte){ .slot = 0, .offset = %d, .len = %d, .expected_gen = 1 })"
+        "((Handle_byte){ .slot = 0, .offset = %d, .len = %d, .expected_gen = 1 })"
         off len
       in
       { stmts = []; value }
@@ -1078,12 +1248,35 @@ let rec emit_expr
       { stmts;
         value = Printf.sprintf "%s.code(%s)" cv (String.concat ", " vals) }
 
-  | Check.T.TEBinop (op, a, b, _) ->
+  | Check.T.TEBinop (op, a, b, bty) ->
       let ca = emit_expr ctor_map a in
       let cb = emit_expr ctor_map b in
-      { stmts = ca.stmts @ cb.stmts;
-        value =
-          Printf.sprintf "(%s %s %s)" ca.value (c_binop op) cb.value }
+      (match op with
+       | (OpAnd | OpOr) when cb.stmts <> [] ->
+           (* Short-circuit: the right operand must not run when the left
+              already decides the result. Its setup statements (an array
+              bounds-check that would abort, a closure call) go inside a
+              guard rather than being hoisted before the whole expression.
+              The plain `(a && b)` form is kept when b has no statements. *)
+           let tmp = fresh "_sc" in
+           let guard = match op with
+             | OpAnd -> tmp                       (* eval b only if a true  *)
+             | _     -> Printf.sprintf "!%s" tmp  (* OpOr: only if a false  *)
+           in
+           let indent ss = List.map (fun s -> "    " ^ s) ss in
+           let stmts =
+             ca.stmts
+             @ [Printf.sprintf "%s %s = %s;" (c_type bty) tmp ca.value;
+                Printf.sprintf "if (%s) {" guard]
+             @ indent cb.stmts
+             @ [Printf.sprintf "    %s = %s;" tmp cb.value;
+                "}"]
+           in
+           { stmts; value = tmp }
+       | _ ->
+           { stmts = ca.stmts @ cb.stmts;
+             value =
+               Printf.sprintf "(%s %s %s)" ca.value (c_binop op) cb.value })
 
   | Check.T.TEUnop (op, e, _) ->
       let ce = emit_expr ctor_map e in
@@ -1160,6 +1353,13 @@ let rec emit_expr
 
   | Check.T.TELet (x, vt, value_e, body, body_ty, auto_drop) ->
       let cv = emit_expr ctor_map value_e in
+      (* Record region/Ref provenance before emitting the body, so
+         accesses inside the body can have their gen-check elided. *)
+      if !elide_enabled && x <> "_" && not (Hashtbl.mem assigned_vars x) then
+        (match provenance_of value_e with
+         | `Region  -> Hashtbl.replace live_regions x ()
+         | `SafeRef -> Hashtbl.replace safe_refs x ()
+         | `Other   -> ());
       let cb = emit_expr ctor_map body in
       (* Bindings whose name starts with `fr->` come from
          async_rewrite_to_frame — the variable lives in the
@@ -1212,6 +1412,12 @@ let rec emit_expr
       let result_decl =
         Printf.sprintf "%s %s;" (c_type result_ty) result_var
       in
+      if arms = [] then
+        (* Absurd: scrutinee is uninhabited, so this is unreachable.
+           Evaluate the scrutinee (for any side effects) and abort. *)
+        { stmts = cs.stmts @ [ scrut_decl; "abort();"; result_decl ];
+          value = result_var }
+      else
       (* Dispatch by scrutinee shape. After mono, an ADT shows up as
          TyApp(name, []) where name is in the ADT environment, i.e.
          present in ctor_map under at least one ctor name. We detect
@@ -1221,7 +1427,7 @@ let rec emit_expr
         | TyInt | TyBool -> false
         | TyApp ("byte", []) -> false
         | TyApp ("u16", []) | TyApp ("u32", []) | TyApp ("u64", []) -> false
-        | TyApp ("Array", _) -> false
+        | TyApp ("Handle", _) -> false
         | TyTuple _ -> false
         | TyApp _ -> true
         | _ -> true
@@ -1301,7 +1507,7 @@ let rec emit_expr
         in
         { stmts; value = result_var }
       end else begin
-        (* Non-ADT scrutinee: int, bool, byte, or Array[byte]. Emit a
+        (* Non-ADT scrutinee: int, bool, byte, or Handle[byte]. Emit a
            chain of `if (cond) { ... } else if (cond) { ... } ... else
            { /* catch-all */ }`. *)
         let pat_test pat =
@@ -1396,13 +1602,12 @@ let rec emit_expr
         { stmts; value = result_var }
       end
 
-  | Check.T.TEArray (region_e, size_e, init_e, result_ty) ->
+  | Check.T.TEHandle (region_e, size_e, init_e, result_ty) ->
       (* Bump-allocate N*sizeof(T) inside the region's buffer. Returns
          a handle {region, offset, len, expected_gen}. The handle is
          copyable; the buffer is owned by the region. *)
       let cr = emit_expr ctor_map region_e in
       let cn = emit_expr ctor_map size_e in
-      let cv = emit_expr ctor_map init_e in
       let r_var = fresh "_r" in
       let n_var = fresh "_n" in
       let off_var = fresh "_off" in
@@ -1411,7 +1616,7 @@ let rec emit_expr
       let arr_var = fresh "_arr" in
       let arr_c = c_type result_ty in
       let elem_c = c_type (ty_of_expr init_e) in
-      let stmts = cr.stmts @ cn.stmts @ cv.stmts @ [
+      let region_setup = cr.stmts @ cn.stmts @ [
         Printf.sprintf "Region %s = %s;" r_var cr.value;
         Printf.sprintf "if (ORTO_REGIONS[%s.slot].gen != %s.expected_gen) abort();"
           r_var r_var;
@@ -1426,17 +1631,44 @@ let rec emit_expr
           r_var n_var elem_c;
         Printf.sprintf "%s* %s = (%s*)(ORTO_REGIONS[%s.slot].buffer + %s);"
           elem_c slots_var elem_c r_var off_var;
-        Printf.sprintf "for (int %s = 0; %s < %s; %s++) %s[%s] = %s;"
-          i_var i_var n_var i_var slots_var i_var cv.value;
+      ] in
+      (* Filling a single cell with a constructor (the common "box" /
+         recursive-data case): write the active variant's fields straight
+         into the cell. The obvious `cell = (T){...}` would force C to
+         zero the whole union (the inactive, larger variant's bytes) —
+         pure waste, since the tag gates every read. Direct field writes
+         touch only live bytes, like C does. *)
+      let init_stmts =
+        match init_e, size_e with
+        | Check.T.TECtor (c, _, args, _), Check.T.TEInt 1L ->
+            let arg_codes = List.map (emit_expr ctor_map) args in
+            let (_, _, tag) =
+              try Hashtbl.find ctor_map c
+              with Not_found -> failwith (Printf.sprintf "emit: unknown ctor %S" c)
+            in
+            List.concat_map (fun a -> a.stmts) arg_codes
+            @ [ Printf.sprintf "%s[0].tag = %d;" slots_var tag ]
+            @ List.mapi (fun i a ->
+                Printf.sprintf "%s[0].as.%s.f%d = %s;" slots_var c i a.value)
+                arg_codes
+        | _ ->
+            let cv = emit_expr ctor_map init_e in
+            cv.stmts @ [
+              Printf.sprintf "for (int %s = 0; %s < %s; %s++) %s[%s] = %s;"
+                i_var i_var n_var i_var slots_var i_var cv.value;
+            ]
+      in
+      let handle = [
         Printf.sprintf
           "%s %s = ((%s){ .slot = %s.slot, .offset = %s, .len = %s, .expected_gen = %s.expected_gen });"
           arr_c arr_var arr_c r_var off_var n_var r_var;
       ] in
-      { stmts; value = arr_var }
+      { stmts = region_setup @ init_stmts @ handle; value = arr_var }
 
-  | Check.T.TEArrayLit (region_e, elems, result_ty) ->
+
+  | Check.T.TEHandleLit (region_e, elems, result_ty) ->
       (* array(r, [v0..vN-1]): bump-allocate N slots in r, store the
-         literal values in order. Same shape as TEArray but each slot
+         literal values in order. Same shape as TEHandle but each slot
          gets its own value instead of a single fill. *)
       let cr = emit_expr ctor_map region_e in
       let elem_codes = List.map (emit_expr ctor_map) elems in
@@ -1446,8 +1678,8 @@ let rec emit_expr
       let arr_var = fresh "_arr" in
       let arr_c = c_type result_ty in
       let elem_ty = match result_ty with
-        | TyApp ("Array", [inner]) -> inner
-        | _ -> failwith "emit TEArrayLit: result not Array[_]"
+        | TyApp ("Handle", [inner]) -> inner
+        | _ -> failwith "emit TEHandleLit: result not Handle[_]"
       in
       let elem_c = c_type elem_ty in
       let n = List.length elems in
@@ -1491,11 +1723,12 @@ let rec emit_expr
         Printf.sprintf "int %s = ORTO_REGION_FREE_HEAD;" slot_var;
         Printf.sprintf
           "ORTO_REGION_FREE_HEAD = ORTO_REGIONS[%s].next_free;" slot_var;
+        (* Reuse the slot's pooled buffer if it's big enough (drop keeps
+           it). Avoids a fresh malloc + page faults when arenas are
+           created and destroyed in a loop. free(NULL) is a no-op. *)
         Printf.sprintf
-          "ORTO_REGIONS[%s].buffer = malloc((size_t)%s);" slot_var n_var;
-        Printf.sprintf "if (!ORTO_REGIONS[%s].buffer) abort();" slot_var;
-        Printf.sprintf "ORTO_REGIONS[%s].buffer_size = (size_t)%s;"
-          slot_var n_var;
+          "if (ORTO_REGIONS[%s].buffer == NULL || ORTO_REGIONS[%s].buffer_size < (size_t)%s) { free(ORTO_REGIONS[%s].buffer); ORTO_REGIONS[%s].buffer = malloc((size_t)%s); if (!ORTO_REGIONS[%s].buffer) abort(); ORTO_REGIONS[%s].buffer_size = (size_t)%s; }"
+          slot_var slot_var n_var slot_var slot_var n_var slot_var slot_var n_var;
         Printf.sprintf "ORTO_REGIONS[%s].used = 0;" slot_var;
         Printf.sprintf "ORTO_REGIONS[%s].next_free = -1;" slot_var;
         Printf.sprintf "ORTO_REGIONS[%s].is_stack = 0;" slot_var;
@@ -1523,6 +1756,7 @@ let rec emit_expr
         Printf.sprintf "int %s = ORTO_REGION_FREE_HEAD;" slot_var;
         Printf.sprintf
           "ORTO_REGION_FREE_HEAD = ORTO_REGIONS[%s].next_free;" slot_var;
+        Printf.sprintf "free(ORTO_REGIONS[%s].buffer);" slot_var;  (* drop a pooled heap buffer if any *)
         Printf.sprintf "ORTO_REGIONS[%s].buffer = %s;" slot_var stor_var;
         Printf.sprintf "ORTO_REGIONS[%s].buffer_size = (size_t)%s;"
           slot_var n_var;
@@ -1556,6 +1790,7 @@ let rec emit_expr
         Printf.sprintf
           "if (posix_memalign(&%s, (size_t)%s, (size_t)%s) != 0) abort();"
           buf_var a_var n_var;
+        Printf.sprintf "free(ORTO_REGIONS[%s].buffer);" slot_var;  (* drop a pooled heap buffer if any *)
         Printf.sprintf "ORTO_REGIONS[%s].buffer = (char*)%s;"
           slot_var buf_var;
         Printf.sprintf "ORTO_REGIONS[%s].buffer_size = (size_t)%s;"
@@ -1595,6 +1830,17 @@ let rec emit_expr
       ] in
       { stmts; value = "0" }
 
+  | Check.T.TEAssignField (place, fname, val_e) ->
+      (* Write a field through a place path. The place becomes a C
+         lvalue (index steps emit their gen/bounds checks); the final
+         field write goes straight to it — no whole-struct copy. *)
+      let (pstmts, lvalue) = emit_place ctor_map place in
+      let cv = emit_expr ctor_map val_e in
+      let stmts = pstmts @ cv.stmts @ [
+        Printf.sprintf "(%s).%s = %s;" lvalue fname cv.value
+      ] in
+      { stmts; value = "0" }
+
   | Check.T.TELen (arr_e, _) ->
       let ca = emit_expr ctor_map arr_e in
       let value = match arr_e with
@@ -1608,8 +1854,8 @@ let rec emit_expr
       (* slice(a, lo, hi): produce a new handle into the same region.
          Bounds: 0 <= lo <= hi <= len. Gen check still happens — the
          slice is alive only while the source region is alive. The
-         element type carries through, so slice(s: Array[byte], ...)
-         returns Array[byte]; slice(xs: Array[T], ...) returns Array[T]. *)
+         element type carries through, so slice(s: Handle[byte], ...)
+         returns Handle[byte]; slice(xs: Handle[T], ...) returns Handle[T]. *)
       let ca  = emit_expr ctor_map arr_e in
       let clo = emit_expr ctor_map lo_e in
       let chi = emit_expr ctor_map hi_e in
@@ -1620,8 +1866,8 @@ let rec emit_expr
       let arr_c = c_type result_ty in
       let elem_c =
         match result_ty with
-        | TyApp ("Array", [inner]) -> c_type inner
-        | _ -> failwith "emit TESlice: result not Array[_]"
+        | TyApp ("Handle", [inner]) -> c_type inner
+        | _ -> failwith "emit TESlice: result not Handle[_]"
       in
       let stmts = ca.stmts @ clo.stmts @ chi.stmts @ [
         Printf.sprintf "%s %s = %s;" arr_c a_var ca.value;
@@ -1641,39 +1887,34 @@ let rec emit_expr
 
   | Check.T.TEToInt sub ->
       let cs = emit_expr ctor_map sub in
-      { stmts = cs.stmts;
-        value = Printf.sprintf "((int)(%s))" cs.value }
+      let value = match ty_of_expr sub with
+        | TyPtr _ ->
+            (* address of a raw pointer as an integer *)
+            Printf.sprintf "((long long)(intptr_t)(%s))" cs.value
+        | _ -> Printf.sprintf "((long long)(%s))" cs.value
+      in
+      { stmts = cs.stmts; value }
 
   | Check.T.TEToByte sub ->
       let cs = emit_expr ctor_map sub in
       { stmts = cs.stmts;
         value = Printf.sprintf "((uint8_t)(%s))" cs.value }
 
-  | Check.T.TEToU16 sub ->
-      let cs = emit_expr ctor_map sub in
-      { stmts = cs.stmts;
-        value = Printf.sprintf "((uint16_t)(%s))" cs.value }
-
-  | Check.T.TEToU32 sub ->
-      let cs = emit_expr ctor_map sub in
-      { stmts = cs.stmts;
-        value = Printf.sprintf "((uint32_t)(%s))" cs.value }
-
-  | Check.T.TEToU64 sub ->
-      let cs = emit_expr ctor_map sub in
-      { stmts = cs.stmts;
-        value = Printf.sprintf "((uint64_t)(%s))" cs.value }
-
   | Check.T.TEToFloat sub ->
       let cs = emit_expr ctor_map sub in
       { stmts = cs.stmts;
         value = Printf.sprintf "((double)(%s))" cs.value }
 
+  | Check.T.TECast (target, sub) ->
+      let cs = emit_expr ctor_map sub in
+      { stmts = cs.stmts;
+        value = Printf.sprintf "((%s)(%s))" (c_type (TyApp (target, []))) cs.value }
+
   | Check.T.TEToIntFromFloat sub ->
       let cs = emit_expr ctor_map sub in
       (* C cast double->int truncates toward zero. *)
       { stmts = cs.stmts;
-        value = Printf.sprintf "((int)(%s))" cs.value }
+        value = Printf.sprintf "((long long)(%s))" cs.value }
 
   | Check.T.TECAlloc (et, n_e, _result_ty) ->
       let cn = emit_expr ctor_map n_e in
@@ -1698,16 +1939,16 @@ let rec emit_expr
       { stmts = cp.stmts;
         value = Printf.sprintf "((%s) == NULL)" cp.value }
 
-  | Check.T.TEArrayData (a_e, result_ty) ->
+  | Check.T.TEHandleData (a_e, result_ty) ->
       (* array_data(a) — produce a raw *T pointing at the first element
-         of the Array[T] in its region. Still gen-checks: passing
+         of the Handle[T] in its region. Still gen-checks: passing
          dangling bytes to C would crash. *)
       let ca = emit_expr ctor_map a_e in
       let a_var = fresh "_a" in
       let arr_c = c_type (ty_of_expr a_e) in
       let elem_c = match result_ty with
         | TyPtr inner -> c_type inner
-        | _ -> failwith "emit TEArrayData: result not *T"
+        | _ -> failwith "emit TEHandleData: result not *T"
       in
       let res_var = fresh "_data" in
       let stmts = ca.stmts @ [
@@ -1720,6 +1961,17 @@ let rec emit_expr
           elem_c res_var elem_c a_var a_var;
       ] in
       { stmts; value = res_var }
+
+  | Check.T.TEPtrCast (sub_e, result_ty) ->
+      (* ptr_cast[T](e) — plain C reinterpret cast to T*. No checks:
+         this is the raw world. Source is *U or an int address. *)
+      let cs = emit_expr ctor_map sub_e in
+      let elem_c = match result_ty with
+        | TyPtr inner -> c_type inner
+        | _ -> failwith "emit TEPtrCast: result not *T"
+      in
+      { stmts = cs.stmts;
+        value = Printf.sprintf "((%s*)(%s))" elem_c cs.value }
 
   | Check.T.TEDeref (p_e, _) ->
       let cp = emit_expr ctor_map p_e in
@@ -1772,6 +2024,20 @@ let rec emit_expr
       ] in
       { stmts; value = "0" }
 
+  | Check.T.TEReset sub ->
+      (* reset(r): bump the region's generation (so every outstanding Ref
+         into it now fails its gen-check), refresh the binding so future
+         allocations into r succeed, and rewind the bump pointer. The
+         operand is a region variable (checked), so cs.value is an lvalue. *)
+      let cs = emit_expr ctor_map sub in
+      let r = cs.value in
+      let stmts = cs.stmts @ [
+        Printf.sprintf "ORTO_REGIONS[%s.slot].gen++;" r;
+        Printf.sprintf "%s.expected_gen = ORTO_REGIONS[%s.slot].gen;" r r;
+        Printf.sprintf "ORTO_REGIONS[%s.slot].used = 0;" r;
+      ] in
+      { stmts; value = "0" }
+
   | Check.T.TETryAt (a_e, i_e, result_ty) ->
       (* try_at(a, i): Some(a[i]) if gen+bounds OK, else None. *)
       let ca = emit_expr ctor_map a_e in
@@ -1782,8 +2048,8 @@ let rec emit_expr
       let arr_c = c_type (ty_of_expr a_e) in
       let opt_c = c_type result_ty in
       let elem_ty = match ty_of_expr a_e with
-        | TyApp ("Array", [inner]) -> inner
-        | _ -> failwith "emit TETryAt: scrutinee not Array[_]"
+        | TyApp ("Handle", [inner]) -> inner
+        | _ -> failwith "emit TETryAt: scrutinee not Handle[_]"
       in
       let elem_c = c_type elem_ty in
       let stmts = ca.stmts @ ci.stmts @ [
@@ -1874,6 +2140,10 @@ let rec emit_expr
                 compiles inside an async function — it requires the \
                 state-machine lowering."
 
+  | Check.T.TETuple ([], _) ->
+      (* unit value — represented as C int 0 *)
+      { stmts = []; value = "0" }
+
   | Check.T.TETuple (es, result_ty) ->
       let elem_codes = List.map (emit_expr ctor_map) es in
       let stmts = List.concat_map (fun c -> c.stmts) elem_codes in
@@ -1949,7 +2219,7 @@ let rec emit_expr
   | Check.T.TEPrint (newline, parts, tys) ->
       (* writev-based print intrinsic. Each component contributes one
          iovec; formatted scalars use a per-component stack buffer.
-         Strings (Array[byte]) reference the runtime buffer directly,
+         Strings (Handle[byte]) reference the runtime buffer directly,
          zero-copy. Trailing newline (println) is an extra iovec
          pointing at a static "\n". *)
       let n_iov = List.length parts + (if newline then 1 else 0) in
@@ -1965,9 +2235,9 @@ let rec emit_expr
         incr i_iov;
         let v = ce.value in
         (match t with
-         | TyApp ("Array", [TyApp ("byte", [])]) ->
+         | TyApp ("Handle", [TyApp ("byte", [])]) ->
              let h = fresh "_h" in
-             push (Printf.sprintf "Array_byte %s = %s;" h v);
+             push (Printf.sprintf "Handle_byte %s = %s;" h v);
              push (Printf.sprintf
                "%s[%d].iov_base = ORTO_REGIONS[%s.slot].buffer + %s.offset;"
                iov i h h);
@@ -2074,14 +2344,21 @@ and index_setup ctor_map arr_e idx_e elem_c =
   let i_var = fresh "_i" in
   let arr_c = c_type (ty_of_expr arr_e) in
   match ty_of_expr arr_e with
-  | TyApp ("Array", _) ->
-      let checks = [
-        Printf.sprintf
-          "if (ORTO_REGIONS[%s.slot].gen != %s.expected_gen) abort();"
-          a_var a_var;
-        Printf.sprintf "if (%s < 0 || %s >= %s.len) abort();"
-          i_var i_var a_var;
-      ] in
+  | TyApp ("Handle", _) ->
+      let gen_check =
+        if gen_check_needed arr_e then
+          [ Printf.sprintf
+              "if (ORTO_REGIONS[%s.slot].gen != %s.expected_gen) abort();"
+              a_var a_var ]
+        else []
+      in
+      let bounds_check =
+        if bounds_check_needed arr_e idx_e then
+          [ Printf.sprintf "if (%s < 0 || %s >= %s.len) abort();"
+              i_var i_var a_var ]
+        else []
+      in
+      let checks = gen_check @ bounds_check in
       let slot =
         Printf.sprintf
           "((%s*)(ORTO_REGIONS[%s.slot].buffer + %s.offset))[%s]"
@@ -2091,13 +2368,37 @@ and index_setup ctor_map arr_e idx_e elem_c =
   | TyPtr _ ->
       (* Raw pointer indexing — no gen, no bounds. The slot expression
          doesn't use elem_c (the pointer type already carries it), but
-         we keep the parameter for symmetry with the Array branch. *)
+         we keep the parameter for symmetry with the Handle branch. *)
       let _ = elem_c in
       let slot = Printf.sprintf "%s[%s]" a_var i_var in
       (ca, ci, a_var, i_var, arr_c, [], slot)
   | t ->
       failwith (Printf.sprintf
         "emit: indexing on non-indexable type %s" (Ast.show_ty t))
+
+(* Emit a place (var / field / index chain) as a C lvalue. Returns the
+   setup statements (gen/bounds checks for any index steps) and the
+   lvalue expression. Used by field assignment to write in place. *)
+and emit_place ctor_map (e : Check.T.expr) : string list * string =
+  match e with
+  | Check.T.TEVar (x, _) -> ([], x)
+  | Check.T.TEField (p, f, _) ->
+      let (s, lv) = emit_place ctor_map p in
+      (s, Printf.sprintf "(%s).%s" lv f)
+  | Check.T.TEIndex (arr_e, idx_e, elem_ty) ->
+      let (ca, ci, a_var, i_var, arr_c, checks, slot_expr) =
+        index_setup ctor_map arr_e idx_e (c_type elem_ty)
+      in
+      let stmts = ca.stmts @ ci.stmts @ [
+        Printf.sprintf "%s %s = %s;" arr_c a_var ca.value;
+        Printf.sprintf "int %s = %s;" i_var ci.value;
+      ] @ checks in
+      (stmts, slot_expr)
+  | other ->
+      (* Not a syntactic place — parser/check restrict to the above, but
+         fall back to the value form just in case. *)
+      let c = emit_expr ctor_map other in
+      (c.stmts, c.value)
 
 (* ---------- function emission ---------- *)
 
@@ -2125,7 +2426,7 @@ let emit_extern_decl (e : Check.T.extern) : string =
       else
         String.concat ", "
           ((List.map (fun (x, t) ->
-            Printf.sprintf "%s %s" (c_type t) x) e.params)
+            Printf.sprintf "%s %s" (c_type_ffi t) x) e.params)
            @ [user_data])
     in
     Printf.sprintf "extern int %s(%s);" e.name params_s
@@ -2136,9 +2437,9 @@ let emit_extern_decl (e : Check.T.extern) : string =
       else
         String.concat ", "
           (List.map (fun (x, t) ->
-            Printf.sprintf "%s %s" (c_type t) x) e.params)
+            Printf.sprintf "%s %s" (c_type_ffi t) x) e.params)
     in
-    Printf.sprintf "extern %s %s(%s);" (c_type e.return_ty) e.name params_s
+    Printf.sprintf "extern %s %s(%s);" (c_type_ffi e.return_ty) e.name params_s
 
 (* Parameter list of a function as it appears in C. A lifted closure
    (captures <> []) takes its environment as a leading `void *env`. *)
@@ -2146,7 +2447,7 @@ let func_params_c (f : Check.T.func) : string =
   let typed =
     List.map (fun (x, t) -> Printf.sprintf "%s %s" (c_type t) x) f.params
   in
-  let all = if f.captures = [] then typed else "void *env" :: typed in
+  let all = if f.takes_env then "void *env" :: typed else typed in
   match all with [] -> "void" | _ -> String.concat ", " all
 
 let emit_func_decl (f : Check.T.func) : string =
@@ -2188,6 +2489,15 @@ let emit_env_structs (funcs : Check.T.func list) : string list =
 
 let emit_func_def ctor_map (f : Check.T.func) : string =
   reset_counter ();
+  reset_provenance ();
+  collect_unsafe f.body;
+  (* A Region parameter is borrowed: the owner is up the stack and
+     cannot free it before this synchronous call returns, so it is alive
+     for the whole body. Seed it as a live region. *)
+  List.iter (fun (p, t) ->
+    match t with TyApp ("Region", []) -> Hashtbl.replace live_regions p () | _ -> ())
+    f.params;
+  elide_enabled := true;
   let params_s = func_params_c f in
   (* Lifted closure: unpack each captured value from the environment
      struct into a local of the same name the body expects. *)
@@ -2200,6 +2510,7 @@ let emit_func_def ctor_map (f : Check.T.func) : string =
            Printf.sprintf "%s %s = __e->f%d;" (c_type t) n i) f.captures
   in
   let cb = emit_expr ctor_map f.body in
+  elide_enabled := false;
   let body_lines =
     env_preamble @ cb.stmts @ [Printf.sprintf "return %s;" cb.value]
   in
@@ -2300,8 +2611,8 @@ let async_collect_locals (body : Check.T.expr) : (string * ty) list =
         go s;
         List.iter (fun (_, g, b) ->
           (match g with None -> () | Some g -> go g); go b) arms
-    | TEArray (r, n, v, _) -> go r; go n; go v
-    | TEArrayLit (r, es, _) -> go r; List.iter go es
+    | TEHandle (r, n, v, _) -> go r; go n; go v
+    | TEHandleLit (r, es, _) -> go r; List.iter go es
     | TERegion (n, _) -> go n
     | TEStackRegion (n, _) -> go n
     | TEAlignedRegion (n, a, _) -> go n; go a
@@ -2309,18 +2620,21 @@ let async_collect_locals (body : Check.T.expr) : (string * ty) list =
     | TEAssignIdx (a, i, v, _) -> go a; go i; go v
     | TELen (e, _) -> go e
     | TESlice (a, lo, hi, _) -> go a; go lo; go hi
-    | TEToInt e | TEToByte e | TEToFloat e | TEToIntFromFloat e
-    | TEToU16 e | TEToU32 e | TEToU64 e -> go e
+    | TECast (_, e)
+    | TEToInt e | TEToByte e | TEToFloat e | TEToIntFromFloat e -> go e
     | TECAlloc (_, n, _) -> go n
     | TECFree e -> go e
     | TEIsNull e -> go e
-    | TEArrayData (a, _) -> go a
+    | TEHandleData (a, _) -> go a
+    | TEPtrCast (e, _) -> go e
     | TEDeref (p, _) -> go p
     | TEAssign (_, v, _) -> go v
+    | TEAssignField (p, _, v) -> go p; go v
     | TEWhile (c, b) -> go c; go b
     | TEReturn (v, _) -> go v
     | TETryAt (a, i, _) -> go a; go i
     | TEDrop (e, _) -> go e
+    | TEReset e -> go e
     | TEAwait (e, _, _) -> go e
     | TESpawn (e, _) -> go e
     | TEForStream (x, t, s, b) -> add x t; go s; go b
@@ -2382,8 +2696,8 @@ let async_rewrite_to_frame
           List.map (fun (p, g, b) -> (p, Option.map go g, go b)) arms
         in
         TEMatch (go s, st, arms', rt)
-    | TEArray (r, n, v, t) -> TEArray (go r, go n, go v, t)
-    | TEArrayLit (r, es, t) -> TEArrayLit (go r, List.map go es, t)
+    | TEHandle (r, n, v, t) -> TEHandle (go r, go n, go v, t)
+    | TEHandleLit (r, es, t) -> TEHandleLit (go r, List.map go es, t)
     | TERegion (n, t) -> TERegion (go n, t)
     | TEStackRegion (n, t) -> TEStackRegion (go n, t)
     | TEAlignedRegion (n, a, t) -> TEAlignedRegion (go n, go a, t)
@@ -2393,21 +2707,22 @@ let async_rewrite_to_frame
     | TESlice (a, lo, hi, t) -> TESlice (go a, go lo, go hi, t)
     | TEToInt e -> TEToInt (go e)
     | TEToByte e -> TEToByte (go e)
-    | TEToU16 e -> TEToU16 (go e)
-    | TEToU32 e -> TEToU32 (go e)
-    | TEToU64 e -> TEToU64 (go e)
     | TEToFloat e -> TEToFloat (go e)
+    | TECast (t, e) -> TECast (t, go e)
     | TEToIntFromFloat e -> TEToIntFromFloat (go e)
     | TECAlloc (et, n, rt) -> TECAlloc (et, go n, rt)
     | TECFree e -> TECFree (go e)
     | TEIsNull e -> TEIsNull (go e)
-    | TEArrayData (a, t) -> TEArrayData (go a, t)
+    | TEHandleData (a, t) -> TEHandleData (go a, t)
+    | TEPtrCast (e, t) -> TEPtrCast (go e, t)
     | TEDeref (p, t) -> TEDeref (go p, t)
     | TEAssign (x, v, t) -> TEAssign (rename x, go v, t)
+    | TEAssignField (p, f, v) -> TEAssignField (go p, f, go v)
     | TEWhile (c, b) -> TEWhile (go c, go b)
     | TEReturn (v, t) -> TEReturn (go v, t)
     | TETryAt (a, i, t) -> TETryAt (go a, go i, t)
     | TEDrop (e, t) -> TEDrop (go e, t)
+    | TEReset e -> TEReset (go e)
     | TEAwait (e, t, p) -> TEAwait (go e, t, p)
     | TESpawn (e, t) -> TESpawn (go e, t)
     | TEForStream (x, et, s, b) ->
@@ -2459,9 +2774,9 @@ let rec emit_has_suspension (e : Check.T.expr) : bool =
       || List.exists (fun (_, g, b) ->
            (match g with None -> false | Some g -> emit_has_suspension g)
            || emit_has_suspension b) arms
-  | TEArray (r, n, v, _) ->
+  | TEHandle (r, n, v, _) ->
       emit_has_suspension r || emit_has_suspension n || emit_has_suspension v
-  | TEArrayLit (r, es, _) ->
+  | TEHandleLit (r, es, _) ->
       emit_has_suspension r || List.exists emit_has_suspension es
   | TERegion (n, _) -> emit_has_suspension n
   | TEStackRegion (n, _) -> emit_has_suspension n
@@ -2473,19 +2788,23 @@ let rec emit_has_suspension (e : Check.T.expr) : bool =
   | TELen (e, _) -> emit_has_suspension e
   | TESlice (a, lo, hi, _) ->
       emit_has_suspension a || emit_has_suspension lo || emit_has_suspension hi
-  | TEToInt e | TEToByte e | TEToFloat e | TEToIntFromFloat e
-  | TEToU16 e | TEToU32 e | TEToU64 e ->
+  | TECast (_, e)
+  | TEToInt e | TEToByte e | TEToFloat e | TEToIntFromFloat e ->
       emit_has_suspension e
   | TECAlloc (_, n, _) -> emit_has_suspension n
   | TECFree e -> emit_has_suspension e
   | TEIsNull e -> emit_has_suspension e
-  | TEArrayData (a, _) -> emit_has_suspension a
+  | TEHandleData (a, _) -> emit_has_suspension a
+  | TEPtrCast (e, _) -> emit_has_suspension e
   | TEDeref (p, _) -> emit_has_suspension p
   | TEAssign (_, v, _) -> emit_has_suspension v
+  | TEAssignField (p, _, v) ->
+      emit_has_suspension p || emit_has_suspension v
   | TEWhile (c, b) -> emit_has_suspension c || emit_has_suspension b
   | TEReturn (v, _) -> emit_has_suspension v
   | TETryAt (a, i, _) -> emit_has_suspension a || emit_has_suspension i
   | TEDrop (e, _) -> emit_has_suspension e
+  | TEReset e -> emit_has_suspension e
   | TETuple (es, _) -> List.exists emit_has_suspension es
   | TETupleIdx (e, _, _) -> emit_has_suspension e
   | TELetTuple (_, _, v, b, _, _) ->
@@ -2529,8 +2848,8 @@ let allocate_await_all_locals_in_body (body : Check.T.expr) : Check.T.expr =
     | TEMatch (s, st, arms, rt) ->
         TEMatch (go s, st,
           List.map (fun (p, g, b) -> (p, Option.map go g, go b)) arms, rt)
-    | TEArray (re, n, v, t) -> TEArray (go re, go n, go v, t)
-    | TEArrayLit (re, es, t) -> TEArrayLit (go re, List.map go es, t)
+    | TEHandle (re, n, v, t) -> TEHandle (go re, go n, go v, t)
+    | TEHandleLit (re, es, t) -> TEHandleLit (go re, List.map go es, t)
     | TERegion (n, t) -> TERegion (go n, t)
     | TEStackRegion (n, t) -> TEStackRegion (go n, t)
     | TEAlignedRegion (n, a, t) -> TEAlignedRegion (go n, go a, t)
@@ -2540,33 +2859,34 @@ let allocate_await_all_locals_in_body (body : Check.T.expr) : Check.T.expr =
     | TESlice (a, lo, hi, t) -> TESlice (go a, go lo, go hi, t)
     | TEToInt e -> TEToInt (go e)
     | TEToByte e -> TEToByte (go e)
-    | TEToU16 e -> TEToU16 (go e)
-    | TEToU32 e -> TEToU32 (go e)
-    | TEToU64 e -> TEToU64 (go e)
     | TEToFloat e -> TEToFloat (go e)
+    | TECast (t, e) -> TECast (t, go e)
     | TEToIntFromFloat e -> TEToIntFromFloat (go e)
     | TECAlloc (et, n, t) -> TECAlloc (et, go n, t)
     | TECFree e -> TECFree (go e)
     | TEIsNull e -> TEIsNull (go e)
-    | TEArrayData (a, t) -> TEArrayData (go a, t)
+    | TEHandleData (a, t) -> TEHandleData (go a, t)
+    | TEPtrCast (e, t) -> TEPtrCast (go e, t)
     | TEDeref (p, t) -> TEDeref (go p, t)
     | TEAssign (x, v, t) -> TEAssign (x, go v, t)
+    | TEAssignField (p, f, v) -> TEAssignField (go p, f, go v)
     | TEWhile (c, b) -> TEWhile (go c, go b)
     | TEReturn (v, t) -> TEReturn (go v, t)
     | TETryAt (a, i, t) -> TETryAt (go a, go i, t)
     | TEDrop (e, t) -> TEDrop (go e, t)
+    | TEReset e -> TEReset (go e)
     | TEAwait (e, t, p) ->
-        (* Dynamic await-all: result type is Array[Result[T]] and the
-           inner expression has type Array[Task[T]].  Pre-allocate the
+        (* Dynamic await-all: result type is Handle[Result[T]] and the
+           inner expression has type Handle[Task[T]].  Pre-allocate the
            loop counters and the result-array handle as frame locals so
            they survive across CQE-driven suspensions inside the loop. *)
         (match t with
-         | TyApp ("Array", [_]) ->
+         | TyApp ("Handle", [_]) ->
              let k = !dyn_await_index in
              incr dyn_await_index;
              (* After mono, p is the mono'd inner T; the coll's type
-                in the frame is `Array_Task_<pty>`. *)
-             let coll_mangled = "Array_Task_" ^ Mono.mangle_ty p in
+                in the frame is `Ref_Task_<pty>`. *)
+             let coll_mangled = "Handle_Task_" ^ Mono.mangle_ty p in
              let res_ty = t in
              await_all_synth_locals :=
                (Printf.sprintf "_dawn%d_arr" k, TyApp (coll_mangled, [])) ::
@@ -2640,8 +2960,8 @@ let rec desugar_let_tuples (e : Check.T.expr) : Check.T.expr =
   | TEMatch (s, st, arms, rt) ->
       TEMatch (r s, st,
         List.map (fun (p, g, b) -> (p, Option.map r g, r b)) arms, rt)
-  | TEArray (re, n, v, t) -> TEArray (r re, r n, r v, t)
-  | TEArrayLit (re, es, t) -> TEArrayLit (r re, List.map r es, t)
+  | TEHandle (re, n, v, t) -> TEHandle (r re, r n, r v, t)
+  | TEHandleLit (re, es, t) -> TEHandleLit (r re, List.map r es, t)
   | TERegion (n, t) -> TERegion (r n, t)
   | TEStackRegion (n, t) -> TEStackRegion (r n, t)
   | TEAlignedRegion (n, a, t) -> TEAlignedRegion (r n, r a, t)
@@ -2651,21 +2971,22 @@ let rec desugar_let_tuples (e : Check.T.expr) : Check.T.expr =
   | TESlice (a, lo, hi, t) -> TESlice (r a, r lo, r hi, t)
   | TEToInt e -> TEToInt (r e)
   | TEToByte e -> TEToByte (r e)
-  | TEToU16 e -> TEToU16 (r e)
-  | TEToU32 e -> TEToU32 (r e)
-  | TEToU64 e -> TEToU64 (r e)
   | TEToFloat e -> TEToFloat (r e)
+  | TECast (t, e) -> TECast (t, r e)
   | TEToIntFromFloat e -> TEToIntFromFloat (r e)
   | TECAlloc (et, n, t) -> TECAlloc (et, r n, t)
   | TECFree e -> TECFree (r e)
   | TEIsNull e -> TEIsNull (r e)
-  | TEArrayData (a, t) -> TEArrayData (r a, t)
+  | TEHandleData (a, t) -> TEHandleData (r a, t)
+  | TEPtrCast (e, t) -> TEPtrCast (r e, t)
   | TEDeref (p, t) -> TEDeref (r p, t)
   | TEAssign (x, v, t) -> TEAssign (x, r v, t)
+  | TEAssignField (p, f, v) -> TEAssignField (r p, f, r v)
   | TEWhile (c, b) -> TEWhile (r c, r b)
   | TEReturn (v, t) -> TEReturn (r v, t)
   | TETryAt (a, i, t) -> TETryAt (r a, r i, t)
   | TEDrop (e, t) -> TEDrop (r e, t)
+  | TEReset e -> TEReset (r e)
   | TEAwait (e, t, p) -> TEAwait (r e, t, p)
   | TESpawn (e, t) -> TESpawn (r e, t)
   | TEForStream (x, et, s, b) -> TEForStream (x, et, r s, r b)
@@ -2900,7 +3221,7 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
   (* Assignment into a 16-byte header slot (return_value/last_res/
      slot.result). Always memcpy from a typed temp — covers scalar T
      (int/byte/bool/float/pointer), 8-byte structs (Region), and
-     16-byte aggregates (Array). The slot is zeroed first so reads of
+     16-byte aggregates (Handle). The slot is zeroed first so reads of
      T smaller than 16 don't pick up stale high bytes. *)
   let assign_to_blob lvalue value_str ty =
     let c_ty = c_type ty in
@@ -2984,9 +3305,9 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
     match e with
     | TEAwait (inner, result_ty, pty)
       when (match result_ty with
-            | TyApp ("Array", [_]) -> true
+            | TyApp ("Handle", [_]) -> true
             | _ -> false) ->
-        (* Dynamic await-all on Array[Task[T]] -> Array[Result[T]].
+        (* Dynamic await-all on Handle[Task[T]] -> Handle[Result[T]].
            The pre-pass allocated frame locals named `_dawn{k}_*`; we
            re-use the same k here via dyn_await_walk_index. *)
         let k = !dyn_await_walk_index in
@@ -3240,7 +3561,7 @@ let async_split_segments ctor_map (return_ty : ty) (body : Check.T.expr) : (int 
           start_segment n_state;
           (* last_res is now uint8_t[16] (phase 10). Probe the first
              4 bytes as the CQE int result, build Ok/Err from there
-             with memcpy for the Ok payload (covers Region, Array,
+             with memcpy for the Ok payload (covers Region, Handle,
              nested-tuple etc.). Mirrors store_await_result. *)
           let result_c = "Result_" ^ Mono.mangle_ty pty in
           let c_pty = c_type pty in
@@ -3624,6 +3945,7 @@ let emit ?(slots=1024) ?(cores=1) ?(ring_entries=64) ?(test_mode=false) (prog : 
   let rec_forwards = List.map emit_record_forward prog.records in
   let array_forwards = emit_array_forwards () in
   let task_forwards = emit_task_forwards () in
+  let tuple_fwd_decls = emit_tuple_fwd_decls () in
   let tuple_forwards = emit_tuple_forwards () in
   let tuple_drop_forwards = emit_tuple_drop_forwards () in
   let tuple_drop_defs = emit_tuple_drop_defs () in
@@ -3702,7 +4024,7 @@ let emit ?(slots=1024) ?(cores=1) ?(ring_entries=64) ?(test_mode=false) (prog : 
            /* The header lives at the prefix of every Frame_<X>. We use\n\
             * long long for last_res and return_value so any T up to 8\n\
             * bytes (int, byte, bool, Region, Task, Stream, raw pointer,\n\
-            * double via bitcast, Region's 8-byte handle, Array's\n\
+            * double via bitcast, Region's 8-byte handle, Handle's\n\
             * 16-byte handle, every 2-/3-/4-component tuple of those)\n\
             * can travel through the slot pool without per-T machinery.\n\
             * Wider returns must currently be Region-boxed. */\n\
@@ -3914,6 +4236,24 @@ let emit ?(slots=1024) ?(cores=1) ?(ring_entries=64) ?(test_mode=false) (prog : 
      #include <stdio.h>\n\
      #include <unistd.h>\n\
      #include <sys/uio.h>\n\
+     #include <time.h>\n\
+     \n\
+     /* Monotonic clock for std/time. Returns microseconds (truncated to\n\
+      * the platform int). Absolute value may wrap, but differences over\n\
+      * any reasonable interval are exact — use for measuring durations. */\n\
+     int orto_now_us(void) {\n\
+     \    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);\n\
+     \    return (int)((long long)ts.tv_sec * 1000000 + ts.tv_nsec / 1000);\n\
+     }\n\
+     int orto_now_ms(void) {\n\
+     \    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);\n\
+     \    return (int)((long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000);\n\
+     }\n\
+     /* 64-bit nanoseconds — never wraps in practice. The Go-style API. */\n\
+     int64_t orto_now_ns(void) {\n\
+     \    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);\n\
+     \    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;\n\
+     }\n\
      \n\
      /* Concurrency mode, set by orto's --cores N flag (default 1).\n\
       * cores=1 → single-thread runtime, no pthread dependency.\n\
@@ -3943,23 +4283,27 @@ let emit ?(slots=1024) ?(cores=1) ?(ring_entries=64) ?(test_mode=false) (prog : 
       * 64-bit so it can't wrap in any realistic uptime — even at\n\
       * 1G reuses/s per slot, wrapping takes ~300 years. */\n\
      struct Region_slot {\n\
-     \    long long gen;\n\
+     \    int gen;\n\
      \    char* buffer;\n\
      \    size_t buffer_size;\n\
      \    size_t used;\n\
      \    int next_free;   /* -1 if in use, else next free slot id */\n\
      \    int is_stack;    /* 1 if buffer is stack memory (do not free) */\n\
      };\n\
-     typedef struct { int slot; long long expected_gen; } Region;\n\
+     typedef struct { int slot; int expected_gen; } Region;\n\
      ORTO_TLS struct Region_slot ORTO_REGIONS[ORTO_REGION_SLOTS];\n\
      ORTO_TLS int ORTO_REGION_FREE_HEAD = -1;\n\
      \n\
      static void drop_Region(Region r) {\n\
      \    if (ORTO_REGIONS[r.slot].gen != r.expected_gen) return;\n\
-     \    if (!ORTO_REGIONS[r.slot].is_stack)\n\
-     \        free(ORTO_REGIONS[r.slot].buffer);\n\
-     \    ORTO_REGIONS[r.slot].buffer = NULL;\n\
-     \    ORTO_REGIONS[r.slot].buffer_size = 0;\n\
+     \    /* A heap buffer is KEPT on the slot so the next region() that\n\
+     \     * reuses this slot can reuse the buffer (no malloc / re-fault).\n\
+     \     * Stack buffers die with the C frame, so they can't be pooled. */\n\
+     \    if (ORTO_REGIONS[r.slot].is_stack) {\n\
+     \        ORTO_REGIONS[r.slot].buffer = NULL;\n\
+     \        ORTO_REGIONS[r.slot].buffer_size = 0;\n\
+     \        ORTO_REGIONS[r.slot].is_stack = 0;\n\
+     \    }\n\
      \    ORTO_REGIONS[r.slot].used = 0;\n\
      \    ORTO_REGIONS[r.slot].gen++;\n\
      \    ORTO_REGIONS[r.slot].next_free = ORTO_REGION_FREE_HEAD;\n\
@@ -3999,6 +4343,7 @@ let emit ?(slots=1024) ?(cores=1) ?(ring_entries=64) ?(test_mode=false) (prog : 
     ([header]
      @ adt_forwards
      @ rec_forwards
+     @ tuple_fwd_decls
      @ array_forwards
      @ task_forwards
      @ fn_typedefs

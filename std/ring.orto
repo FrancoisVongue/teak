@@ -1,0 +1,50 @@
+// std/ring.orto — a fixed-capacity ring (circular) buffer over a Ref.
+// FIFO: push appends at the tail; when full, push drops the oldest. pop
+// removes from the head. Both return the updated ring (it is a value).
+
+struct Ring[T] { data: Handle[T], cap: int, head: int, count: int, zero: T }
+
+fn new[T](r: Region, cap: int, zero: T) -> Ring[T] {
+    let c = if cap < 1 { 1 } else { cap };
+    Ring { data: ref(r, c, zero), cap: c, head: 0, count: 0, zero: zero }
+}
+
+fn size[T](rg: Ring[T]) -> int { rg.count }
+fn capacity[T](rg: Ring[T]) -> int { rg.cap }
+fn is_empty[T](rg: Ring[T]) -> bool { rg.count == 0 }
+fn is_full[T](rg: Ring[T]) -> bool { rg.count == rg.cap }
+
+fn push[T](rg: Ring[T], x: T) -> Ring[T] {
+    let tail = (rg.head + rg.count) % rg.cap;
+    rg.data[tail] := x;
+    if rg.count < rg.cap {
+        Ring { ..rg, count: rg.count + 1 }
+    } else {
+        Ring { ..rg, head: (rg.head + 1) % rg.cap }   // full -> overwrite oldest
+    }
+}
+
+fn pop[T](rg: Ring[T]) -> (Ring[T], Option[T]) {
+    if rg.count == 0 {
+        (rg, None)
+    } else {
+        let x = rg.data[rg.head];
+        (Ring { ..rg, head: (rg.head + 1) % rg.cap, count: rg.count - 1 }, Some(x))
+    }
+}
+
+// Front element without removing it.
+fn peek[T](rg: Ring[T]) -> Option[T] {
+    if rg.count == 0 { None } else { Some(rg.data[rg.head]) }
+}
+
+fn clear[T](rg: Ring[T]) -> Ring[T] { Ring { ..rg, head: 0, count: 0 } }
+
+// Visit elements oldest-first.
+fn each[T](rg: Ring[T], f: fn(T) -> ()) -> () {
+    let mut i = 0;
+    while i < rg.count {
+        f(rg.data[(rg.head + i) % rg.cap]);
+        i := i + 1;
+    }
+}

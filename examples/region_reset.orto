@@ -1,0 +1,24 @@
+// reset(r) — rewind a region for reuse (per-frame / per-request arenas).
+// After reset: the bump pointer is back to 0, the generation is bumped
+// (so refs from before the reset are dead), and r is ready for new
+// allocations. This is the core arena operation, not sugar.
+
+fn main() -> int {
+    arena r = region(1024);
+
+    // Round 1: allocate, use.
+    let a = ref(r, 10);
+    let x = a[0];              // 10
+
+    // Rewind. `a` is now stale: touching a[0] would abort.
+    reset(r);
+
+    // Round 2: same region, fresh allocations from offset 0.
+    let b = ref(r, 32);
+    let y = b[0];              // 32
+
+    let c = ref(r, 100);
+    let z = c[0];              // 100
+
+    x + y + z - 42             // 10 + 32 + 100 - 42 = 100
+}

@@ -1,0 +1,54 @@
+// Regression test for str + fmt. Each passing check adds 1 to the score.
+
+use str::{eq, compare, concat, dup, find, contains, starts_with, ends_with, count, trim, to_upper, to_lower, from_int, parse_int, repeat, reverse, replace, index_of, last_index_of, split, join, hash, is_empty};
+use vec::{Vec, get, slice_of};
+use fmt::{format};
+
+fn check_str(r: Region) -> int {
+    let mut s = 0;
+    if str::eq("abc", "abc") && !str::eq("abc", "abd") { s := s + 1; }
+    if str::compare("abc", "abd") < 0 && str::compare("b", "a") > 0 { s := s + 1; }
+    if str::find("hello world", "world") == 6 && str::find("abc", "z") == 0 - 1 { s := s + 1; }
+    if str::contains("hello", "ell") { s := s + 1; }
+    if str::starts_with("hello", "he") && str::ends_with("hello", "lo") { s := s + 1; }
+    if str::count("aXaXaX", "a") == 3 { s := s + 1; }
+    if str::eq(str::trim("  hi  "), "hi") { s := s + 1; }
+    if str::eq(str::to_upper(r, "abc"), "ABC") && str::eq(str::to_lower(r, "ABC"), "abc") { s := s + 1; }
+    if str::eq(str::from_int(r, 0 - 42), "-42") && str::eq(str::from_int(r, 0), "0") { s := s + 1; }
+    match str::parse_int("123") { Some(n) => if n == 123 { s := s + 1; }, None => (), }
+    match str::parse_int("-7") { Some(n) => if n == 0 - 7 { s := s + 1; }, None => (), }
+    match str::parse_int("xy") { Some(_) => (), None => s := s + 1, }
+    if str::eq(str::repeat(r, "ab", 3), "ababab") { s := s + 1; }
+    if str::eq(str::reverse(r, "abc"), "cba") { s := s + 1; }
+    if str::eq(str::replace(r, "a.b.c", ".", "-"), "a-b-c") { s := s + 1; }
+    if str::eq(str::concat(r, "foo", "bar"), "foobar") { s := s + 1; }
+    if str::index_of("hello", 108) == 2 && str::last_index_of("hello", 108) == 3 { s := s + 1; }
+    if is_empty("") && !is_empty("x") { s := s + 1; }
+    if str::hash("abc") == str::hash("abc") && str::hash("abc") != str::hash("abd") { s := s + 1; }
+    s                                                           // 19
+}
+
+fn check_split_join(r: Region) -> int {
+    let mut s = 0;
+    let parts = str::split(r, "a,b,c", 44);                     // ','
+    if vec::get(parts, 0)[0] == to_byte(97) && vec::get(parts, 2)[0] == to_byte(99) { s := s + 1; }
+    let joined = str::join(r, vec::slice_of(parts), "-");
+    if str::eq(joined, "a-b-c") { s := s + 1; }
+    s                                                           // 2
+}
+
+fn check_fmt(r: Region) -> int {
+    let mut s = 0;
+    let parts = ref(r, [str::from_int(r, 7), str::concat(r, "x", "y")]);
+    let out = format(r, "[{}|{}]", parts);                      // "[7|xy]"
+    if str::eq(out, "[7|xy]") { s := s + 1; }
+    let lit = format(r, "{{not}}", ref(r, [str::from_int(r, 0)]));  // "{not}"
+    if str::eq(lit, "{not}") { s := s + 1; }
+    s                                                           // 2
+}
+
+fn main() -> int {
+    arena r = region(65536);
+    check_str(r) + check_split_join(r) + check_fmt(r)
+    // 19 + 2 + 2 = 23
+}

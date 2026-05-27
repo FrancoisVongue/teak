@@ -1,0 +1,193 @@
+// std/vec.orto — a growable buffer backed by a Ref in a region.
+//
+// Vec is a value (a small handle struct). Allocating operations take the
+// region explicitly and RETURN the updated Vec — like Go's append:
+//     v = vec::push(v, r, x);
+// `zero` is a sample value of T used to fill freshly grown backing cells
+// (a generic T has no implicit default, so the caller provides one once).
+//
+// Behaviour over T is injected per call (contains/index_of take `eq`,
+// map/filter/find take a closure) — never bound to the type.
+
+struct Vec[T] { data: Handle[T], count: int, cap: int, zero: T }
+
+fn new[T](r: Region, cap: int, zero: T) -> Vec[T] {
+    let c = if cap < 1 { 1 } else { cap };
+    Vec { data: ref(r, c, zero), count: 0, cap: c, zero: zero }
+}
+
+// Build a Vec by copying an existing Ref (slice) of length n.
+fn from_ref[T](r: Region, src: Handle[T], zero: T) -> Vec[T] {
+    let n = len(src);
+    let c = if n < 1 { 1 } else { n };
+    let d = ref(r, c, zero);
+    let mut i = 0;
+    while i < n { d[i] := src[i]; i := i + 1; }
+    Vec { data: d, count: n, cap: c, zero: zero }
+}
+
+// ---------- size ----------
+
+fn size[T](v: Vec[T]) -> int { v.count }
+fn capacity[T](v: Vec[T]) -> int { v.cap }
+fn is_empty[T](v: Vec[T]) -> bool { v.count == 0 }
+
+// ---------- element access ----------
+
+fn get[T](v: Vec[T], i: int) -> T { v.data[i] }
+fn set[T](v: Vec[T], i: int, x: T) -> () { v.data[i] := x; }
+fn first[T](v: Vec[T]) -> Option[T] { if v.count == 0 { None } else { Some(v.data[0]) } }
+fn last[T](v: Vec[T]) -> Option[T] {
+    if v.count == 0 { None } else { Some(v.data[v.count - 1]) }
+}
+
+// A view over the live elements (a slice of the backing). Cheap, shares memory.
+fn slice_of[T](v: Vec[T]) -> Handle[T] { slice(v.data, 0, v.count) }
+
+// ---------- growth / shrink (return a new handle) ----------
+
+fn push[T](v: Vec[T], r: Region, x: T) -> Vec[T] {
+    if v.count < v.cap {
+        v.data[v.count] := x;
+        Vec { ..v, count: v.count + 1 }
+    } else {
+        let newcap = v.cap * 2;
+        let nd = ref(r, newcap, v.zero);
+        let mut i = 0;
+        while i < v.count { nd[i] := v.data[i]; i := i + 1; }
+        nd[v.count] := x;
+        Vec { data: nd, count: v.count + 1, cap: newcap, zero: v.zero }
+    }
+}
+
+fn pop[T](v: Vec[T]) -> (Vec[T], Option[T]) {
+    if v.count == 0 {
+        (v, None)
+    } else {
+        let x = v.data[v.count - 1];
+        (Vec { ..v, count: v.count - 1 }, Some(x))
+    }
+}
+
+fn clear[T](v: Vec[T]) -> Vec[T] { Vec { ..v, count: 0 } }
+
+fn truncate[T](v: Vec[T], n: int) -> Vec[T] {
+    if n < v.count { Vec { ..v, count: if n < 0 { 0 } else { n } } } else { v }
+}
+
+fn extend[T](v: Vec[T], r: Region, other: Vec[T]) -> Vec[T] {
+    let mut acc = v;
+    let mut i = 0;
+    while i < other.count { acc := push(acc, r, other.data[i]); i := i + 1; }
+    acc
+}
+
+fn insert_at[T](v: Vec[T], r: Region, idx: int, x: T) -> Vec[T] {
+    if idx >= v.count {
+        push(v, r, x)
+    } else {
+        let nv = push(v, r, x);              // x lands at the end, count grows
+        let mut j = nv.count - 1;
+        while j > idx { swap(nv, j, j - 1); j := j - 1; }
+        nv
+    }
+}
+
+fn remove_at[T](v: Vec[T], idx: int) -> Vec[T] {
+    if idx < 0 || idx >= v.count {
+        v
+    } else {
+        let mut i = idx;
+        while i < v.count - 1 { v.data[i] := v.data[i + 1]; i := i + 1; }
+        Vec { ..v, count: v.count - 1 }
+    }
+}
+
+fn copy[T](v: Vec[T], r: Region) -> Vec[T] { from_ref(r, slice_of(v), v.zero) }
+
+// ---------- in-place reordering ----------
+
+fn swap[T](v: Vec[T], i: int, j: int) -> () {
+    let t = v.data[i];
+    v.data[i] := v.data[j];
+    v.data[j] := t;
+}
+
+fn reverse[T](v: Vec[T]) -> () {
+    let mut i = 0;
+    let mut j = v.count - 1;
+    while i < j { swap(v, i, j); i := i + 1; j := j - 1; }
+}
+
+// ---------- iteration / transformation ----------
+
+fn each[T](v: Vec[T], f: fn(T) -> ()) -> () {
+    let mut i = 0;
+    while i < v.count { f(v.data[i]); i := i + 1; }
+}
+
+fn fold[A, T](v: Vec[T], init: A, step: fn(A, T) -> A) -> A {
+    let mut acc = init;
+    let mut i = 0;
+    while i < v.count { acc := step(acc, v.data[i]); i := i + 1; }
+    acc
+}
+
+fn map[T, U](v: Vec[T], r: Region, f: fn(T) -> U, zu: U) -> Vec[U] {
+    let mut out = new(r, v.count + 1, zu);
+    let mut i = 0;
+    while i < v.count { out := push(out, r, f(v.data[i])); i := i + 1; }
+    out
+}
+
+fn filter[T](v: Vec[T], r: Region, pred: fn(T) -> bool) -> Vec[T] {
+    let mut out = new(r, v.count + 1, v.zero);
+    let mut i = 0;
+    while i < v.count {
+        if pred(v.data[i]) { out := push(out, r, v.data[i]); }
+        i := i + 1;
+    }
+    out
+}
+
+fn find[T](v: Vec[T], pred: fn(T) -> bool) -> Option[T] {
+    let mut i = 0;
+    let mut res: Option[T] = None;
+    while i < v.count {
+        if pred(v.data[i]) { res := Some(v.data[i]); i := v.count; }
+        else { i := i + 1; }
+    }
+    res
+}
+
+fn any[T](v: Vec[T], pred: fn(T) -> bool) -> bool {
+    let mut i = 0;
+    let mut r = false;
+    while i < v.count {
+        if pred(v.data[i]) { r := true; i := v.count; } else { i := i + 1; }
+    }
+    r
+}
+
+fn all[T](v: Vec[T], pred: fn(T) -> bool) -> bool {
+    let mut i = 0;
+    let mut r = true;
+    while i < v.count {
+        if pred(v.data[i]) { i := i + 1; } else { r := false; i := v.count; }
+    }
+    r
+}
+
+// eq injected — orto has no per-type equality.
+fn index_of[T](v: Vec[T], x: T, eq: fn(T, T) -> bool) -> int {
+    let mut i = 0;
+    let mut found = 0 - 1;
+    while i < v.count {
+        if eq(v.data[i], x) { found := i; i := v.count; } else { i := i + 1; }
+    }
+    found
+}
+
+fn contains[T](v: Vec[T], x: T, eq: fn(T, T) -> bool) -> bool {
+    index_of(v, x, eq) >= 0
+}

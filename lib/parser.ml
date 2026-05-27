@@ -51,8 +51,12 @@ let rec parse_ty st =
   | TU64Ty        -> TyApp ("u64", [])
   | TFloatTy      -> TyApp ("float", [])
   | TLParen       ->
-      (* Tuple type: (T1, T2, ..., Tn) for n >= 2.  A single `(T)` is
-         not supported — drop the parens. *)
+      (* `()` — the unit type (empty tuple). Otherwise a parenthesised
+         type or a tuple type (n >= 2). *)
+      if peek st = TRParen then begin
+        advance st;
+        TyTuple []
+      end else
       let first = parse_ty st in
       (match peek st with
        | TComma ->
@@ -96,6 +100,13 @@ let rec parse_ty st =
       let ret = parse_ty st in
       TyFun (args, ret)
   | TCtorIdent s  ->
+      (* The reference type is `Handle[T]`. Old names are gone. *)
+      if s = "Array" then
+        raise (Parse_error
+          "the reference type is `Handle[T]` now (it replaced `Array[T]`)");
+      if s = "Ref" then
+        raise (Parse_error
+          "the reference type was renamed to `Handle[T]` (it replaced `Ref[T]`)");
       if peek st = TLBracket then begin
         advance st;
         let args = parse_ty_list st in
@@ -103,6 +114,7 @@ let rec parse_ty st =
         TyApp (s, args)
       end else
         TyApp (s, [])
+  | TIdent name when is_numeric_type name -> TyApp (name, [])
   | t -> raise (Parse_error
     (Printf.sprintf "expected type, got %s" (Token.show t)))
 
@@ -159,9 +171,9 @@ let parse_binop_chain st (ops : (token * binop) list) lower =
 
 let rec parse_expr st = parse_assign st
 
-(* `:=` is allowed in two shapes:
-     `a[i] := v` — array slot assignment (always allowed)
-     `x := v`    — variable reassignment (requires `let mut x = ...`) *)
+(* `:=` is allowed on a place: a variable, an array slot, or a field
+   of a place. Examples: `x := v` (needs `let mut x`), `a[i] := v`,
+   `s.f := v`, `r[i].f := v`, `s.f.g := v`. *)
 and parse_assign st =
   let lhs = parse_pipe st in
   if peek st = TColonEq then begin
@@ -170,8 +182,10 @@ and parse_assign st =
     match lhs with
     | EIndex (arr, idx) -> EAssignIdx (arr, idx, rhs)
     | EVar x -> EAssign (x, rhs)
+    | EField (place, fname) -> EAssignField (place, fname, rhs)
     | _ -> raise (Parse_error
-        "`:=` requires a variable name or array indexing on the left")
+        "`:=` requires a place on the left: a variable, an array slot \
+         `a[i]`, or a field `s.f` / `r[i].f`")
   end else lhs
 
 (* Pipeline: `x |> f` rewrites to `f(x)`. `x |> f(a, b)` rewrites to
@@ -328,8 +342,8 @@ and parse_postfix_chain st head =
       (match eat st with
        | TIdent s ->
            parse_postfix_chain st (EField (head, s))
-       | TInt n when n >= 0 ->
-           parse_postfix_chain st (ETupleIdx (head, n))
+       | TInt n when n >= 0L ->
+           parse_postfix_chain st (ETupleIdx (head, Int64.to_int n))
        | t -> raise (Parse_error
          (Printf.sprintf "expected field name or tuple index after `.`, got %s"
             (Token.show t))))
@@ -407,11 +421,11 @@ and parse_atom st =
   | TInt _ | TFloat _ | TTrue | TFalse | TLParen | TLBrace
   | TIdent _ | TCtorIdent _
   | TStringLit _
-  | TFn | TClosure
+  | TFn | TClosure | TRef
   | TIf | TMatch | TWhile | TBreak | TContinue | TFor | TReturn
-  | TArray | TLen | TSlice
-  | TToInt | TToByte | TToFloat | TToU16 | TToU32 | TToU64
-  | TCAlloc | TCFree | TNullPtr | TIsNull | TArrayData | TTryAt | TDrop
+  | TLen | TSlice
+  | TToInt | TToByte | TToFloat
+  | TCAlloc | TCFree | TNullPtr | TIsNull | TAsPtr | TPtrCast | TTryAt | TDrop | TReset
   | TRegion | TStackRegion | TAlignedRegion
   | TPrint | TPrintln -> parse_atom_consume st
   | t -> raise (Parse_error
@@ -437,8 +451,11 @@ and parse_atom_consume st =
            (e1, e2, ...) — tuple literal, n >= 2 (trailing comma allowed)
          A bare (e,) is rejected — singleton tuples don't add anything
          orthogonal here, and we'd rather grow that later if we need it. *)
-      if peek st = TRParen then
-        raise (Parse_error "`()` is not a valid expression — use a value or 0 for placeholder");
+      if peek st = TRParen then begin
+        (* `()` — the unit value (the empty tuple). *)
+        advance st;
+        ETuple []
+      end else
       let first = parse_expr st in
       (match peek st with
        | TRParen -> advance st; first
@@ -465,7 +482,32 @@ and parse_atom_consume st =
        | t -> raise (Parse_error
            (Printf.sprintf "expected `)` or `,` after parenthesised expression, got %s"
               (Token.show t))))
-  | TIdent name -> EVar name
+  | TIdent name
+    when String.length name > 3 && String.sub name 0 3 = "to_"
+         && is_numeric_type (String.sub name 3 (String.length name - 3))
+         && peek st = TLParen ->
+      (* to_<T>(e) — convert e to numeric type T. One rule for the whole
+         matrix (to_i64, to_u8, to_f32, ...). The legacy to_int/to_byte/
+         to_u16/to_u32/to_u64/to_float are keyword tokens, handled above. *)
+      let t = String.sub name 3 (String.length name - 3) in
+      advance st;
+      let e = parse_expr st in
+      expect st TRParen;
+      ECast (t, e)
+  | TIdent name ->
+      (* Qualified reference `mod::name` (e.g. `vec::push`) — let modules
+         share short verb names (new/push/get) without import clashes.
+         The path is kept as "a::b" and mangled to "a__b" in resolve. *)
+      let rec path acc =
+        if peek st = TColonCol then begin
+          advance st;
+          match eat st with
+          | TIdent s | TCtorIdent s -> path (acc ^ "::" ^ s)
+          | t -> raise (Parse_error
+              (Printf.sprintf "expected name after `::`, got %s" (Token.show t)))
+        end else acc
+      in
+      EVar (path name)
   | TCtorIdent name ->
       (match peek st with
        | TLParen ->
@@ -536,6 +578,44 @@ and parse_atom_consume st =
       let body = parse_block st in
       expect st TRParen;
       EClosure (region, ps, ret, body)
+  | TRef ->
+      (* The one allocator into a region. Three forms:
+           ref(r, v)         — one cell holding v        (a "box")
+           ref(r, n, init)   — n cells, each init        (a buffer)
+           ref(r, [a, b, c]) — cells from a value list
+         All produce Handle[T] (a gen-checked handle to cell(s) in r). *)
+      expect st TLParen;
+      let r = parse_expr st in
+      expect st TComma;
+      (match peek st with
+       | TLBracket ->
+           advance st;
+           let elems =
+             if peek st = TRBracket then []
+             else
+               let rec collect () =
+                 let e = parse_expr st in
+                 if peek st = TComma then begin
+                   advance st;
+                   if peek st = TRBracket then [e] else e :: collect ()
+                 end else [e]
+               in
+               collect ()
+           in
+           expect st TRBracket;
+           expect st TRParen;
+           EHandleLit (r, elems)
+       | _ ->
+           let first = parse_expr st in
+           (match peek st with
+            | TComma ->
+                advance st;
+                let init = parse_expr st in
+                expect st TRParen;
+                EHandle (r, first, init)        (* ref(r, n, init) *)
+            | _ ->
+                expect st TRParen;
+                EHandle (r, EInt 1L, first)))    (* ref(r, v) — one cell *)
   | TIf -> parse_if_after_kw st
   | TMatch -> parse_match_after_kw st
   | TWhile ->
@@ -565,10 +645,10 @@ and parse_atom_consume st =
            let hi = parse_expr st in
            let body = parse_block st in
            let hi_var = Printf.sprintf "_for_hi_%d" (Hashtbl.hash (var, hi)) in
-           let bump = EAssign (var, EBinop (OpAdd, EVar var, EInt 1)) in
+           let bump = EAssign (var, EBinop (OpAdd, EVar var, EInt 1L)) in
            let new_body =
              ELet ("_", false, None, body,
-               ELet ("_", false, None, bump, EInt 0))
+               ELet ("_", false, None, bump, EInt 0L))
            in
            ELet (hi_var, false, None, hi,
              ELet (var, true, None, lo_or_src,
@@ -584,35 +664,6 @@ and parse_atom_consume st =
   | TReturn ->
       let v = parse_expr st in
       EReturn v
-  | TArray ->
-      expect st TLParen;
-      let r = parse_expr st in
-      expect st TComma;
-      (match peek st with
-       | TLBracket ->
-           (* array(r, [v0, v1, ..., vN]) — initialize from literal. *)
-           advance st;
-           let elems =
-             if peek st = TRBracket then []
-             else
-               let rec collect () =
-                 let e = parse_expr st in
-                 if peek st = TComma then begin
-                   advance st;
-                   if peek st = TRBracket then [e] else e :: collect ()
-                 end else [e]
-               in
-               collect ()
-           in
-           expect st TRBracket;
-           expect st TRParen;
-           EArrayLit (r, elems)
-       | _ ->
-           let n = parse_expr st in
-           expect st TComma;
-           let v = parse_expr st in
-           expect st TRParen;
-           EArray (r, n, v))
   | TRegion ->
       expect st TLParen;
       let n = parse_expr st in
@@ -642,21 +693,6 @@ and parse_atom_consume st =
       let e = parse_expr st in
       expect st TRParen;
       EToByte e
-  | TToU16 ->
-      expect st TLParen;
-      let e = parse_expr st in
-      expect st TRParen;
-      EToU16 e
-  | TToU32 ->
-      expect st TLParen;
-      let e = parse_expr st in
-      expect st TRParen;
-      EToU32 e
-  | TToU64 ->
-      expect st TLParen;
-      let e = parse_expr st in
-      expect st TRParen;
-      EToU64 e
   | TToFloat ->
       expect st TLParen;
       let e = parse_expr st in
@@ -687,11 +723,19 @@ and parse_atom_consume st =
       let p = parse_expr st in
       expect st TRParen;
       EIsNull p
-  | TArrayData ->
+  | TAsPtr ->
       expect st TLParen;
       let a = parse_expr st in
       expect st TRParen;
-      EArrayData a
+      EHandleData a
+  | TPtrCast ->
+      expect st TLBracket;
+      let t = parse_ty st in
+      expect st TRBracket;
+      expect st TLParen;
+      let e = parse_expr st in
+      expect st TRParen;
+      EPtrCast (t, e)
   | TTryAt ->
       expect st TLParen;
       let a = parse_expr st in
@@ -704,6 +748,11 @@ and parse_atom_consume st =
       let e = parse_expr st in
       expect st TRParen;
       EDrop e
+  | TReset ->
+      expect st TLParen;
+      let e = parse_expr st in
+      expect st TRParen;
+      EReset e
   | TPrint ->
       expect st TLParen;
       let e = parse_expr st in
@@ -730,7 +779,7 @@ and parse_atom_consume st =
       expect st TComma;
       let a = parse_expr st in
       (match a with
-       | EInt k when k > 0 && (k land (k - 1)) = 0 -> ()
+       | EInt k when k > 0L && Int64.logand k (Int64.sub k 1L) = 0L -> ()
        | EInt _ -> raise (Parse_error
            "aligned_region(_, A): A must be a positive power of two")
        | _ -> raise (Parse_error
@@ -742,11 +791,12 @@ and parse_atom_consume st =
 and parse_if_after_kw st =
   let cond = parse_expr st in
   let then_b = parse_block st in
-  (* `else` is optional. When absent, the implicit else is int 0 —
-     both branches must then unify to int. This is the form used
-     inside loops: `if cond { break }`. *)
+  (* `else` is optional. Without it, `if c { body }` is a conditional
+     statement: it runs body for effect, discards body's value, and the
+     whole thing evaluates to unit `()` — the value of "nothing", which
+     is exactly what the missing else produces. Both branches are unit. *)
   if peek st <> TElse then
-    EIf (cond, then_b, EInt 0)
+    EIf (cond, ELet ("_", false, None, then_b, ETuple []), ETuple [])
   else begin
     advance st;
     (* Support `else if ... { ... }` as sugar for nested if. *)
@@ -814,10 +864,10 @@ and parse_single_pat st =
       end else
         PCtor (c, [])
   | TIdent x -> PBind x
-  | TInt n -> PInt n
+  | TInt n -> PInt (Int64.to_int n)
   | TMinus ->
       (match eat st with
-       | TInt n -> PInt (- n)
+       | TInt n -> PInt (- (Int64.to_int n))
        | t -> raise (Parse_error
          (Printf.sprintf "expected integer literal after `-` in pattern, got %s"
             (Token.show t))))
@@ -963,8 +1013,8 @@ and parse_block_body st =
         advance st;
         if peek st = TRBrace then
           (* Trailing `;` discards the last expression's value; the
-             block's result becomes int 0 (placeholder for unit). *)
-          ELet ("_", false, None, e, EInt 0)
+             block's result is unit `()`. *)
+          ELet ("_", false, None, e, ETuple [])
         else
           let rest = parse_block_body st in
           ELet ("_", false, None, e, rest)
@@ -1270,6 +1320,25 @@ let parse (toks : token list) : program =
         let target = parse_ty st in
         expect st TSemi;
         loop terminator (TopAlias { alias_name = name; alias_ty = target } :: acc)
+    | TConst ->
+        advance st;
+        let name = match eat st with
+          | TIdent s -> s
+          | TCtorIdent s -> raise (Parse_error
+            (Printf.sprintf
+               "const name %S must be lowercase — constants are values, \
+                uppercase is for types and constructors" s))
+          | t -> raise (Parse_error
+            (Printf.sprintf "expected constant name after `const`, got %s"
+               (Token.show t)))
+        in
+        expect st TColon;
+        let cty = parse_ty st in
+        expect st TEq;
+        let value = parse_expr st in
+        expect st TSemi;
+        loop terminator
+          (TopConst { const_name = name; const_ty = cty; const_value = value } :: acc)
     | TExtern ->
         let e = parse_extern st in
         loop terminator (TopExtern e :: acc)

@@ -46,6 +46,23 @@ let rec collect_use_files decls =
     | Orto.Ast.TopNamespace (_, inner) -> collect_use_files inner
     | _ -> []) decls
 
+(* Search path for a `use`d module: the entry program's directory first
+   (so a project can shadow / provide its own modules), then the standard
+   library directory (ORTO_STD, default "std" relative to the cwd). *)
+let std_dir =
+  try Sys.getenv "ORTO_STD" with Not_found -> "std"
+
+let find_module entry_dir mod_name =
+  let candidates =
+    [ Filename.concat entry_dir (mod_name ^ ".orto");
+      Filename.concat std_dir   (mod_name ^ ".orto") ]
+  in
+  let rec first = function
+    | [] -> None
+    | p :: rest -> if Sys.file_exists p then Some p else first rest
+  in
+  first candidates
+
 let rec load_module entry_dir mod_name visiting =
   (* Memoization handles mutual references — A imports B imports A is
      fine, both end up loaded once. `visiting` is kept for future
@@ -53,14 +70,16 @@ let rec load_module entry_dir mod_name visiting =
   let _ = visiting in
   if Hashtbl.mem modules_loaded mod_name then ()
   else begin
-    let path = Filename.concat entry_dir (mod_name ^ ".orto") in
-    let src =
-      try read_file path
-      with Sys_error _ ->
-        failwith (Printf.sprintf
-          "module %S referenced via `use`, but %s not found"
-          mod_name path)
+    let path =
+      match find_module entry_dir mod_name with
+      | Some p -> p
+      | None ->
+          failwith (Printf.sprintf
+            "module %S referenced via `use`, but %s.orto not found \
+             (searched %s and %s)"
+            mod_name mod_name entry_dir std_dir)
     in
+    let src = read_file path in
     let toks = Orto.Lexer.lex src in
     let ast = Orto.Parser.parse toks in
     Hashtbl.add modules_loaded mod_name ast;
@@ -79,6 +98,7 @@ let parse_args () =
   let cores    = ref 1 in
   let ring     = ref 64 in
   let test     = ref false in
+  let backend  = ref "c" in
   let argv = Sys.argv in
   let n = Array.length argv in
   let i = ref 1 in
@@ -108,6 +128,10 @@ let parse_args () =
      | "--test" ->
          test := true;
          incr i
+     | "--backend" ->
+         if !i + 1 >= n then usage ();
+         backend := argv.(!i + 1);
+         i := !i + 2
      | s when !input = None ->
          input := Some s;
          incr i
@@ -118,10 +142,10 @@ let parse_args () =
   if !slots <= 0 then begin prerr_endline "--slots must be > 0"; exit 2 end;
   if !cores <= 0 then begin prerr_endline "--cores must be > 0"; exit 2 end;
   if !ring  <= 0 then begin prerr_endline "--ring-entries must be > 0"; exit 2 end;
-  (input, output, !slots, !cores, !ring, !test)
+  (input, output, !slots, !cores, !ring, !test, !backend)
 
 let () =
-  let (input, output, slots, cores, ring_entries, test_mode) = parse_args () in
+  let (input, output, slots, cores, ring_entries, test_mode, backend) = parse_args () in
   let entry_dir = Filename.dirname input in
   let entry_module = module_name_of_path input in
   try
@@ -143,8 +167,13 @@ let () =
     let merged = Orto.Lift.lift merged in
     let typed_ast = Orto.Check.check merged in
     let mono = Orto.Mono.monomorphize typed_ast in
-    let c = Orto.Emit.emit ~slots ~cores ~ring_entries ~test_mode mono in
-    write_file output c;
+    let out =
+      match backend with
+      | "qbe" -> Orto.Emit_qbe.emit mono
+      | "c" -> Orto.Emit.emit ~slots ~cores ~ring_entries ~test_mode mono
+      | b -> failwith (Printf.sprintf "unknown --backend %S (use c or qbe)" b)
+    in
+    write_file output out;
     Printf.printf "wrote %s\n" output
   with
   | Orto.Lexer.Lex_error (msg, pos) ->

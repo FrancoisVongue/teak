@@ -26,13 +26,30 @@ and ty =
   | TyTuple of ty list           (* (T1, T2, ..., Tn) for n >= 2 — anonymous product *)
   | TyMeta of meta               (* unification variable, only inside the checker *)
 
+(* The numeric type matrix: signed/unsigned integers 8..128 and floats,
+   like Zig/Go. One registry, shared by parser (recognising a type name
+   and a `to_<T>` cast), checker, and emit. `byte` aliases u8, `float`
+   aliases f64; `int` is the word-size signed arithmetic type, handled
+   separately as TyInt. *)
+let numeric_c_type : (string * string) list =
+  [ "i8", "int8_t"; "i16", "int16_t"; "i32", "int32_t"; "i64", "int64_t";
+    "i128", "__int128";
+    "u8", "uint8_t"; "u16", "uint16_t"; "u32", "uint32_t"; "u64", "uint64_t";
+    "u128", "unsigned __int128";
+    "f16", "_Float16"; "f32", "float"; "f64", "double"; "f128", "__float128";
+    "byte", "uint8_t"; "float", "double" ]
+
+let is_numeric_type (n : string) : bool = List.mem_assoc n numeric_c_type
+let is_float_type (n : string) : bool =
+  List.mem n ["f16"; "f32"; "f64"; "f128"; "float"]
+
 type pat =
   | PBind of string                      (* lowercase ident — binds scrutinee to name; "_" = wildcard *)
   | PCtor of string * string list
   | POr   of pat list                    (* a | b | c — all must be PCtor or literals, no bindings *)
   | PInt  of int                         (* literal int pattern *)
   | PBool of bool                        (* literal bool pattern *)
-  | PStr  of string                      (* literal Array[byte] pattern *)
+  | PStr  of string                      (* literal Handle[byte] pattern *)
   | PTuple of pat list                   (* (p1, p2, ..., pn) — destructure tuple scrutinee *)
 
 type binop =
@@ -46,7 +63,7 @@ type binop =
 type unop = OpNeg | OpNot | OpBNot
 
 type expr =
-  | EInt    of int
+  | EInt    of int64
   | EFloat  of float
   | EBool   of bool
   | EVar    of string
@@ -74,14 +91,16 @@ type expr =
   | ELet    of string * bool * ty option * expr * expr
                                           (* name, mut?, optional ascription, value, body *)
   | EAssign of string * expr              (* x := v — requires x to be mut *)
+  | EAssignField of expr * string * expr  (* place.f := v — write a field of a
+                                             place (var/field/index chain). *)
   | EWhile  of expr * expr                (* while cond { body } — result is int 0 *)
   | EBreak                                (* break;    — valid only inside while *)
   | EContinue                             (* continue; — valid only inside while *)
   | EReturn of expr                       (* return v; — early exit from enclosing fn *)
   | EMatch  of expr * (pat * expr option * expr) list
                                           (* (pattern, optional `if guard`, body) *)
-  | EArray  of expr * expr * expr         (* array(r, N, init) — allocate N slots in region r *)
-  | EArrayLit of expr * expr list         (* array(r, [v0, v1, ...]) — allocate and initialize *)
+  | EHandle  of expr * expr * expr         (* array(r, N, init) — allocate N slots in region r *)
+  | EHandleLit of expr * expr list         (* array(r, [v0, v1, ...]) — allocate and initialize *)
   | ERegion of expr                       (* region(N) — heap arena, malloc'd block *)
   | EStackRegion of expr                  (* stack_region(N) — N literal, block on stack *)
   | EAlignedRegion of expr * expr         (* aligned_region(N, A) — heap, A-byte aligned *)
@@ -91,15 +110,15 @@ type expr =
   | ESlice  of expr * expr * expr         (* slice(a, lo, hi) — sub-handle in same region *)
   | EToInt  of expr                       (* to_int(b|f) — byte→int or float→int truncate *)
   | EToByte of expr                       (* to_byte(n) — truncate int to byte (u8) *)
-  | EToU16  of expr                       (* to_u16(n)  — truncate int to u16 *)
-  | EToU32  of expr                       (* to_u32(n)  — truncate int to u32 *)
-  | EToU64  of expr                       (* to_u64(n)  — int to u64 (signed reinterpret) *)
   | EToFloat of expr                      (* to_float(n) — int → float *)
+  | ECast   of string * expr              (* to_<T>(e) — convert e to numeric type T *)
   | ECAlloc of ty * expr                  (* c_alloc[T](n) — malloc n*sizeof(T), returns *T *)
   | ECFree  of expr                       (* c_free(p) — free raw pointer *)
   | ENullPtr of ty                        (* null_ptr[T]() — typed NULL *)
   | EIsNull of expr                       (* is_null(p) — NULL check *)
-  | EArrayData of expr                    (* array_data(a) — *T view of Array[T] bytes *)
+  | EHandleData of expr                    (* as_ptr(a) — *T view of Handle[T] bytes *)
+  | EPtrCast of ty * expr                 (* ptr_cast[T](e) — reinterpret raw pointer/address as *T *)
+  | EReset of expr                        (* reset(r) — rewind region r, invalidate its refs *)
   | ETryAt  of expr * expr                (* try_at(a, i) — None on dangling/oob *)
   | EDrop   of expr                       (* drop(x) — consume linear value, run its drop fn *)
   | EDeref  of expr                       (* *p — pointer deref *)
@@ -181,11 +200,22 @@ type use_decl = {
   use_pub    : bool;
 }
 
-(* `type Bytes = Array[byte];` — a plain alias. Resolved away by the
+(* `type Bytes = Handle[byte];` — a plain alias. Resolved away by the
    resolver before type checking; no runtime presence. Non-generic only. *)
 type alias_decl = {
   alias_name : string;
   alias_ty   : ty;
+}
+
+(* `const NAME: T = expr;` — a named compile-time value. Resolved away by
+   the resolver into a 0-argument function `fn NAME() -> T { expr }`, and
+   every use of NAME is rewritten to a call NAME(). The value lives at the
+   top level (no region/locals in scope), so it can only be a literal,
+   arithmetic, or another const — never an allocation. *)
+type const_decl = {
+  const_name  : string;
+  const_ty    : ty;
+  const_value : expr;
 }
 
 (* `test "human description" { body }` — top-level test block.
@@ -204,6 +234,7 @@ type top_decl =
   | TopExtern of extern_decl
   | TopUse    of use_decl
   | TopAlias  of alias_decl
+  | TopConst  of const_decl
   | TopTest   of test_decl
   | TopNamespace of string list * top_decl list
                                           (* `namespace a::b::c { ... }` —
@@ -261,7 +292,7 @@ let show_unop = function
   | OpBNot -> "~"
 
 let rec show_expr = function
-  | EInt n          -> string_of_int n
+  | EInt n          -> Int64.to_string n
   | EFloat f        -> Printf.sprintf "%g" f
   | EBool true      -> "true"
   | EBool false     -> "false"
@@ -311,6 +342,8 @@ let rec show_expr = function
       Printf.sprintf "let %s%s: %s = %s; %s"
         (if m then "mut " else "") x (show_ty ty) (show_expr v) (show_expr b)
   | EAssign (x, v) -> Printf.sprintf "(%s := %s)" x (show_expr v)
+  | EAssignField (p, f, v) ->
+      Printf.sprintf "(%s.%s := %s)" (show_expr p) f (show_expr v)
   | EWhile (c, b) -> Printf.sprintf "while %s { %s }" (show_expr c) (show_expr b)
   | EBreak    -> "break"
   | EContinue -> "continue"
@@ -326,9 +359,9 @@ let rec show_expr = function
       in
       Printf.sprintf "match %s { %s }"
         (show_expr e) (String.concat ", " arm_strs)
-  | EArray (r, n, v) ->
+  | EHandle (r, n, v) ->
       Printf.sprintf "array(%s, %s, %s)" (show_expr r) (show_expr n) (show_expr v)
-  | EArrayLit (r, elems) ->
+  | EHandleLit (r, elems) ->
       Printf.sprintf "array(%s, [%s])" (show_expr r)
         (String.concat ", " (List.map show_expr elems))
   | EStackRegion n -> Printf.sprintf "stack_region(%s)" (show_expr n)
@@ -344,16 +377,16 @@ let rec show_expr = function
         (show_expr a) (show_expr lo) (show_expr hi)
   | EToInt e  -> Printf.sprintf "to_int(%s)"  (show_expr e)
   | EToByte e -> Printf.sprintf "to_byte(%s)" (show_expr e)
-  | EToU16 e -> Printf.sprintf "to_u16(%s)" (show_expr e)
-  | EToU32 e -> Printf.sprintf "to_u32(%s)" (show_expr e)
-  | EToU64 e -> Printf.sprintf "to_u64(%s)" (show_expr e)
   | EToFloat e -> Printf.sprintf "to_float(%s)" (show_expr e)
+  | ECast (t, e) -> Printf.sprintf "to_%s(%s)" t (show_expr e)
   | ECAlloc (t, n) ->
       Printf.sprintf "c_alloc[%s](%s)" (show_ty t) (show_expr n)
   | ECFree p -> Printf.sprintf "c_free(%s)" (show_expr p)
   | ENullPtr t -> Printf.sprintf "null_ptr[%s]()" (show_ty t)
   | EIsNull p -> Printf.sprintf "is_null(%s)" (show_expr p)
-  | EArrayData a -> Printf.sprintf "array_data(%s)" (show_expr a)
+  | EHandleData a -> Printf.sprintf "as_ptr(%s)" (show_expr a)
+  | EPtrCast (t, e) -> Printf.sprintf "ptr_cast[%s](%s)" (show_ty t) (show_expr e)
+  | EReset e -> Printf.sprintf "reset(%s)" (show_expr e)
   | ETryAt (a, i) -> Printf.sprintf "try_at(%s, %s)" (show_expr a) (show_expr i)
   | EDrop e -> Printf.sprintf "drop(%s)" (show_expr e)
   | EDeref p -> Printf.sprintf "*%s" (show_expr p)

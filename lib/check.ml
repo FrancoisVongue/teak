@@ -17,7 +17,7 @@ exception Type_error of string
 
 module T = struct
   type expr =
-    | TEInt    of int
+    | TEInt    of int64
     | TEBool   of bool
     | TEVar    of string * ty
     | TEStringLit of string
@@ -41,9 +41,9 @@ module T = struct
                      Region bindings that are not consumed. *)
     | TEMatch  of expr * ty * (pat * expr option * expr) list * ty
                   (* scrut, scrut_ty, arms (pattern + optional guard + body), result_ty *)
-    | TEArray  of expr * expr * expr * ty
-                  (* array(r, N, init) — allocate in region r, result is Array[T] *)
-    | TEArrayLit of expr * expr list * ty
+    | TEHandle  of expr * expr * expr * ty
+                  (* array(r, N, init) — allocate in region r, result is Handle[T] *)
+    | TEHandleLit of expr * expr list * ty
                   (* array(r, [v0..vN]) — allocate in r, init each slot *)
     | TERegion of expr * ty
                   (* region(N) — heap arena *)
@@ -63,14 +63,10 @@ module T = struct
                   (* to_int(b) — widen byte to int *)
     | TEToByte of expr
                   (* to_byte(n) — truncate int to byte (u8) *)
-    | TEToU16 of expr
-                  (* to_u16(n)  — truncate int to u16 *)
-    | TEToU32 of expr
-                  (* to_u32(n)  — truncate int to u32 *)
-    | TEToU64 of expr
-                  (* to_u64(n)  — int to u64 (signed→unsigned reinterpret) *)
     | TEToFloat of expr
                   (* to_float(n) — int → float *)
+    | TECast   of string * expr
+                  (* to_<T>(e) — convert e to numeric type T (a C cast) *)
     | TEFloat  of float
                   (* float literal *)
     | TEToIntFromFloat of expr
@@ -83,15 +79,22 @@ module T = struct
                   (* null_ptr[T]() — result type TyPtr T *)
     | TEIsNull of expr
                   (* is_null(p) -> bool *)
-    | TEArrayData of expr * ty
-                  (* array_data(a: Array[T]) -> TyPtr T *)
+    | TEHandleData of expr * ty
+                  (* array_data(a: Handle[T]) -> TyPtr T *)
+    | TEPtrCast of expr * ty
+                  (* ptr_cast[T](e) — source expr, result type TyPtr T *)
     | TETryAt of expr * expr * ty
                   (* try_at(a, i) — third field is result Option[T] *)
     | TEDrop  of expr * ty
                   (* drop(x) — second field is x's (linear) type *)
+    | TEReset of expr
+                  (* reset(r) — rewind region r (operand is a region var) *)
     | TEDeref  of expr * ty
                   (* p deref — second field is element type T *)
     | TEAssign of string * expr * ty
+    | TEAssignField of expr * string * expr
+                  (* place.f := v — write the field f of a place
+                     (var/field/index chain). Result is int (unit). *)
                   (* x := v — third field is the type of x *)
     | TEWhile  of expr * expr
                   (* while cond { body } — always int 0 *)
@@ -155,9 +158,13 @@ module T = struct
     return_ty   : ty;
     body        : expr;
     (* Non-empty only for lifted closure bodies: the values captured
-       from the creating scope, unpacked from the environment at entry.
-       The code pointer takes the environment as a leading void*. *)
+       from the creating scope, unpacked from the environment at entry. *)
     captures    : (string * ty) list;
+    (* True for lifted closure bodies: they are invoked through the
+       closure code-pointer convention, so they take the environment as
+       a leading `void *env` — ALWAYS, even with zero captures (the call
+       site always passes an env). Plain top-level functions are false. *)
+    takes_env   : bool;
     (* Stage 3: true iff this function body contains a suspension
        point reachable directly (await or yield not inside a nested
        spawn). Such functions are lowered into a stackless state
@@ -200,18 +207,19 @@ end
 
 type op_typing =
   | OpFixed of ty * ty     (* operand type, result type *)
-  | OpEqual                (* both operands same type; must be int/bool/byte/float *)
-  | OpNumeric              (* both operands same numeric (int or float); result same *)
-  | OpComparison           (* both operands same numeric (int or float); result bool *)
+  | OpEqual                (* both operands same comparable type; result bool *)
+  | OpNumeric              (* both operands same numeric (any int/float); result same *)
+  | OpComparison           (* both operands same numeric; result bool *)
+  | OpInteger              (* both operands same integer type (no float); result same *)
 
 let binop_typing = function
   | OpAdd | OpSub | OpMul | OpDiv          -> OpNumeric
-  | OpMod                                   -> OpFixed (TyInt, TyInt)  (* C: only int *)
+  | OpMod                                   -> OpInteger  (* %, bitwise, shift: any int *)
   | OpLt | OpGt | OpLe | OpGe              -> OpComparison
   | OpAnd | OpOr                            -> OpFixed (TyBool, TyBool)
   | OpEq | OpNeq                            -> OpEqual
-  | OpBOr | OpBAnd | OpBXor                 -> OpFixed (TyInt, TyInt)
-  | OpShl | OpShr                           -> OpFixed (TyInt, TyInt)
+  | OpBOr | OpBAnd | OpBXor                 -> OpInteger
+  | OpShl | OpShr                           -> OpInteger
 
 let unop_typing = function
   | OpNeg  -> (TyInt, TyInt)
@@ -246,6 +254,17 @@ let check_not_c_reserved (kind : string) (name : string) : unit =
 let meta_counter = ref 0
 let drop_name_counter = ref 0
 let lambda_counter = ref 0
+let for_counter = ref 0
+
+(* For-loop accesses are bounds-safe by construction: the index is a
+   compiler-generated variable (`_for_i_N`), invisible to user code, that
+   starts at 0, is bounded by `i < len(src)` at the loop top, and is only
+   ever incremented by 1. So `src[i]` inside the loop can never be out of
+   range. We record each generated (index → source) pair here; emit reads
+   it to drop the bounds check on exactly those accesses. Hand-written
+   `while i < len(xs)` loops are NOT recorded — their index is a user
+   variable we don't reason about. *)
+let bounds_safe_index : (string, string) Hashtbl.t = Hashtbl.create 64
 
 (* Closures discovered during inference of the current function. Each is
    finalized (zonked, move-checked) at the end of check_func and turned
@@ -315,10 +334,22 @@ let rec prune (t : ty) : ty =
       r
   | _ -> t
 
+(* A place is a var / field / index chain. These walk the untyped form. *)
+let rec place_has_index = function
+  | EIndex _ -> true
+  | EField (p, _) -> place_has_index p
+  | _ -> false
+
+let rec place_root_var = function
+  | EVar x -> Some x
+  | EField (p, _) -> place_root_var p
+  | EIndex (a, _) -> place_root_var a
+  | _ -> None
+
 let rec is_linear_ty (t : ty) : bool =
   match prune t with
-  | TyApp ("Array", [inner]) ->
-      (* Induced linearity: an Array of a linear element type is itself
+  | TyApp ("Handle", [inner]) ->
+      (* Induced linearity: an Handle of a linear element type is itself
          linear — its drop frees the elements first. Builtin containers
          propagate; nominal user types do not (they declare linearity
          explicitly via `linear struct`). *)
@@ -437,6 +468,9 @@ let split_program (prog : program)
     | TopAlias _  :: _    ->
         failwith "check: TopAlias left in program — \
                   the resolver should have inlined all `type` aliases"
+    | TopConst _  :: _    ->
+        failwith "check: TopConst left in program — \
+                  the resolver should have lowered all `const` decls to fns"
     | TopNamespace _ :: _ ->
         failwith "check: TopNamespace left in program — \
                   the resolver should have flattened all `namespace` blocks"
@@ -496,10 +530,10 @@ let rec validate_ty
          Exception: Task[T] and Stream[T] are themselves linear, so a
          linear T is fine — the task/stream owns the inner value and
          transfers it via await/for-in. This is the first sliver of
-         "induced linearity" — the full version (Array[T] when T is
+         "induced linearity" — the full version (Handle[T] when T is
          linear) lands in phase 3. *)
       let propagates_linearity =
-        (n = "Task" || n = "Stream" || n = "Array") in
+        (n = "Task" || n = "Stream" || n = "Handle") in
       if not propagates_linearity then
         List.iter (fun arg ->
           if ty_contains_linear arg then
@@ -514,15 +548,15 @@ let rec validate_ty
             (Printf.sprintf
                "type parameter %S cannot take type arguments" n));
         TyVar n
-      end else if n = "Array" then begin
-        (* Array[T] is a built-in unary type constructor — handle to a
+      end else if n = "Handle" then begin
+        (* Handle[T] is a built-in unary type constructor — handle to a
            region-allocated buffer. The wrapper is copyable. *)
         if List.length args <> 1 then
           raise (Type_error
             (Printf.sprintf
-               "Array expects exactly 1 type argument, got %d"
+               "Handle expects exactly 1 type argument, got %d"
                (List.length args)));
-        TyApp ("Array", args)
+        TyApp ("Handle", args)
       end else if n = "Region" then begin
         (* Region is a built-in nullary type — owned arena. Linear. *)
         if List.length args <> 0 then
@@ -549,17 +583,18 @@ let rec validate_ty
                "Stream expects exactly 1 type argument, got %d"
                (List.length args)));
         TyApp ("Stream", args)
-      end else if n = "byte" || n = "u16" || n = "u32" || n = "u64" then begin
-        (* Unsigned int primitives, fixed width. byte = u8.
-           No arithmetic in orto; go through `to_int` for math, then
-           `to_<width>` to truncate back. Same idiom as byte. *)
+      end else if is_numeric_type n then begin
+        (* Fixed-width numeric primitives: i8..i128, u8..u128, f16..f128
+           (byte = u8, float = f64). No arithmetic directly on the sized
+           types — go through `int`/`float` with to_<T> casts, same idiom
+           as byte. The whole matrix routes through one registry. *)
         if List.length args <> 0 then
           raise (Type_error
             (Printf.sprintf
                "%s takes no type arguments, got %d" n
                (List.length args)));
         TyApp (n, [])
-      end else if n = "float" then begin
+      end else if false then begin
         (* float — IEEE 754 double, 8 bytes. NaN / Infinity behave per
            IEEE: NaN != NaN, comparisons with NaN are false. *)
         if List.length args <> 0 then
@@ -599,10 +634,9 @@ let rec validate_ty
   | TyPtr inner ->
       TyPtr (validate_ty type_env record_env in_scope inner)
   | TyTuple ts ->
-      if List.length ts < 2 then
-        raise (Type_error
-          (Printf.sprintf
-             "tuple type needs at least 2 components, got %d" (List.length ts)));
+      if List.length ts = 1 then
+        raise (Type_error "1-component tuple type is not a thing — drop the parens");
+      (* [] is unit `()`; >= 2 is a real tuple. *)
       TyTuple (List.map (validate_ty type_env record_env in_scope) ts)
 
 (* ---------- building environment ---------- *)
@@ -812,9 +846,10 @@ let check_no_recursive_types
   in
   let rec deps_in_ty acc = function
     | TyInt | TyBool | TyVar _ | TyMeta _ -> acc
-    | TyApp ("Ref", _) | TyApp ("Own", _) ->
-        (* Ref and Own both break by-value cycles — they're pointer-sized
-           regardless of what's inside. *)
+    | TyApp ("Handle", _) ->
+        (* Ref is a fixed-size region handle — pointer-sized regardless
+           of what it points at, so it breaks by-value size cycles (the
+           pointed-at values live in the region, not inline). *)
         acc
     | TyApp (n, args) ->
         let acc = if is_known n then n :: acc else acc in
@@ -843,7 +878,8 @@ let check_no_recursive_types
       if dep = root then
         raise (Type_error
           (Printf.sprintf
-             "recursive type %S (cycle: %s) — use Own[...] or Ref[...] for indirection"
+             "recursive type %S (cycle: %s) — put the recursive field behind \
+              a region handle (Handle[...]) for indirection"
              root
              (String.concat " -> " (List.rev (dep :: path)))))
       else if not (List.mem dep path) then
@@ -863,7 +899,7 @@ type scrut_kind =
   | SK_Int                         (* int — literal patterns, default required *)
   | SK_Byte                        (* byte — same rules as int *)
   | SK_Bool                        (* bool — true/false, exhaustive if both covered *)
-  | SK_Bytes                       (* Array[byte] — string literal patterns *)
+  | SK_Bytes                       (* Handle[byte] — string literal patterns *)
   | SK_Tuple of ty list            (* tuple — PTuple of matching arity *)
 
 let scrutinee_kind (env : env) (t : ty) : scrut_kind =
@@ -876,20 +912,20 @@ let scrutinee_kind (env : env) (t : ty) : scrut_kind =
         "match on float is not supported — NaN / signed-zero edge cases \
          break exhaustivity. Use `if`/`else if` chain or a bind pattern \
          with a guard (`x if x > 0.5 => ...`).")
-  | TyApp ("Array", [inner]) ->
+  | TyApp ("Handle", [inner]) ->
       (match prune inner with
        | TyApp ("byte", []) -> SK_Bytes
        | _ ->
            raise (Type_error
              (Printf.sprintf
-                "match scrutinee must be int, bool, byte, Array[byte], tuple, or an ADT, got %s"
+                "match scrutinee must be int, bool, byte, Handle[byte], tuple, or an ADT, got %s"
                 (show_ty (zonk t)))))
   | TyTuple ts -> SK_Tuple ts
   | TyApp (n, _) when List.mem_assoc n env.types -> SK_Adt n
   | _ ->
       raise (Type_error
         (Printf.sprintf
-           "match scrutinee must be int, bool, byte, Array[byte], tuple, or an ADT, got %s"
+           "match scrutinee must be int, bool, byte, Handle[byte], tuple, or an ADT, got %s"
            (show_ty (zonk t))))
 
 (* A pattern that always matches everything that reaches it.
@@ -925,7 +961,7 @@ let pat_kind_name = function
   | SK_Bool -> "bool"
   | SK_Tuple ts ->
       Printf.sprintf "tuple of arity %d" (List.length ts)
-  | SK_Bytes -> "Array[byte]"
+  | SK_Bytes -> "Handle[byte]"
 
 (* Walk arms left-to-right enforcing:
      - patterns suit the scrutinee kind
@@ -1021,6 +1057,34 @@ let check_match_arms_structure
   end
 
 (* vars carries (name, (type, is_mut)) so EAssign can verify mutability. *)
+(* Expected-type propagation for literals: in a context with a known
+   numeric target (let ascription, function argument, return), a bare
+   int/float literal is born at that type. `let x: i64 = 5` just works,
+   no `to_i64`. Not a runtime conversion — the literal adopts the type
+   (visible in the annotation), so no hidden magic. We rewrite to the
+   exact target name, so unification against the annotation always
+   matches (no byte/u8 alias issues). *)
+let rec coerce_literal (expected : ty option) (e : expr) : expr =
+  match expected with
+  | Some (TyApp (n, [])) when is_numeric_type n ->
+      let go = coerce_literal expected in
+      (match e with
+       | EInt _ | EFloat _ -> ECast (n, e)
+       (* Push the expected type into tail/value positions so nested
+          literals adopt it too: `let x: i64 = if c { 5 } else { 7 }`. *)
+       | EIf (c, t, el) -> EIf (c, go t, go el)
+       | EMatch (s, arms) ->
+           EMatch (s, List.map (fun (p, g, b) -> (p, g, go b)) arms)
+       | ELet (x, m, asc, v, body) -> ELet (x, m, asc, v, go body)
+       | EBinop (op, a, b)
+         when (match op with
+               | OpAdd | OpSub | OpMul | OpDiv | OpMod
+               | OpBOr | OpBAnd | OpBXor | OpShl | OpShr -> true
+               | _ -> false) ->
+           EBinop (op, go a, go b)   (* result type = operand type *)
+       | _ -> e)
+  | _ -> e
+
 let rec infer (env : env) (tparams : string list)
   (vars : (string * (ty * bool)) list) (e : expr)
   : T.expr * ty =
@@ -1079,25 +1143,79 @@ let rec infer (env : env) (tparams : string list)
   | EFloat f -> (T.TEFloat f, TyApp ("float", []))
   | EBool b -> (T.TEBool b, TyBool)
   | EStringLit s ->
-      (* "..." : Array[byte] — bytes live in the static region forever.
+      (* "..." : Handle[byte] — bytes live in the static region forever.
          The handle is copyable, the gen tag will always match. *)
-      let result_ty = TyApp ("Array", [TyApp ("byte", [])]) in
+      let result_ty = TyApp ("Handle", [TyApp ("byte", [])]) in
       (T.TEStringLit s, result_ty)
 
   | EBinop (op, a, b) ->
-      let (ta, ta_ty) = infer env tparams vars a in
-      let (tb, tb_ty) = infer env tparams vars b in
-      let require_numeric_operand t =
+      (* A bare literal adopts the other operand's numeric type:
+         `count * 2` works whether count is int or i32 (2 becomes i32).
+         Same expected-type propagation, applied across the operator. *)
+      let is_lit = function EInt _ | EFloat _ -> true | _ -> false in
+      let (ta, ta_ty, tb, tb_ty) =
+        if is_lit a && not (is_lit b) then
+          let (tb, tb_ty) = infer env tparams vars b in
+          let (ta, ta_ty) = infer env tparams vars (coerce_literal (Some tb_ty) a) in
+          (ta, ta_ty, tb, tb_ty)
+        else if is_lit b && not (is_lit a) then
+          let (ta, ta_ty) = infer env tparams vars a in
+          let (tb, tb_ty) = infer env tparams vars (coerce_literal (Some ta_ty) b) in
+          (ta, ta_ty, tb, tb_ty)
+        else
+          let (ta, ta_ty) = infer env tparams vars a in
+          let (tb, tb_ty) = infer env tparams vars b in
+          (ta, ta_ty, tb, tb_ty)
+      in
+      (* Operand classes. Any numeric type works directly (i8..i128,
+         u8..u128, f16..f128, int, float) — sized ints are first-class,
+         not storage-only. Both operands must be the *same* type: no
+         implicit mixing (no `i32 + i64`), per the no-implicit-conversion
+         law — convert one explicitly. *)
+      let require_numeric kind t =
         match prune t with
         | TyInt -> ()
-        | TyApp ("float", []) -> ()
-        | TyMeta _ -> unify t TyInt   (* default to int *)
+        | TyApp (n, []) when is_numeric_type n -> ()
+        | TyMeta _ -> unify t TyInt   (* unconstrained literal → int *)
         | t ->
             raise (Type_error
-              (Printf.sprintf
-                 "%s requires int or float operands, got %s"
+              (Printf.sprintf "%s requires %s operands, got %s"
+                 (show_binop op) kind (show_ty (zonk t))))
+      in
+      let require_integer t =
+        match prune t with
+        | TyInt -> ()
+        | TyApp (n, []) when is_numeric_type n && not (is_float_type n) -> ()
+        | TyMeta _ -> unify t TyInt
+        | t ->
+            raise (Type_error
+              (Printf.sprintf "%s requires integer operands, got %s"
                  (show_binop op) (show_ty (zonk t))))
       in
+      (* Pointer arithmetic on the raw `*T` escape hatch — matches C:
+         `p + n` / `p - n` advance by elements (result *T), `p - q`
+         on two pointers of the same element type is the element
+         difference (result int). This is the unsafe world; the offset
+         is not checked. *)
+      let ptr_elem t = match prune t with TyPtr e -> Some e | _ -> None in
+      (match op, ptr_elem ta_ty, ptr_elem tb_ty with
+       | OpAdd, Some _, None ->
+           (try unify tb_ty TyInt with Type_error _ ->
+              raise (Type_error "pointer + : offset must be int"));
+           (T.TEBinop (op, ta, tb, ta_ty), ta_ty)
+       | OpAdd, None, Some _ ->
+           (try unify ta_ty TyInt with Type_error _ ->
+              raise (Type_error "pointer + : offset must be int"));
+           (T.TEBinop (op, ta, tb, tb_ty), tb_ty)
+       | OpSub, Some e1, Some e2 ->
+           (try unify e1 e2 with Type_error _ ->
+              raise (Type_error "pointer - pointer: element types differ"));
+           (T.TEBinop (op, ta, tb, TyInt), TyInt)
+       | OpSub, Some _, None ->
+           (try unify tb_ty TyInt with Type_error _ ->
+              raise (Type_error "pointer - : offset must be int"));
+           (T.TEBinop (op, ta, tb, ta_ty), ta_ty)
+       | _ ->
       let result_ty =
         match binop_typing op with
         | OpFixed (operand_ty, result_ty) ->
@@ -1108,25 +1226,28 @@ let rec infer (env : env) (tparams : string list)
             unify ta_ty tb_ty;
             (match prune ta_ty with
              | TyInt | TyBool -> ()
-             | TyApp ("byte", []) -> ()
-             | TyApp ("float", []) -> ()
+             | TyApp (n, []) when is_numeric_type n -> ()
              | TyMeta _ -> unify ta_ty TyInt
              | t ->
                  raise (Type_error
                    (Printf.sprintf
-                      "%s requires int, bool, byte, or float operands, got %s"
+                      "%s requires numeric or bool operands, got %s"
                       (show_binop op) (show_ty (zonk t)))));
             TyBool
         | OpNumeric ->
             unify ta_ty tb_ty;
-            require_numeric_operand ta_ty;
+            require_numeric "numeric" ta_ty;
             ta_ty
         | OpComparison ->
             unify ta_ty tb_ty;
-            require_numeric_operand ta_ty;
+            require_numeric "numeric" ta_ty;
             TyBool
+        | OpInteger ->
+            unify ta_ty tb_ty;
+            require_integer ta_ty;
+            ta_ty
       in
-      (T.TEBinop (op, ta, tb, result_ty), result_ty)
+      (T.TEBinop (op, ta, tb, result_ty), result_ty))
 
   | EUnop (op, e) ->
       let (te, te_ty) = infer env tparams vars e in
@@ -1231,6 +1352,7 @@ let rec infer (env : env) (tparams : string list)
                   (Printf.sprintf "record %S has no field %S" name fname))
             in
             let expected = subst_ty subst decl_ty in
+            let value = coerce_literal (Some expected) value in
             let (tv, tv_ty) = infer env tparams vars value in
             (try unify expected tv_ty
              with Type_error _ ->
@@ -1317,6 +1439,12 @@ let rec infer (env : env) (tparams : string list)
 
   | ELet (x, is_mut, ascription, value, body) ->
       if x <> "_" then check_not_c_reserved "let-binding" x;
+      let expected =
+        match ascription with
+        | Some t -> Some (validate_ty_for_ascription env tparams t)
+        | None -> None
+      in
+      let value = coerce_literal expected value in
       let (tv, tv_ty) = infer env tparams vars value in
       if is_region_ty tv_ty then
         raise (Type_error
@@ -1324,11 +1452,9 @@ let rec infer (env : env) (tparams : string list)
              "regions are bound with `arena`, not `let` \
               (write `arena %s = ...`). A region is a scope-anchored \
               resource, not a copyable value." x));
-      (match ascription with
+      (match expected with
        | None -> ()
-       | Some t ->
-           let t = validate_ty_for_ascription env tparams t in
-           unify tv_ty t);
+       | Some t -> unify tv_ty t);
       (* Linear types (Region, user `linear` structs/enums) cannot be
          `mut` — reassigning would silently leak the previous value. *)
       if is_mut && is_linear_ty tv_ty then
@@ -1435,7 +1561,7 @@ let rec infer (env : env) (tparams : string list)
                 (Printf.sprintf
                    "assignment to %S: variable has type %s, value has type %s"
                    x (show_ty (zonk xt)) (show_ty (zonk tv_ty)))));
-           (T.TEAssign (x, tv, xt), TyInt)
+           (T.TEAssign (x, tv, xt), TyTuple [])
        | Some (_, false) ->
            raise (Type_error
              (Printf.sprintf
@@ -1445,6 +1571,54 @@ let rec infer (env : env) (tparams : string list)
        | None ->
            raise (Type_error
              (Printf.sprintf "assignment to unknown variable %S" x)))
+
+  | EAssignField (place, fname, value) ->
+      let (tplace, place_ty) = infer env tparams vars place in
+      (match prune place_ty with
+       | TyApp (n, args) when List.mem_assoc n env.records ->
+           let rd = List.assoc n env.records in
+           let decl_field_ty =
+             try List.assoc fname rd.rec_fields
+             with Not_found ->
+               raise (Type_error
+                 (Printf.sprintf "record %S has no field %S" n fname))
+           in
+           let subst = List.combine rd.rec_type_params args in
+           let field_ty = subst_ty subst decl_field_ty in
+           let (tv, tv_ty) = infer env tparams vars value in
+           (try unify field_ty tv_ty
+            with Type_error _ ->
+              raise (Type_error
+                (Printf.sprintf
+                   "assignment to field %S: field has type %s, value has type %s"
+                   fname (show_ty (zonk field_ty)) (show_ty (zonk tv_ty)))));
+           (* Overwriting a linear value would leak it — forbid. *)
+           if is_linear_ty (zonk field_ty) then
+             raise (Type_error
+               (Printf.sprintf
+                  "cannot assign to linear field %S — overwriting a linear \
+                   value would leak it (consume it explicitly first)" fname));
+           (* A pure field/var path (no index) mutates a local, so its root
+              must be `mut`. A path through an index writes region memory
+              (through a copyable handle) and needs no `mut`. *)
+           if not (place_has_index place) then
+             (match place_root_var place with
+              | Some rv ->
+                  (match List.assoc_opt rv vars with
+                   | Some (_, true) -> ()
+                   | Some (_, false) ->
+                       raise (Type_error
+                         (Printf.sprintf
+                            "cannot assign to a field of %S — it is declared \
+                             without `mut`. Use `let mut %s = ...`." rv rv))
+                   | None -> ())
+              | None -> ());
+           (T.TEAssignField (tplace, fname, tv), TyTuple [])
+       | _ ->
+           raise (Type_error
+             (Printf.sprintf
+                "field assignment on non-record: expected a record, got %s"
+                (show_ty (zonk place_ty)))))
 
   | EWhile (cond, body) ->
       let (tc, tc_ty) = infer env tparams vars cond in
@@ -1459,7 +1633,7 @@ let rec infer (env : env) (tparams : string list)
       decr loop_depth;
       (* while never produces a real value; we use int 0 as placeholder
          for "unit" same as a[i] := v. *)
-      (T.TEWhile (tc, tb), TyInt)
+      (T.TEWhile (tc, tb), TyTuple [])
 
   | EBreak ->
       if !loop_depth = 0 then
@@ -1487,10 +1661,25 @@ let rec infer (env : env) (tparams : string list)
       (T.TEReturn (tv, ret_ty), TyMeta (fresh_meta ()))
 
   | EMatch (scrut, arms) ->
-      if arms = [] then
-        raise (Type_error "match must have at least one arm");
       let (tscrut, tscrut_ty) = infer env tparams vars scrut in
       let kind = scrutinee_kind env tscrut_ty in
+      if arms = [] then begin
+        (* Absurd: the unique morphism 0 → A out of an uninhabited type.
+           Allowed only when the scrutinee's type has no inhabitants (an
+           enum with zero variants). The branch is unreachable, so the
+           result type is unconstrained (it unifies with whatever the
+           context demands). *)
+        (match kind with
+         | SK_Adt n
+           when (match List.assoc_opt n env.types with
+                 | Some td -> td.variants = [] | None -> false) ->
+             let result_ty = TyMeta (fresh_meta ()) in
+             (T.TEMatch (tscrut, tscrut_ty, [], result_ty), result_ty)
+         | _ ->
+             raise (Type_error
+               "empty `match {}` is only allowed on an uninhabited type \
+                (an enum with no variants) — the absurd eliminator"))
+      end else begin
       check_match_arms_structure env kind arms;
       (* v1 restriction: guards are only allowed on non-ADT match.
          For ADT match, the same effect is available by writing the
@@ -1600,11 +1789,12 @@ let rec infer (env : env) (tparams : string list)
       List.iter (fun (_, t) -> unify first_ty t) typed_arms;
       let arms_out = List.map fst typed_arms in
       (T.TEMatch (tscrut, tscrut_ty, arms_out, first_ty), first_ty)
+      end
 
-  | EArray (region_e, size_e, init_e) ->
-      (* array(r, N, v) : (Region, int, T) → Array[T].
+  | EHandle (region_e, size_e, init_e) ->
+      (* array(r, N, v) : (Region, int, T) → Handle[T].
          Bump-allocates N slots in region r, fills each with v.
-         The Array wrapper is copyable — its memory lives in r. *)
+         The Handle wrapper is copyable — its memory lives in r. *)
       let (tr, tr_ty) = infer env tparams vars region_e in
       (try unify tr_ty (TyApp ("Region", []))
        with Type_error _ ->
@@ -1625,11 +1815,11 @@ let rec infer (env : env) (tparams : string list)
           (Printf.sprintf
              "array(_, _, v) : element type cannot contain a linear type (%s)"
              (show_ty (zonk tv_ty))));
-      let result_ty = TyApp ("Array", [tv_ty]) in
-      (T.TEArray (tr, tn, tv, result_ty), result_ty)
+      let result_ty = TyApp ("Handle", [tv_ty]) in
+      (T.TEHandle (tr, tn, tv, result_ty), result_ty)
 
-  | EArrayLit (region_e, elems) ->
-      (* array(r, [v0, ..., vN-1]) : Region, expr list → Array[T].
+  | EHandleLit (region_e, elems) ->
+      (* array(r, [v0, ..., vN-1]) : Region, expr list → Handle[T].
          All values must share one element type; result length = list length. *)
       if elems = [] then
         raise (Type_error
@@ -1657,8 +1847,8 @@ let rec infer (env : env) (tparams : string list)
          array itself is then linear (induced linearity, phase 3).
          By contrast `array(r, N, init)` would copy `init` N times,
          which is forbidden for linear types. *)
-      let result_ty = TyApp ("Array", [elem_ty]) in
-      (T.TEArrayLit (tr, List.map fst typed_elems, result_ty), result_ty)
+      let result_ty = TyApp ("Handle", [elem_ty]) in
+      (T.TEHandleLit (tr, List.map fst typed_elems, result_ty), result_ty)
 
   | ERegion size_e ->
       (* region(N) : int → Region. Heap arena. Linear. *)
@@ -1708,7 +1898,7 @@ let rec infer (env : env) (tparams : string list)
       (T.TEAlignedRegion (tn, ta, result_ty), result_ty)
 
   | EIndex (arr_e, idx_e) ->
-      (* a[i] : Array[T] or *T, int → T. For Array, the read does a
+      (* a[i] : Handle[T] or *T, int → T. For Handle, the read does a
          gen+bounds check; for raw *T it's a plain C subscript. *)
       let (ta, ta_ty) = infer env tparams vars arr_e in
       let elem =
@@ -1716,11 +1906,11 @@ let rec infer (env : env) (tparams : string list)
         | TyPtr inner -> inner
         | _ ->
             let elem = TyMeta (fresh_meta ()) in
-            (try unify ta_ty (TyApp ("Array", [elem]))
+            (try unify ta_ty (TyApp ("Handle", [elem]))
              with Type_error _ ->
                raise (Type_error
                  (Printf.sprintf
-                    "indexing expects Array[T] or *T, got %s"
+                    "indexing expects Handle[T] or *T, got %s"
                     (show_ty (zonk ta_ty)))));
             elem
       in
@@ -1731,13 +1921,13 @@ let rec infer (env : env) (tparams : string list)
            (Printf.sprintf
               "index must be int, got %s"
               (show_ty (zonk ti_ty)))));
-      (* Reading from an Array[Linear] would copy a linear value out
+      (* Reading from an Handle[Linear] would copy a linear value out
          of its slot, leaving two owners. Forbid it — the elements
-         can only be consumed when the whole Array is dropped. *)
+         can only be consumed when the whole Handle is dropped. *)
       if is_linear_ty (zonk elem) then
         raise (Type_error
           (Printf.sprintf
-             "cannot read element of Array[%s] — that would copy a \
+             "cannot read element of Handle[%s] — that would copy a \
               linear value out of its slot. Elements are only consumed \
               when the whole array is dropped."
              (show_ty (zonk elem))));
@@ -1750,11 +1940,11 @@ let rec infer (env : env) (tparams : string list)
         | TyPtr inner -> inner
         | _ ->
             let elem = TyMeta (fresh_meta ()) in
-            (try unify ta_ty (TyApp ("Array", [elem]))
+            (try unify ta_ty (TyApp ("Handle", [elem]))
              with Type_error _ ->
                raise (Type_error
                  (Printf.sprintf
-                    "index-assignment expects Array[T] or *T, got %s"
+                    "index-assignment expects Handle[T] or *T, got %s"
                     (show_ty (zonk ta_ty)))));
             elem
       in
@@ -1772,40 +1962,40 @@ let rec infer (env : env) (tparams : string list)
            (Printf.sprintf
               "type mismatch in a[i] := v: element is %s, value is %s"
               (show_ty (zonk elem)) (show_ty (zonk tv_ty)))));
-      (* Writing to a slot of Array[Linear] would either drop the old
+      (* Writing to a slot of Handle[Linear] would either drop the old
          element or leak it. Both need machinery we don't have yet —
          forbid until phase 5/6 if ever. *)
       if is_linear_ty (zonk elem) then
         raise (Type_error
           (Printf.sprintf
-             "cannot assign element of Array[%s] — overwriting would \
+             "cannot assign element of Handle[%s] — overwriting would \
               either drop or leak the old linear value."
              (show_ty (zonk elem))));
-      (T.TEAssignIdx (ta, ti, tv, TyInt), TyInt)
+      (T.TEAssignIdx (ta, ti, tv, TyTuple []), TyTuple [])
 
   | ELen arr_e ->
-      (* len(a) : Array[T] → int. *)
+      (* len(a) : Handle[T] → int. *)
       let (ta, ta_ty) = infer env tparams vars arr_e in
       let elem = TyMeta (fresh_meta ()) in
-      (try unify ta_ty (TyApp ("Array", [elem]))
+      (try unify ta_ty (TyApp ("Handle", [elem]))
        with Type_error _ ->
          raise (Type_error
            (Printf.sprintf
-              "len expects Array[T], got %s"
+              "len expects Handle[T], got %s"
               (show_ty (zonk ta_ty)))));
       (T.TELen (ta, TyInt), TyInt)
 
   | ESlice (arr_e, lo_e, hi_e) ->
-      (* slice(a, lo, hi) : Array[T], int, int → Array[T]. New handle
+      (* slice(a, lo, hi) : Handle[T], int, int → Handle[T]. New handle
          pointing at the same region, with offset += lo and len = hi - lo.
          Same gen, same slot — slice dies with the original region. *)
       let (ta, ta_ty) = infer env tparams vars arr_e in
       let elem = TyMeta (fresh_meta ()) in
-      (try unify ta_ty (TyApp ("Array", [elem]))
+      (try unify ta_ty (TyApp ("Handle", [elem]))
        with Type_error _ ->
          raise (Type_error
            (Printf.sprintf
-              "slice expects Array[T], got %s"
+              "slice expects Handle[T], got %s"
               (show_ty (zonk ta_ty)))));
       let (tlo, tlo_ty) = infer env tparams vars lo_e in
       (try unify tlo_ty TyInt
@@ -1821,32 +2011,31 @@ let rec infer (env : env) (tparams : string list)
            (Printf.sprintf
               "slice(_, _, hi) : hi must be int, got %s"
               (show_ty (zonk thi_ty)))));
-      (* Slicing an Array[Linear] would produce a second linear handle
+      (* Slicing an Handle[Linear] would produce a second linear handle
          viewing the same elements — two owners. Forbid. *)
       if is_linear_ty (zonk elem) then
         raise (Type_error
           (Printf.sprintf
-             "cannot slice Array[%s] — would create a second linear \
+             "cannot slice Handle[%s] — would create a second linear \
               handle over the same elements."
              (show_ty (zonk elem))));
-      let result_ty = TyApp ("Array", [elem]) in
+      let result_ty = TyApp ("Handle", [elem]) in
       (T.TESlice (ta, tlo, thi, result_ty), result_ty)
 
   | EToInt sub_e ->
       let (ts, ts_ty) = infer env tparams vars sub_e in
       (match prune ts_ty with
-       | TyApp ("byte", []) -> (T.TEToInt ts, TyInt)
-       | TyApp ("u16",  []) -> (T.TEToInt ts, TyInt)
-       | TyApp ("u32",  []) -> (T.TEToInt ts, TyInt)
-       | TyApp ("u64",  []) -> (T.TEToInt ts, TyInt)
-       | TyApp ("float", []) -> (T.TEToIntFromFloat ts, TyInt)
+       | TyApp (n, []) when is_float_type n -> (T.TEToIntFromFloat ts, TyInt)
+       | TyInt -> (T.TEToInt ts, TyInt)            (* no-op / identity *)
+       | TyPtr _ -> (T.TEToInt ts, TyInt)          (* raw pointer address as int *)
+       | TyApp (n, []) when is_numeric_type n -> (T.TEToInt ts, TyInt)
        | TyMeta _ ->
            unify ts_ty (TyApp ("byte", []));
            (T.TEToInt ts, TyInt)
        | t ->
            raise (Type_error
              (Printf.sprintf
-                "to_int expects byte/u16/u32/u64/float, got %s"
+                "to_int expects a numeric source, got %s"
                 (show_ty (zonk t)))))
 
   | EToByte sub_e ->
@@ -1859,33 +2048,6 @@ let rec infer (env : env) (tparams : string list)
               (show_ty (zonk ts_ty)))));
       (T.TEToByte ts, TyApp ("byte", []))
 
-  | EToU16 sub_e ->
-      let (ts, ts_ty) = infer env tparams vars sub_e in
-      (try unify ts_ty TyInt
-       with Type_error _ ->
-         raise (Type_error
-           (Printf.sprintf
-              "to_u16 expects int, got %s" (show_ty (zonk ts_ty)))));
-      (T.TEToU16 ts, TyApp ("u16", []))
-
-  | EToU32 sub_e ->
-      let (ts, ts_ty) = infer env tparams vars sub_e in
-      (try unify ts_ty TyInt
-       with Type_error _ ->
-         raise (Type_error
-           (Printf.sprintf
-              "to_u32 expects int, got %s" (show_ty (zonk ts_ty)))));
-      (T.TEToU32 ts, TyApp ("u32", []))
-
-  | EToU64 sub_e ->
-      let (ts, ts_ty) = infer env tparams vars sub_e in
-      (try unify ts_ty TyInt
-       with Type_error _ ->
-         raise (Type_error
-           (Printf.sprintf
-              "to_u64 expects int, got %s" (show_ty (zonk ts_ty)))));
-      (T.TEToU64 ts, TyApp ("u64", []))
-
   | EToFloat sub_e ->
       let (ts, ts_ty) = infer env tparams vars sub_e in
       (try unify ts_ty TyInt
@@ -1895,6 +2057,20 @@ let rec infer (env : env) (tparams : string list)
               "to_float expects int, got %s"
               (show_ty (zonk ts_ty)))));
       (T.TEToFloat ts, TyApp ("float", []))
+
+  | ECast (target, sub_e) ->
+      let (ts, ts_ty) = infer env tparams vars sub_e in
+      let src_ok = match prune ts_ty with
+        | TyInt -> true
+        | TyApp (n, []) when is_numeric_type n -> true
+        | TyMeta _ -> unify ts_ty TyInt; true
+        | _ -> false
+      in
+      if not src_ok then
+        raise (Type_error
+          (Printf.sprintf "to_%s expects a numeric source, got %s"
+             target (show_ty (zonk ts_ty))));
+      (T.TECast (target, ts), TyApp (target, []))
 
   | ECAlloc (elem_t, n_e) ->
       let elem_t = validate_ty_for_ascription env tparams elem_t in
@@ -1946,17 +2122,34 @@ let rec infer (env : env) (tparams : string list)
                 (show_ty (zonk tp_ty)))));
       (T.TEIsNull tp, TyBool)
 
-  | EArrayData a_e ->
+  | EHandleData a_e ->
       let (ta, ta_ty) = infer env tparams vars a_e in
       let elem = TyMeta (fresh_meta ()) in
-      (try unify ta_ty (TyApp ("Array", [elem]))
+      (try unify ta_ty (TyApp ("Handle", [elem]))
        with Type_error _ ->
          raise (Type_error
            (Printf.sprintf
-              "array_data expects Array[T], got %s"
+              "array_data expects Handle[T], got %s"
               (show_ty (zonk ta_ty)))));
       let result_ty = TyPtr elem in
-      (T.TEArrayData (ta, result_ty), result_ty)
+      (T.TEHandleData (ta, result_ty), result_ty)
+
+  | EPtrCast (elem_t, sub_e) ->
+      let elem_t = validate_ty_for_ascription env tparams elem_t in
+      let (ts, ts_ty) = infer env tparams vars sub_e in
+      let src_ok = match prune ts_ty with
+        | TyPtr _ -> true
+        | TyInt -> true   (* int address → *T, for MMIO / fixed addresses *)
+        | TyMeta _ -> let elem = TyMeta (fresh_meta ()) in unify ts_ty (TyPtr elem); true
+        | _ -> false
+      in
+      if not src_ok then
+        raise (Type_error
+          (Printf.sprintf
+             "ptr_cast[_] expects a raw pointer or int address, got %s"
+             (show_ty (zonk ts_ty))));
+      let result_ty = TyPtr elem_t in
+      (T.TEPtrCast (ts, result_ty), result_ty)
 
   | EDeref p_e ->
       let (tp, tp_ty) = infer env tparams vars p_e in
@@ -1972,11 +2165,11 @@ let rec infer (env : env) (tparams : string list)
   | ETryAt (a_e, i_e) ->
       let (ta, ta_ty) = infer env tparams vars a_e in
       let elem = TyMeta (fresh_meta ()) in
-      (try unify ta_ty (TyApp ("Array", [elem]))
+      (try unify ta_ty (TyApp ("Handle", [elem]))
        with Type_error _ ->
          raise (Type_error
            (Printf.sprintf
-              "try_at expects Array[T], got %s"
+              "try_at expects Handle[T], got %s"
               (show_ty (zonk ta_ty)))));
       let (ti, ti_ty) = infer env tparams vars i_e in
       (try unify ti_ty TyInt
@@ -1996,13 +2189,27 @@ let rec infer (env : env) (tparams : string list)
              "drop() requires a linear value (Region or a user `linear` \
               type), got %s"
              (show_ty (zonk tx_ty))));
-      (T.TEDrop (tx, tx_ty), TyInt)
+      (T.TEDrop (tx, tx_ty), TyTuple [])
+
+  | EReset r_e ->
+      (* reset(r) rewinds the region in place: it must write back the
+         binding's generation, so the operand has to be a region variable. *)
+      (match r_e with
+       | EVar _ -> ()
+       | _ -> raise (Type_error "reset() expects a region variable"));
+      let (tr, tr_ty) = infer env tparams vars r_e in
+      (try unify tr_ty (TyApp ("Region", []))
+       with Type_error _ ->
+         raise (Type_error
+           (Printf.sprintf "reset() expects a Region, got %s"
+              (show_ty (zonk tr_ty)))));
+      (T.TEReset tr, TyTuple [])
 
   (* Stage 3 — concurrency. Phase 2 wires up types for the three
      fundamentals (await / spawn / yield); phases 4+ generate the
      state machine and runtime. await all { … } needs tuples; the
-     dynamic form Array[Task[T]] needs phase-3 induced linearity on
-     Array — both stay rejected for now. *)
+     dynamic form Handle[Task[T]] needs phase-3 induced linearity on
+     Handle — both stay rejected for now. *)
   | EAwait inner ->
       let (ti, ti_ty) = infer env tparams vars inner in
       let elem = TyMeta (fresh_meta ()) in
@@ -2089,9 +2296,10 @@ let rec infer (env : env) (tparams : string list)
       (T.TEAwaitAll (typed_branches, result_ty, elem_tys), result_ty)
 
   | ETuple es ->
-      if List.length es < 2 then
+      if List.length es = 1 then
         raise (Type_error
-          "tuple literal needs at least 2 elements");
+          "1-element tuple is not a thing — drop the parens");
+      (* [] is the unit value `()`; >= 2 is a real tuple. *)
       let typed = List.map (fun e -> infer env tparams vars e) es in
       let result_ty = TyTuple (List.map snd typed) in
       (T.TETuple (List.map fst typed, result_ty), result_ty)
@@ -2158,43 +2366,77 @@ let rec infer (env : env) (tparams : string list)
   | EForStream (x, src_e, body_e) ->
       if x <> "_" then check_not_c_reserved "for-binder" x;
       let (tsrc, tsrc_ty) = infer env tparams vars src_e in
-      let elem = TyMeta (fresh_meta ()) in
-      (try unify tsrc_ty (TyApp ("Stream", [elem]))
-       with Type_error _ ->
-         raise (Type_error
-           (Printf.sprintf
-              "`for %s in <expr>`: stream source must be Stream[T], got %s"
-              x (show_ty (zonk tsrc_ty)))));
-      let body_vars =
-        if x = "_" then vars else (x, (elem, false)) :: vars
-      in
-      (* The for-stream body is a loop body — break/continue are
-         allowed inside it. Track depth so the checker accepts them. *)
-      incr loop_depth;
-      let (tbody, _tbody_ty) = infer env tparams body_vars body_e in
-      decr loop_depth;
-      (* Body is statement-shaped — its value is discarded each
-         iteration. We don't unify with int because users may write
-         `break;` or other ints. The whole `for` returns int 0. *)
-      (T.TEForStream (x, elem, tsrc, tbody), TyInt)
+      (match prune tsrc_ty with
+       | TyApp ("Handle", [elem]) ->
+           (* `for x in <ref> { body }` — iterate the segment by index.
+              Lowered here to a plain while loop over existing nodes, so
+              every later pass (async detection, moves, emit) treats it
+              as the ordinary loop it is. *)
+           let body_vars =
+             if x = "_" then vars else (x, (elem, false)) :: vars in
+           incr loop_depth;
+           let (tbody, tbody_ty) = infer env tparams body_vars body_e in
+           decr loop_depth;
+           let n = !for_counter in incr for_counter;
+           let src_name = Printf.sprintf "_for_src_%d" n in
+           let i_name   = Printf.sprintf "_for_i_%d" n in
+           Hashtbl.replace bounds_safe_index i_name src_name;
+           let src_ty = TyApp ("Handle", [elem]) in
+           let i_var = T.TEVar (i_name, TyInt) in
+           let src_var = T.TEVar (src_name, src_ty) in
+           let elem_e = T.TEIndex (src_var, i_var, elem) in
+           let inc =
+             T.TEAssign (i_name,
+               T.TEBinop (OpAdd, i_var, T.TEInt 1L, TyInt), TyInt) in
+           (* bind x = src[i]; run body (value discarded); then i := i+1 *)
+           let body_then_inc =
+             T.TELet ("_", tbody_ty, tbody, inc, TyInt, false) in
+           let loop_body =
+             T.TELet (x, elem, elem_e, body_then_inc, TyInt, false) in
+           let loop =
+             T.TEWhile (
+               T.TEBinop (OpLt, i_var,
+                 T.TELen (src_var, TyInt), TyBool),
+               loop_body) in
+           let lowered =
+             T.TELet (src_name, src_ty, tsrc,
+               T.TELet (i_name, TyInt, T.TEInt 0L, loop, TyInt, false),
+               TyInt, false) in
+           (lowered, TyInt)
+       | _ ->
+           let elem = TyMeta (fresh_meta ()) in
+           (try unify tsrc_ty (TyApp ("Stream", [elem]))
+            with Type_error _ ->
+              raise (Type_error
+                (Printf.sprintf
+                   "`for %s in <expr>`: source must be Handle[T] or Stream[T], \
+                    got %s"
+                   x (show_ty (zonk tsrc_ty)))));
+           let body_vars =
+             if x = "_" then vars else (x, (elem, false)) :: vars
+           in
+           incr loop_depth;
+           let (tbody, _tbody_ty) = infer env tparams body_vars body_e in
+           decr loop_depth;
+           (T.TEForStream (x, elem, tsrc, tbody), TyTuple []))
 
   | EPrint (nl, inner) -> infer_print env tparams vars nl inner
 
   | EAwaitAllDyn coll_e ->
-      (* `await all coll` requires coll : Array[Task[T]], returns
-         Array[Result[T]] — each Task is awaited, each result wrapped
+      (* `await all coll` requires coll : Handle[Task[T]], returns
+         Handle[Result[T]] — each Task is awaited, each result wrapped
          in Result the same way `await Task[T]` would. The original
          array is consumed (linear) by the join. *)
       let (tc, tc_ty) = infer env tparams vars coll_e in
       let elem = TyMeta (fresh_meta ()) in
-      (try unify tc_ty (TyApp ("Array", [TyApp ("Task", [elem])]))
+      (try unify tc_ty (TyApp ("Handle", [TyApp ("Task", [elem])]))
        with Type_error _ ->
          raise (Type_error
            (Printf.sprintf
-              "`await all <coll>` expects coll : Array[Task[T]], got %s"
+              "`await all <coll>` expects coll : Handle[Task[T]], got %s"
               (show_ty (zonk tc_ty)))));
       let wrapped = TyApp ("Result", [elem]) in
-      let result_ty = TyApp ("Array", [wrapped]) in
+      let result_ty = TyApp ("Handle", [wrapped]) in
       (T.TEAwait (tc, result_ty, elem), result_ty)
 
 and is_printable_ty (t : ty) : bool =
@@ -2202,7 +2444,7 @@ and is_printable_ty (t : ty) : bool =
   | TyInt | TyBool -> true
   | TyApp ("byte", []) | TyApp ("u16", []) | TyApp ("u32", [])
   | TyApp ("u64", []) | TyApp ("float", []) -> true
-  | TyApp ("Array", [TyApp ("byte", [])]) -> true
+  | TyApp ("Handle", [TyApp ("byte", [])]) -> true
   | _ -> false
 
 and infer_print env tparams vars nl inner =
@@ -2224,12 +2466,12 @@ and infer_print env tparams vars nl inner =
       raise (Type_error
         (Printf.sprintf
            "print/println: component of type %s is not printable. \
-            Allowed: int, bool, byte, u16, u32, u64, float, Array[byte]"
+            Allowed: int, bool, byte, u16, u32, u64, float, Handle[byte]"
            (show_ty zt)));
     (te, zt)) parts
   in
   let texprs, tys = List.split texprs_tys in
-  (T.TEPrint (nl, texprs, tys), TyInt)
+  (T.TEPrint (nl, texprs, tys), TyTuple [])
 
 and check_args env tparams vars callee_name param_tys args : T.expr list =
   let n_expected = List.length param_tys in
@@ -2239,6 +2481,7 @@ and check_args env tparams vars callee_name param_tys args : T.expr list =
       (Printf.sprintf "%S expects %d argument(s), got %d"
          callee_name n_expected n_got));
   List.map2 (fun expected arg ->
+    let arg = coerce_literal (Some expected) arg in
     let (targ, t) = infer env tparams vars arg in
     (try unify expected t
      with Type_error _ ->
@@ -2288,10 +2531,10 @@ let rec zonk_expr (e : T.expr) : T.expr =
         (p, Option.map zonk_expr g, zonk_expr b)) arms
       in
       T.TEMatch (zonk_expr s, zonk_expect st, arms, zonk_expect rt)
-  | T.TEArray (r, n, v, t) ->
-      T.TEArray (zonk_expr r, zonk_expr n, zonk_expr v, zonk_expect t)
-  | T.TEArrayLit (r, elems, t) ->
-      T.TEArrayLit (zonk_expr r, List.map zonk_expr elems, zonk_expect t)
+  | T.TEHandle (r, n, v, t) ->
+      T.TEHandle (zonk_expr r, zonk_expr n, zonk_expr v, zonk_expect t)
+  | T.TEHandleLit (r, elems, t) ->
+      T.TEHandleLit (zonk_expr r, List.map zonk_expr elems, zonk_expect t)
   | T.TERegion (n, t) -> T.TERegion (zonk_expr n, zonk_expect t)
   | T.TEStackRegion (n, t) ->
       T.TEStackRegion (zonk_expr n, zonk_expect t)
@@ -2307,19 +2550,20 @@ let rec zonk_expr (e : T.expr) : T.expr =
       T.TESlice (zonk_expr a, zonk_expr lo, zonk_expr hi, zonk_expect t)
   | T.TEToInt e  -> T.TEToInt (zonk_expr e)
   | T.TEToByte e -> T.TEToByte (zonk_expr e)
-  | T.TEToU16 e  -> T.TEToU16 (zonk_expr e)
-  | T.TEToU32 e  -> T.TEToU32 (zonk_expr e)
-  | T.TEToU64 e  -> T.TEToU64 (zonk_expr e)
   | T.TEToFloat e -> T.TEToFloat (zonk_expr e)
+  | T.TECast (t, e) -> T.TECast (t, zonk_expr e)
   | T.TEToIntFromFloat e -> T.TEToIntFromFloat (zonk_expr e)
   | T.TECAlloc (et, n, rt) ->
       T.TECAlloc (zonk_expect et, zonk_expr n, zonk_expect rt)
   | T.TECFree e -> T.TECFree (zonk_expr e)
   | T.TENullPtr t -> T.TENullPtr (zonk_expect t)
   | T.TEIsNull e -> T.TEIsNull (zonk_expr e)
-  | T.TEArrayData (a, t) -> T.TEArrayData (zonk_expr a, zonk_expect t)
+  | T.TEHandleData (a, t) -> T.TEHandleData (zonk_expr a, zonk_expect t)
+  | T.TEPtrCast (e, t) -> T.TEPtrCast (zonk_expr e, zonk_expect t)
   | T.TEDeref (p, t) -> T.TEDeref (zonk_expr p, zonk_expect t)
   | T.TEAssign (x, v, t) -> T.TEAssign (x, zonk_expr v, zonk_expect t)
+  | T.TEAssignField (p, f, v) ->
+      T.TEAssignField (zonk_expr p, f, zonk_expr v)
   | T.TEWhile (c, b) -> T.TEWhile (zonk_expr c, zonk_expr b)
   | T.TEBreak | T.TEContinue -> e
   | T.TEReturn (v, t) -> T.TEReturn (zonk_expr v, zonk_expect t)
@@ -2327,6 +2571,8 @@ let rec zonk_expr (e : T.expr) : T.expr =
       T.TETryAt (zonk_expr a, zonk_expr i, zonk_expect t)
   | T.TEDrop (e, t) ->
       T.TEDrop (zonk_expr e, zonk_expect t)
+  | T.TEReset e ->
+      T.TEReset (zonk_expr e)
   | T.TEAwait (e, t, p) ->
       T.TEAwait (zonk_expr e, zonk_expect t, zonk_expect p)
   | T.TESpawn (e, t) ->
@@ -2561,19 +2807,19 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
            let arms' = List.map (fun (p, g, b, _) -> (p, g, b)) arm_data in
            (T.TEMatch (scrut', scrut_ty, arms', ty), first_live))
 
-  | T.TEArray (r, n, v, ty) ->
+  | T.TEHandle (r, n, v, ty) ->
       let (r', live) = check_moves_expr env live false r in
       let (n', live) = check_moves_expr env live false n in
       let (v', live) = check_moves_expr env live false v in
-      (T.TEArray (r', n', v', ty), live)
+      (T.TEHandle (r', n', v', ty), live)
 
-  | T.TEArrayLit (r, elems, ty) ->
+  | T.TEHandleLit (r, elems, ty) ->
       let (r', live) = check_moves_expr env live false r in
       let (elems_rev, live) = List.fold_left (fun (acc, l) e ->
         let (e', l) = check_moves_expr env l false e in
         (e' :: acc, l)) ([], live) elems
       in
-      (T.TEArrayLit (r', List.rev elems_rev, ty), live)
+      (T.TEHandleLit (r', List.rev elems_rev, ty), live)
 
   | T.TERegion (n, ty) ->
       let (n', live) = check_moves_expr env live false n in
@@ -2617,21 +2863,14 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       let (sub', live) = check_moves_expr env live false sub in
       (T.TEToByte sub', live)
 
-  | T.TEToU16 sub ->
-      let (sub', live) = check_moves_expr env live false sub in
-      (T.TEToU16 sub', live)
-
-  | T.TEToU32 sub ->
-      let (sub', live) = check_moves_expr env live false sub in
-      (T.TEToU32 sub', live)
-
-  | T.TEToU64 sub ->
-      let (sub', live) = check_moves_expr env live false sub in
-      (T.TEToU64 sub', live)
 
   | T.TEToFloat sub ->
       let (sub', live) = check_moves_expr env live false sub in
       (T.TEToFloat sub', live)
+
+  | T.TECast (t, sub) ->
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TECast (t, sub'), live)
 
   | T.TEToIntFromFloat sub ->
       let (sub', live) = check_moves_expr env live false sub in
@@ -2651,9 +2890,13 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       let (p', live) = check_moves_expr env live false p in
       (T.TEIsNull p', live)
 
-  | T.TEArrayData (a, t) ->
+  | T.TEHandleData (a, t) ->
       let (a', live) = check_moves_expr env live false a in
-      (T.TEArrayData (a', t), live)
+      (T.TEHandleData (a', t), live)
+
+  | T.TEPtrCast (e, t) ->
+      let (e', live) = check_moves_expr env live false e in
+      (T.TEPtrCast (e', t), live)
 
   | T.TEDeref (p, t) ->
       let (p', live) = check_moves_expr env live false p in
@@ -2662,6 +2905,11 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
   | T.TEAssign (x, v, t) ->
       let (v', live) = check_moves_expr env live false v in
       (T.TEAssign (x, v', t), live)
+
+  | T.TEAssignField (p, f, v) ->
+      let (p', live) = check_moves_expr env live false p in
+      let (v', live) = check_moves_expr env live false v in
+      (T.TEAssignField (p', f, v'), live)
 
   | T.TEWhile (c, b) ->
       let (c', live) = check_moves_expr env live false c in
@@ -2688,6 +2936,11 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
         | _ -> live
       in
       (T.TEDrop (sub', t), live)
+
+  | T.TEReset sub ->
+      (* reset borrows the region (does not consume it) — like ref(r, _). *)
+      let (sub', live) = check_moves_expr env live false sub in
+      (T.TEReset sub', live)
 
   | T.TEAwait (sub, t, p) ->
       (* await consumes the Task/Stream-shaped operand: if the inner
@@ -2831,10 +3084,10 @@ let rec body_has_suspension (e : T.expr) : bool =
       || List.exists (fun (_, g, b) ->
            (match g with None -> false | Some g -> body_has_suspension g)
            || body_has_suspension b) arms
-  | TEArray (r, n, v, _) ->
+  | TEHandle (r, n, v, _) ->
       body_has_suspension r
       || body_has_suspension n || body_has_suspension v
-  | TEArrayLit (r, es, _) ->
+  | TEHandleLit (r, es, _) ->
       body_has_suspension r || List.exists body_has_suspension es
   | TERegion (n, _) -> body_has_suspension n
   | TEStackRegion (n, _) -> body_has_suspension n
@@ -2850,20 +3103,24 @@ let rec body_has_suspension (e : T.expr) : bool =
       body_has_suspension a
       || body_has_suspension lo || body_has_suspension hi
   | TEToInt e | TEToByte e | TEToFloat e | TEToIntFromFloat e
-  | TEToU16 e | TEToU32 e | TEToU64 e ->
+  | TECast (_, e) ->
       body_has_suspension e
   | TECAlloc (_, n, _) -> body_has_suspension n
   | TECFree e -> body_has_suspension e
   | TEIsNull e -> body_has_suspension e
-  | TEArrayData (a, _) -> body_has_suspension a
+  | TEHandleData (a, _) -> body_has_suspension a
+  | TEPtrCast (e, _) -> body_has_suspension e
   | TEDeref (p, _) -> body_has_suspension p
   | TEAssign (_, v, _) -> body_has_suspension v
+  | TEAssignField (p, _, v) ->
+      body_has_suspension p || body_has_suspension v
   | TEWhile (c, b) ->
       body_has_suspension c || body_has_suspension b
   | TEReturn (v, _) -> body_has_suspension v
   | TETryAt (a, i, _) ->
       body_has_suspension a || body_has_suspension i
   | TEDrop (e, _) -> body_has_suspension e
+  | TEReset e -> body_has_suspension e
   | TETuple (es, _) -> List.exists body_has_suspension es
   | TETupleIdx (e, _, _) -> body_has_suspension e
   | TELetTuple (_, _, v, b, _, _) ->
@@ -2881,7 +3138,8 @@ let check_func (env : env) (f : func) : T.func =
       (List.map (fun t -> (t, false)) param_tys)
   in
   let tparams = f.type_params in
-  let (tbody, tbody_ty) = infer env tparams vars f.body in
+  let (tbody, tbody_ty) =
+    infer env tparams vars (coerce_literal (Some ret_ty) f.body) in
   current_return_ty := None;
   (try unify ret_ty tbody_ty
    with Type_error _ ->
@@ -2936,6 +3194,7 @@ let check_func (env : env) (f : func) : T.func =
       T.return_ty = ret;
       T.body = lbody';
       T.captures = caps;
+      T.takes_env = true;
       T.is_async = false;
     } :: !lifted_funcs)
     my_lambdas;
@@ -2946,6 +3205,7 @@ let check_func (env : env) (f : func) : T.func =
     T.return_ty = ret_ty;
     T.body = body_with_moves;
     T.captures = [];
+    T.takes_env = false;
     T.is_async = body_has_suspension body_with_moves }
 
 (* ---------- top-level entry ---------- *)
@@ -2997,14 +3257,14 @@ let check (prog : program) : T.program =
   let (types, records, funcs, externs, tests) = split_program prog in
   (* Reject any user attempt to redeclare reserved built-in names. *)
   List.iter (fun (td : type_decl) ->
-    if td.type_name = "Option" || td.type_name = "Ref"
+    if td.type_name = "Option" || td.type_name = "Handle"
        || td.type_name = "Result" then
       raise (Type_error
         (Printf.sprintf
            "%S is a reserved built-in type and cannot be redeclared"
            td.type_name))) types;
   List.iter (fun (rd : record_decl) ->
-    if rd.rec_name = "Option" || rd.rec_name = "Ref"
+    if rd.rec_name = "Option" || rd.rec_name = "Handle"
        || rd.rec_name = "Result" then
       raise (Type_error
         (Printf.sprintf

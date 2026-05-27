@@ -1,0 +1,39 @@
+// Pointer arithmetic on the raw *T escape hatch — matches C.
+//   p + n / p - n  advance by elements (result *T)
+//   p - q          element difference between two *T (result int)
+//   to_int(p)      the address as an integer
+
+fn sum_walk(p: *int, n: int) -> int {
+    // Walk with a moving cursor, C-style: cur = p + i.
+    let mut acc = 0;
+    let mut i = 0;
+    while i < n {
+        let cur = p + i;        // *int + int -> *int
+        acc := acc + *cur;      // deref
+        i := i + 1;
+    }
+    acc
+}
+
+fn main() -> int {
+    let buf = c_alloc[int](5);
+    let mut i = 0;
+    while i < 5 {
+        buf[i] := i * i;        // 0,1,4,9,16
+        i := i + 1;
+    }
+
+    let total = sum_walk(buf, 5);   // 30
+
+    let third = buf + 2;            // *int at element 2
+    let v = *third;                 // 4
+
+    let diff = third - buf;         // pointer difference = 2 elements
+
+    // address-as-int: prove the cursor is 2*sizeof(int)=16 bytes past buf
+    let bytes = to_int(third) - to_int(buf);   // 16
+
+    c_free(buf);
+
+    total + v + diff + bytes        // 30 + 4 + 2 + 16 = 52
+}

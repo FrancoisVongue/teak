@@ -12,7 +12,7 @@
 
    Mangling: decl `foo` in namespace `a::b` becomes `a__b__foo`.
    Externs are NOT mangled — their name is the C linker symbol and
-   must round-trip unchanged. Builtins (Array, Region, Option, byte,
+   must round-trip unchanged. Builtins (Handle, Region, Option, byte,
    Some, None, Result, Ok, Err) are never mangled.
 
    Within a namespace, references resolve in this order:
@@ -30,12 +30,17 @@ open Ast
 exception Resolve_error of string
 
 let builtin_names = [
-  "Array"; "Region"; "Option"; "byte";
+  "Handle"; "Region"; "Option"; "byte";
   "Some"; "None";
   "Result"; "Ok"; "Err";
 ]
 
 let is_builtin name = List.mem name builtin_names
+
+(* Mangled names of all `const` declarations across modules. A const is
+   lowered to a 0-argument function; a *use* of a const name must become
+   a call. Populated in `summarize`, read in `resolve_expr`. *)
+let const_set : (string, unit) Hashtbl.t = Hashtbl.create 16
 
 (* `main` is the C entry point — every program has exactly one and it
    keeps its bare name. Any module can declare it, but only one in the
@@ -121,6 +126,11 @@ let summarize (module_path : string list) (prog : top_decl list) : module_summar
         externs := e.ext_name :: !externs
     | TopAlias a ->
         aliases := (a.alias_name, m a.alias_name) :: !aliases
+    | TopConst c ->
+        (* A const resolves like a (0-arg) function name, and its mangled
+           name is recorded so uses get rewritten to calls. *)
+        fns := (c.const_name, m c.const_name) :: !fns;
+        Hashtbl.replace const_set (m c.const_name) ()
     | TopTest _ -> ()  (* test blocks don't introduce namespace-level names *)
     | TopUse _ -> ()
     | TopNamespace _ -> ()  (* flattened away by flatten_namespaces *)
@@ -249,7 +259,14 @@ let build_resolution_map
 let resolve_name
     (map : (string * string) list) (locals : string list) (name : string)
   : string =
-  if List.mem name locals then name
+  if String.contains name ':' then
+    (* Qualified `mod::item` — mangle to `mod__item`, the same form a
+       module's own decls take. Absolute, so the local resolution map is
+       not consulted. *)
+    String.split_on_char ':' name
+    |> List.filter (fun s -> s <> "")
+    |> String.concat "__"
+  else if List.mem name locals then name
   else if is_builtin name then name
   else
     match List.assoc_opt name map with
@@ -277,7 +294,13 @@ let rec resolve_expr
   let rt = resolve_ty map locals in
   match e with
   | EInt _ | EFloat _ | EBool _ | EStringLit _ -> e
-  | EVar x -> EVar (resolve_name map locals x)
+  | EVar x ->
+      let resolved = resolve_name map locals x in
+      (* A use of a const name becomes a call to its lowered 0-arg fn.
+         Locals shadow consts and are left as plain variable refs. *)
+      if not (List.mem x locals) && Hashtbl.mem const_set resolved
+      then ECall (EVar resolved, [])
+      else EVar resolved
   | EBinop (op, a, b) -> EBinop (op, r a, r b)
   | EUnop  (op, a)    -> EUnop  (op, r a)
   | ECall (callee, args) -> ECall (r callee, List.map r args)
@@ -311,6 +334,7 @@ let rec resolve_expr
       let body' = resolve_expr map new_locals body in
       EArena (x, v', body')
   | EAssign (x, v) -> EAssign (resolve_name map locals x, r v)
+  | EAssignField (p, f, v) -> EAssignField (r p, f, r v)
   | EWhile (c, b) -> EWhile (r c, r b)
   | EBreak | EContinue -> e
   | EReturn v -> EReturn (r v)
@@ -339,8 +363,8 @@ let rec resolve_expr
         (p', guard', resolve_expr map new_locals body)) arms
       in
       EMatch (s', arms')
-  | EArray (rg, n, v) -> EArray (r rg, r n, r v)
-  | EArrayLit (rg, elems) -> EArrayLit (r rg, List.map r elems)
+  | EHandle (rg, n, v) -> EHandle (r rg, r n, r v)
+  | EHandleLit (rg, elems) -> EHandleLit (r rg, List.map r elems)
   | ERegion n -> ERegion (r n)
   | EStackRegion n -> EStackRegion (r n)
   | EAlignedRegion (n, a) -> EAlignedRegion (r n, r a)
@@ -350,18 +374,18 @@ let rec resolve_expr
   | ESlice (a, lo, hi) -> ESlice (r a, r lo, r hi)
   | EToInt e -> EToInt (r e)
   | EToByte e -> EToByte (r e)
-  | EToU16 e -> EToU16 (r e)
-  | EToU32 e -> EToU32 (r e)
-  | EToU64 e -> EToU64 (r e)
   | EToFloat e -> EToFloat (r e)
+  | ECast (t, e) -> ECast (t, r e)
   | ECAlloc (t, n) -> ECAlloc (rt t, r n)
   | ECFree p -> ECFree (r p)
   | ENullPtr t -> ENullPtr (rt t)
   | EIsNull p -> EIsNull (r p)
-  | EArrayData a -> EArrayData (r a)
+  | EHandleData a -> EHandleData (r a)
+  | EPtrCast (t, e) -> EPtrCast (rt t, r e)
   | EDeref p -> EDeref (r p)
   | ETryAt (a, i) -> ETryAt (r a, r i)
   | EDrop e -> EDrop (r e)
+  | EReset e -> EReset (r e)
   | EAwait e -> EAwait (r e)
   | EAwaitAll branches -> EAwaitAll (List.map r branches)
   | EAwaitAllDyn e -> EAwaitAllDyn (r e)
@@ -394,6 +418,16 @@ let resolve_decl
       Some (TopAlias {
         alias_name = m_name a.alias_name;
         alias_ty   = resolve_ty map [] a.alias_ty;
+      })
+  | TopConst c ->
+      (* Lower a const to a 0-argument function. Uses of the const name
+         are rewritten to calls in resolve_expr. *)
+      Some (TopFunc {
+        name        = m_name c.const_name;
+        type_params = [];
+        params      = [];
+        return_ty   = resolve_ty map [] c.const_ty;
+        body        = resolve_expr map [] c.const_value;
       })
   | TopType td ->
       let type_params = td.type_params in
@@ -501,13 +535,14 @@ let expand_in_expr (aliases : (string * ty) list) (e : expr) : expr =
     | ELet (x, m, asc, v, b) -> ELet (x, m, Option.map xt asc, ex v, ex b)
     | EArena (x, v, b) -> EArena (x, ex v, ex b)
     | EAssign (x, v) -> EAssign (x, ex v)
+    | EAssignField (p, f, v) -> EAssignField (ex p, f, ex v)
     | EWhile (c, b) -> EWhile (ex c, ex b)
     | EReturn v -> EReturn (ex v)
     | EMatch (s, arms) ->
         EMatch (ex s, List.map (fun (p, g, b) ->
           (p, Option.map ex g, ex b)) arms)
-    | EArray (r, n, v) -> EArray (ex r, ex n, ex v)
-    | EArrayLit (r, elems) -> EArrayLit (ex r, List.map ex elems)
+    | EHandle (r, n, v) -> EHandle (ex r, ex n, ex v)
+    | EHandleLit (r, elems) -> EHandleLit (ex r, List.map ex elems)
     | ERegion n -> ERegion (ex n)
     | EStackRegion n -> EStackRegion (ex n)
     | EAlignedRegion (n, a) -> EAlignedRegion (ex n, ex a)
@@ -517,18 +552,18 @@ let expand_in_expr (aliases : (string * ty) list) (e : expr) : expr =
     | ESlice (a, lo, hi) -> ESlice (ex a, ex lo, ex hi)
     | EToInt e -> EToInt (ex e)
     | EToByte e -> EToByte (ex e)
-    | EToU16 e -> EToU16 (ex e)
-    | EToU32 e -> EToU32 (ex e)
-    | EToU64 e -> EToU64 (ex e)
     | EToFloat e -> EToFloat (ex e)
+    | ECast (t, e) -> ECast (t, ex e)
     | ECAlloc (t, n) -> ECAlloc (xt t, ex n)
     | ECFree p -> ECFree (ex p)
     | ENullPtr t -> ENullPtr (xt t)
     | EIsNull p -> EIsNull (ex p)
-    | EArrayData a -> EArrayData (ex a)
+    | EHandleData a -> EHandleData (ex a)
+    | EPtrCast (t, e) -> EPtrCast (xt t, ex e)
     | EDeref p -> EDeref (ex p)
     | ETryAt (a, i) -> ETryAt (ex a, ex i)
     | EDrop e -> EDrop (ex e)
+    | EReset e -> EReset (ex e)
     | EAwait e -> EAwait (ex e)
     | EAwaitAll branches -> EAwaitAll (List.map ex branches)
     | EAwaitAllDyn e -> EAwaitAllDyn (ex e)
@@ -563,7 +598,7 @@ let expand_in_decl (aliases : (string * ty) list) (d : top_decl) : top_decl =
         ext_params = List.map (fun (n, t) -> (n, xt t)) e.ext_params;
         ext_return_ty = xt e.ext_return_ty; }
   | TopTest td -> TopTest { td with test_body = expand_in_expr aliases td.test_body }
-  | TopUse _ | TopAlias _ -> d
+  | TopUse _ | TopAlias _ | TopConst _ -> d
   | TopNamespace _ -> d
 
 (* Top-level entry: take an ordered list of (file_name, parsed program),
@@ -571,6 +606,7 @@ let expand_in_decl (aliases : (string * ty) list) (d : top_decl) : top_decl =
    references, return one merged program ready for the type checker.
    Externs are deduplicated by name. *)
 let resolve (modules : (string * program) list) : program =
+  Hashtbl.clear const_set;
   (* Step 1: each file → list of (namespace_path, decls). Multiple
      files contributing to the same namespace path are merged. *)
   let merged : (string list * top_decl list) list =

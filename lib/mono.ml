@@ -28,6 +28,7 @@ let rec mangle_ty (t : ty) : string =
       in
       String.concat "_" parts
   | TyPtr inner -> "ptr_" ^ mangle_ty inner
+  | TyTuple [] -> "unit"
   | TyTuple ts ->
       "Tuple_" ^ String.concat "_" (List.map mangle_ty ts)
   | TyMeta _ -> failwith "mono: TyMeta after check"
@@ -113,12 +114,12 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
          with Not_found ->
            failwith (Printf.sprintf
              "mono rewrite_ty: free type variable %S" n))
-    | TyApp ("Array", [inner]) ->
-        (* Array is structural — emit emits one wrapper+cell pair per
+    | TyApp ("Handle", [inner]) ->
+        (* Handle is structural — emit emits one wrapper+cell pair per
            distinct element type. *)
-        TyApp ("Array", [rewrite_ty subst inner])
-    | TyApp ("Array", _) ->
-        failwith "mono rewrite_ty: Array with wrong arity (should be unary)"
+        TyApp ("Handle", [rewrite_ty subst inner])
+    | TyApp ("Handle", _) ->
+        failwith "mono rewrite_ty: Handle with wrong arity (should be unary)"
     | TyApp ("Region", []) ->
         (* Region is a structural nullary builtin — emit just typedefs it. *)
         TyApp ("Region", [])
@@ -126,7 +127,7 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         failwith "mono rewrite_ty: Region takes no type arguments"
     | TyApp ("Task", [inner]) ->
         (* Stage 3 builtin — slot-pool handle. emit phases (4–5) generate
-           one wrapper struct per distinct result type, just like Array. *)
+           one wrapper struct per distinct result type, just like Handle. *)
         TyApp ("Task", [rewrite_ty subst inner])
     | TyApp ("Task", _) ->
         failwith "mono rewrite_ty: Task with wrong arity (should be unary)"
@@ -134,14 +135,9 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         TyApp ("Stream", [rewrite_ty subst inner])
     | TyApp ("Stream", _) ->
         failwith "mono rewrite_ty: Stream with wrong arity (should be unary)"
-    | TyApp ("byte", []) | TyApp ("u16", []) | TyApp ("u32", []) | TyApp ("u64", []) ->
-        t
-    | TyApp ("byte", _) ->
-        failwith "mono rewrite_ty: byte takes no type arguments"
-    | TyApp ("float", []) ->
-        TyApp ("float", [])
-    | TyApp ("float", _) ->
-        failwith "mono rewrite_ty: float takes no type arguments"
+    | TyApp (n, []) when is_numeric_type n -> t   (* whole numeric matrix *)
+    | TyApp (n, _) when is_numeric_type n ->
+        failwith (Printf.sprintf "mono rewrite_ty: %s takes no type arguments" n)
     | TyApp (n, args) ->
         let args = List.map (rewrite_ty subst) args in
         if is_record_name n then begin
@@ -223,12 +219,12 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
           (p, Option.map (rewrite_expr subst) g, rewrite_expr subst b)) arms in
         Check.T.TEMatch (rewrite_expr subst s, rt st, arms, rt rty)
 
-    | Check.T.TEArray (r, n, v, t) ->
-        Check.T.TEArray (rewrite_expr subst r,
+    | Check.T.TEHandle (r, n, v, t) ->
+        Check.T.TEHandle (rewrite_expr subst r,
                          rewrite_expr subst n,
                          rewrite_expr subst v, rt t)
-    | Check.T.TEArrayLit (r, elems, t) ->
-        Check.T.TEArrayLit (rewrite_expr subst r,
+    | Check.T.TEHandleLit (r, elems, t) ->
+        Check.T.TEHandleLit (rewrite_expr subst r,
                             List.map (rewrite_expr subst) elems,
                             rt t)
     | Check.T.TERegion (n, t) ->
@@ -254,14 +250,10 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         Check.T.TEToInt (rewrite_expr subst e)
     | Check.T.TEToByte e ->
         Check.T.TEToByte (rewrite_expr subst e)
-    | Check.T.TEToU16 e ->
-        Check.T.TEToU16 (rewrite_expr subst e)
-    | Check.T.TEToU32 e ->
-        Check.T.TEToU32 (rewrite_expr subst e)
-    | Check.T.TEToU64 e ->
-        Check.T.TEToU64 (rewrite_expr subst e)
     | Check.T.TEToFloat e ->
         Check.T.TEToFloat (rewrite_expr subst e)
+    | Check.T.TECast (t, e) ->
+        Check.T.TECast (t, rewrite_expr subst e)
     | Check.T.TEToIntFromFloat e ->
         Check.T.TEToIntFromFloat (rewrite_expr subst e)
     | Check.T.TECAlloc (et, n, rt_) ->
@@ -272,12 +264,16 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         Check.T.TENullPtr (rt t)
     | Check.T.TEIsNull p ->
         Check.T.TEIsNull (rewrite_expr subst p)
-    | Check.T.TEArrayData (a, t) ->
-        Check.T.TEArrayData (rewrite_expr subst a, rt t)
+    | Check.T.TEHandleData (a, t) ->
+        Check.T.TEHandleData (rewrite_expr subst a, rt t)
+    | Check.T.TEPtrCast (e, t) ->
+        Check.T.TEPtrCast (rewrite_expr subst e, rt t)
     | Check.T.TEDeref (p, t) ->
         Check.T.TEDeref (rewrite_expr subst p, rt t)
     | Check.T.TEAssign (x, v, t) ->
         Check.T.TEAssign (x, rewrite_expr subst v, rt t)
+    | Check.T.TEAssignField (p, f, v) ->
+        Check.T.TEAssignField (rewrite_expr subst p, f, rewrite_expr subst v)
     | Check.T.TEWhile (c, b) ->
         Check.T.TEWhile (rewrite_expr subst c, rewrite_expr subst b)
     | Check.T.TEBreak | Check.T.TEContinue -> e
@@ -287,6 +283,8 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         Check.T.TETryAt (rewrite_expr subst a, rewrite_expr subst i, rt t)
     | Check.T.TEDrop (e, t) ->
         Check.T.TEDrop (rewrite_expr subst e, rt t)
+    | Check.T.TEReset e ->
+        Check.T.TEReset (rewrite_expr subst e)
     | Check.T.TEAwait (e, t, p) ->
         Check.T.TEAwait (rewrite_expr subst e, rt t, rt p)
     | Check.T.TESpawn (e, t) ->
@@ -377,6 +375,7 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
           return_ty   = new_ret;
           body        = new_body;
           captures    = new_caps;
+          takes_env   = orig.takes_env;
           is_async    = orig.is_async;
         } in
         Hashtbl.replace mono_fns mono.name mono

@@ -3,7 +3,7 @@
 // Когда регион уходит из scope, free buffer одной операцией.
 fn main() -> int {
     arena r = region(1024);
-    let a = array(r, [1, 2, 3, 4]);   // массив на 4 int в r
+    let a = ref(r, [1, 2, 3, 4]);   // массив на 4 int в r
     a[0] + a[1] + a[2] + a[3] + len(a)
     // 1 + 2 + 3 + 4 + 4 = 14
 }

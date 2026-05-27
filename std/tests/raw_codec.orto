@@ -1,0 +1,29 @@
+// Regression: std::raw byte codec over raw *byte + bswap.
+use raw::{write_u64_le, read_u64_le, write_u64_be, read_u64_be,
+          write_u32_be, read_u32_be, bswap32, bswap16};
+
+fn main() -> int {
+    let buf = c_alloc[byte](16);
+
+    // u64 with bit 63 SET (built via shifts to avoid a >i64 literal):
+    // 0x80000001_00000002. The old int-based codec mangled this.
+    let val = (to_u64(2147483649) << 32) | to_u64(2);   // 0x80000001 hi, 2 lo
+    write_u64_le(buf, 0, val);
+    let a = read_u64_le(buf, 0);
+    write_u64_be(buf, 8, val);
+    let b = read_u64_be(buf, 8);
+    // round-trip preserves the bit-63 value, and byte layout is correct:
+    let le_ok = if buf[0] == to_byte(2) { if buf[7] == to_byte(128) { 1 } else { 0 } } else { 0 };
+    let ok64 = if a == val { if b == val { le_ok } else { 0 } } else { 0 };
+
+    write_u32_be(buf, 0, 168496141);         // 0x0A0B0C0D, host-independent
+    let c = read_u32_be(buf, 0);
+    let ok32 = if c == 168496141 { 1 } else { 0 };
+
+    let s32 = bswap32(16909060);             // 0x01020304 -> 0x04030201
+    let s16 = bswap16(258);                  // 0x0102 -> 0x0201
+    let ok_sw = if s32 == 67305985 { if s16 == 513 { 1 } else { 0 } } else { 0 };
+
+    c_free(buf);
+    ok64 + ok32 + ok_sw + 4                  // 1 + 1 + 1 + 4 = 7
+}

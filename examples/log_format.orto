@@ -7,11 +7,11 @@
 use str::{lookup, to_upper, concat_all, parse_int, int_to_bytes};
 // println is an intrinsic
 
-fn format_log(r: Region, input: Array[byte]) -> Array[byte] {
+fn format_log(r: Region, input: Handle[byte]) -> Handle[byte] {
     let name = to_upper(r, lookup(input, "user"));
     let age  = int_to_bytes(r, parse_int(lookup(input, "age")));
     let city = lookup(input, "city");
-    concat_all(r, array(r, [">> ", name, " (", age, ") lives in ", city, " <<"]))
+    concat_all(r, ref(r, [">> ", name, " (", age, ") lives in ", city, " <<"]))
 }
 
 fn main() -> int {

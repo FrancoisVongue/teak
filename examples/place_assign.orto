@@ -1,0 +1,27 @@
+// Place-path assignment: write a field through a path without copying
+// the whole struct. The left of `:=` may be a variable, an array slot,
+// or a field of either — `s.f`, `r[i].f`, `s.f.g`, `r[i].a.b`.
+
+struct Point { x: int, y: int }
+struct Line  { a: Point, b: Point }
+
+fn main() -> int {
+    arena r = region(1024);
+
+    // Through a Ref index: writes region memory in place, no `mut` needed
+    // (the handle is just read to find the cell).
+    let pts = ref(r, 3, Point { x: 0, y: 0 });
+    pts[1].x := 10;
+    pts[1].y := 5;
+
+    // Nested path through an index.
+    let lines = ref(r, 1, Line { a: Point{x:0,y:0}, b: Point{x:0,y:0} });
+    lines[0].a.x := 7;
+    lines[0].b.y := 3;
+
+    // Pure field path on a local — the local must be `mut`.
+    let mut p = Point { x: 100, y: 0 };
+    p.x := p.x + 1;
+
+    pts[1].x + pts[1].y + lines[0].a.x + lines[0].b.y + p.x  // 10+5+7+3+101 = 126
+}

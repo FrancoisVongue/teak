@@ -19,7 +19,7 @@ use sys::{o_wronly, o_rdonly, o_creat, o_trunc};
 use str::c_str;
 // print is an intrinsic
 
-fn do_write(r: Region, ring: Ring, path: Array[byte]) -> int {
+fn do_write(r: Region, ring: Ring, path: Handle[byte]) -> int {
     let flags = o_wronly() + o_creat() + o_trunc();
     let fd = uring_open(ring, path, flags, 420);
     if fd < 0 { return 1 }
@@ -30,10 +30,10 @@ fn do_write(r: Region, ring: Ring, path: Array[byte]) -> int {
     0
 }
 
-fn do_read(r: Region, ring: Ring, path: Array[byte]) -> int {
+fn do_read(r: Region, ring: Ring, path: Handle[byte]) -> int {
     let fd = uring_open(ring, path, o_rdonly(), 0);
     if fd < 0 { return 3 }
-    let buf = array(r, 256, to_byte(0));
+    let buf = ref(r, 256, to_byte(0));
     let n = uring_read(ring, fd, buf, 0);
     uring_close(ring, fd);
     if n <= 0 { return 4 }

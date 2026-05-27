@@ -17,7 +17,7 @@ use sys::{o_wronly, o_rdonly, o_creat, o_trunc};
 use str::{c_str, int_to_bytes, concat_all};
 // print/println are intrinsics
 
-fn write_temp(ring: Ring, path: Array[byte], content: Array[byte]) -> int {
+fn write_temp(ring: Ring, path: Handle[byte], content: Handle[byte]) -> int {
     let fd = uring_open(ring, path, o_wronly() + o_creat() + o_trunc(), 420);
     if fd < 0 { return 1 }
     uring_write(ring, fd, content, 0);
@@ -46,9 +46,9 @@ fn main() -> int {
     if fd1 < 0 || fd2 < 0 || fd3 < 0 { return 11 }
 
     // ---- batch: queue three reads, one flush, drain three CQEs ----
-    let buf1 = array(r, 16, to_byte(0));
-    let buf2 = array(r, 16, to_byte(0));
-    let buf3 = array(r, 16, to_byte(0));
+    let buf1 = ref(r, 16, to_byte(0));
+    let buf2 = ref(r, 16, to_byte(0));
+    let buf3 = ref(r, 16, to_byte(0));
 
     submit_read(ring, fd1, buf1, 0, 101);
     submit_read(ring, fd2, buf2, 0, 102);
@@ -74,7 +74,7 @@ fn main() -> int {
     print(slice(buf2, 0, 2));   // BB
     print(slice(buf3, 0, 4));   // CCCC
 
-    println(concat_all(r, array(r, [
+    println(concat_all(r, ref(r, [
         "\nbatched reads: ",
         int_to_bytes(r, completed),
         " ops, ",

@@ -1,0 +1,80 @@
+// std/set.orto — a set is a map with no values: Map[T, ()]. Thin layer
+// over `map`; hash/eq are injected exactly the same way and stored in the
+// underlying map. Set operations (union/intersect/difference) build a
+// fresh set carrying the same hash/eq as the left operand.
+
+use map::{Map};
+use vec::{Vec};
+
+fn make[T](r: Region, cap: int, zt: T,
+           hash: fn(T) -> int, eq: fn(T, T) -> bool) -> Map[T, ()] {
+    map::new(r, cap, zt, (), hash, eq)
+}
+
+fn add[T](s: Map[T, ()], r: Region, x: T) -> Map[T, ()] { map::insert(s, r, x, ()) }
+fn has[T](s: Map[T, ()], x: T) -> bool { map::contains(s, x) }
+fn remove[T](s: Map[T, ()], x: T) -> Map[T, ()] { map::remove(s, x) }
+fn size[T](s: Map[T, ()]) -> int { map::size(s) }
+fn is_empty[T](s: Map[T, ()]) -> bool { map::is_empty(s) }
+
+fn each[T](s: Map[T, ()], f: fn(T) -> ()) -> () {
+    let mut i = 0;
+    while i < s.cap {
+        let e = s.slots[i];
+        if e.state == 1 { f(e.key); }
+        i := i + 1;
+    }
+}
+
+// All elements of a, then all of b.
+fn union[T](r: Region, a: Map[T, ()], b: Map[T, ()]) -> Map[T, ()] {
+    let zt = a.ze.key;
+    let mut out = map::new(r, a.cap + b.cap, zt, (), a.hash, a.eq);
+    let ka = map::keys(a, r, zt);
+    let mut i = 0;
+    while i < vec::size(ka) { out := map::insert(out, r, vec::get(ka, i), ()); i := i + 1; }
+    let kb = map::keys(b, r, zt);
+    i := 0;
+    while i < vec::size(kb) { out := map::insert(out, r, vec::get(kb, i), ()); i := i + 1; }
+    out
+}
+
+// Elements present in both a and b.
+fn intersect[T](r: Region, a: Map[T, ()], b: Map[T, ()]) -> Map[T, ()] {
+    let zt = a.ze.key;
+    let mut out = map::new(r, a.cap, zt, (), a.hash, a.eq);
+    let ka = map::keys(a, r, zt);
+    let mut i = 0;
+    while i < vec::size(ka) {
+        let x = vec::get(ka, i);
+        if map::contains(b, x) { out := map::insert(out, r, x, ()); }
+        i := i + 1;
+    }
+    out
+}
+
+// True iff every element of a is also in b.
+fn is_subset[T](r: Region, a: Map[T, ()], b: Map[T, ()]) -> bool {
+    let ka = map::keys(a, r, a.ze.key);
+    let mut i = 0;
+    let mut ok = true;
+    while i < vec::size(ka) {
+        if !map::contains(b, vec::get(ka, i)) { ok := false; i := vec::size(ka); }
+        else { i := i + 1; }
+    }
+    ok
+}
+
+// Elements in a but not in b.
+fn difference[T](r: Region, a: Map[T, ()], b: Map[T, ()]) -> Map[T, ()] {
+    let zt = a.ze.key;
+    let mut out = map::new(r, a.cap, zt, (), a.hash, a.eq);
+    let ka = map::keys(a, r, zt);
+    let mut i = 0;
+    while i < vec::size(ka) {
+        let x = vec::get(ka, i);
+        if !map::contains(b, x) { out := map::insert(out, r, x, ()); }
+        i := i + 1;
+    }
+    out
+}

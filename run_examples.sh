@@ -16,8 +16,9 @@ mkdir -p "$OUT"
 BASE=run_baseline.txt
 RESULT="$OUT/result.txt"
 : > "$RESULT"
-for f in examples/*.orto; do
+for f in examples/*.orto std/tests/*.orto; do
   name=$(basename "$f" .orto)
+  case "$f" in std/tests/*) name="stdtest_$name";; esac
   if ! "$ORTO" "$f" -o "$OUT/$name.c" >/dev/null 2>&1; then
     echo "$name NOMAIN_OR_ERR" >> "$RESULT"; continue
   fi

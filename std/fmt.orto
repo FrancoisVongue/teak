@@ -1,0 +1,65 @@
+// std/fmt.orto — string formatting with `{}` placeholders. No printf
+// mini-language and no type-directed magic: you convert your values to
+// strings yourself (e.g. str::from_int) and pass them as `parts`. The
+// formatter just walks the template and drops each part into the next
+// `{}` slot, in order. `{{` is a literal `{`, `}}` a literal `}`.
+
+use vec::{Vec, new, push, slice_of};
+
+fn format(r: Region, template: Handle[byte], parts: Handle[Handle[byte]]) -> Handle[byte] {
+    let mut out = new(r, len(template) + 8, to_byte(0));
+    let n = len(template);
+    let mut i = 0;
+    let mut k = 0;
+    while i < n {
+        let c = to_int(template[i]);
+        if c == 123 {                                  // '{'
+            if i + 1 < n {
+                let c2 = to_int(template[i + 1]);
+                if c2 == 125 {                         // '}'  -> a slot
+                    let p = parts[k];
+                    let mut j = 0;
+                    while j < len(p) {
+                        out := push(out, r, p[j]);
+                        j := j + 1;
+                    }
+                    k := k + 1;
+                    i := i + 2;
+                } else {
+                    if c2 == 123 {                     // '{{' -> literal '{'
+                        out := push(out, r, template[i]);
+                        i := i + 2;
+                    } else {
+                        out := push(out, r, template[i]);
+                        i := i + 1;
+                    }
+                }
+            } else {
+                out := push(out, r, template[i]);
+                i := i + 1;
+            }
+        } else {
+            if c == 125 && i + 1 < n && to_int(template[i + 1]) == 125 {
+                out := push(out, r, template[i]);     // '}}' -> literal '}'
+                i := i + 2;
+            } else {
+                out := push(out, r, template[i]);
+                i := i + 1;
+            }
+        }
+    }
+    slice_of(out)
+}
+
+// Format and write a line to stdout. Takes NO region: the formatted
+// string never escapes this call, so the function provisions its own
+// scratch arena, fills it, writes, and frees it on return. The caller's
+// region is for values the caller keeps — not for throwaway output.
+fn line(template: Handle[byte], parts: Handle[Handle[byte]]) -> () {
+    let mut total = len(template);
+    let mut i = 0;
+    while i < len(parts) { total := total + len(parts[i]); i := i + 1; }
+    arena s = region((total + 16) * 2);
+    println(format(s, template, parts));
+}
+

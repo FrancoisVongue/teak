@@ -1,0 +1,18 @@
+// A linked list. A node holds a Ref to the rest of the list, which
+// lives in the same region. ref(r, v) allocates one cell; rest[0] reads
+// it. The fixed-size handle is what makes the recursive type finite.
+
+enum List { Nil, Cons(int, Handle[List]) }
+
+fn sum(l: List) -> int {
+    match l {
+        Nil => 0,
+        Cons(v, rest) => v + sum(rest[0])
+    }
+}
+
+fn main() -> int {
+    arena r = region(4096);
+    let l = Cons(1, ref(r, Cons(2, ref(r, Cons(3, ref(r, Nil))))));
+    sum(l)   // 1 + 2 + 3 = 6
+}

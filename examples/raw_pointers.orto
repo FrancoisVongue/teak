@@ -7,7 +7,7 @@
 //   - *p deref
 //   - is_null + null_ptr[T]()
 //   - c_free
-//   - array_data(a) — view an Array[T]'s bytes as *T, for libc calls
+//   - as_ptr(a) — view an Handle[T]'s bytes as *T, for libc calls
 
 extern fn putchar(c: int) -> int
 // libc write(fd, buf, n) — fd=1 is stdout
@@ -35,8 +35,8 @@ fn main() -> int {
     let p: *int = null_ptr[int]();
     let nullness = if is_null(p) { 1 } else { 0 };
 
-    // 3. Hand off Array[byte] bytes to a libc call via array_data.
-    write(1, array_data("hi\n"), 3);
+    // 3. Hand off Handle[byte] bytes to a libc call via array_data.
+    write(1, as_ptr("hi\n"), 3);
 
     total + first + nullness     // 30 + 0 + 1 = 31
 }

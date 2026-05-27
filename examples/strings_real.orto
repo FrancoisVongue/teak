@@ -11,29 +11,29 @@
 // live in `std::str` once we have modules.
 
 
-// ---------- "stdlib" — library functions over Array[byte] ----------
+// ---------- "stdlib" — library functions over Handle[byte] ----------
 
-fn bytes_eq_loop(a: Array[byte], b: Array[byte], i: int) -> bool {
+fn bytes_eq_loop(a: Handle[byte], b: Handle[byte], i: int) -> bool {
     if i >= len(a) { true }
     else if a[i] == b[i] { bytes_eq_loop(a, b, i + 1) }
     else { false }
 }
 
-fn bytes_eq(a: Array[byte], b: Array[byte]) -> bool {
+fn bytes_eq(a: Handle[byte], b: Handle[byte]) -> bool {
     if len(a) == len(b) { bytes_eq_loop(a, b, 0) } else { false }
 }
 
-fn index_of_loop(s: Array[byte], c: byte, i: int) -> int {
+fn index_of_loop(s: Handle[byte], c: byte, i: int) -> int {
     if i >= len(s) { 0 - 1 }
     else if s[i] == c { i }
     else { index_of_loop(s, c, i + 1) }
 }
 
-fn index_of(s: Array[byte], c: byte) -> int {
+fn index_of(s: Handle[byte], c: byte) -> int {
     index_of_loop(s, c, 0)
 }
 
-fn parse_int_loop(s: Array[byte], i: int, acc: int) -> int {
+fn parse_int_loop(s: Handle[byte], i: int, acc: int) -> int {
     if i >= len(s) { acc }
     else {
         let n = to_int(s[i]);
@@ -43,31 +43,31 @@ fn parse_int_loop(s: Array[byte], i: int, acc: int) -> int {
     }
 }
 
-fn parse_int(s: Array[byte]) -> int { parse_int_loop(s, 0, 0) }
+fn parse_int(s: Handle[byte]) -> int { parse_int_loop(s, 0, 0) }
 
 fn upper_byte(b: byte) -> byte {
     let n = to_int(b);
     if n >= 97 && n <= 122 { to_byte(n - 32) } else { b }
 }
 
-fn to_upper_loop(src: Array[byte], dst: Array[byte], i: int) -> int {
+fn to_upper_loop(src: Handle[byte], dst: Handle[byte], i: int) -> int {
     if i >= len(src) { 0 }
     else { dst[i] := upper_byte(src[i]); to_upper_loop(src, dst, i + 1) }
 }
 
-fn to_upper(r: Region, s: Array[byte]) -> Array[byte] {
-    let dst = array(r, len(s), to_byte(0));
+fn to_upper(r: Region, s: Handle[byte]) -> Handle[byte] {
+    let dst = ref(r, len(s), to_byte(0));
     to_upper_loop(s, dst, 0);
     dst
 }
 
-fn copy_into(dst: Array[byte], src: Array[byte], at: int, i: int) -> int {
+fn copy_into(dst: Handle[byte], src: Handle[byte], at: int, i: int) -> int {
     if i >= len(src) { 0 }
     else { dst[at + i] := src[i]; copy_into(dst, src, at, i + 1) }
 }
 
-fn concat(r: Region, a: Array[byte], b: Array[byte]) -> Array[byte] {
-    let dst = array(r, len(a) + len(b), to_byte(0));
+fn concat(r: Region, a: Handle[byte], b: Handle[byte]) -> Handle[byte] {
+    let dst = ref(r, len(a) + len(b), to_byte(0));
     copy_into(dst, a, 0, 0);
     copy_into(dst, b, len(a), 0);
     dst
@@ -77,7 +77,7 @@ fn digits_count(n: int) -> int {
     if n < 10 { 1 } else { 1 + digits_count(n / 10) }
 }
 
-fn write_digits(dst: Array[byte], n: int, pos: int) -> int {
+fn write_digits(dst: Handle[byte], n: int, pos: int) -> int {
     if n < 10 { dst[pos] := to_byte(48 + n); 0 }
     else {
         dst[pos] := to_byte(48 + (n % 10));
@@ -85,9 +85,9 @@ fn write_digits(dst: Array[byte], n: int, pos: int) -> int {
     }
 }
 
-fn int_to_bytes(r: Region, n: int) -> Array[byte] {
+fn int_to_bytes(r: Region, n: int) -> Handle[byte] {
     let k = digits_count(n);
-    let dst = array(r, k, to_byte(0));
+    let dst = ref(r, k, to_byte(0));
     write_digits(dst, n, k - 1);
     dst
 }
@@ -95,7 +95,7 @@ fn int_to_bytes(r: Region, n: int) -> Array[byte] {
 // Find "key=VALUE" in a comma-separated string starting at `from`.
 // Returns a slice over VALUE. Empty slice if not found.
 // All slicing — no allocation, the result lives in the input's region.
-fn field_after(s: Array[byte], key: Array[byte], from: int) -> Array[byte] {
+fn field_after(s: Handle[byte], key: Handle[byte], from: int) -> Handle[byte] {
     if from >= len(s) {
         slice(s, 0, 0)
     } else if from + len(key) + 1 <= len(s)
@@ -113,7 +113,7 @@ fn field_after(s: Array[byte], key: Array[byte], from: int) -> Array[byte] {
     }
 }
 
-fn lookup(s: Array[byte], key: Array[byte]) -> Array[byte] {
+fn lookup(s: Handle[byte], key: Handle[byte]) -> Handle[byte] {
     field_after(s, key, 0)
 }
 
@@ -123,7 +123,7 @@ fn lookup(s: Array[byte], key: Array[byte]) -> Array[byte] {
 // no putchar-loop helper needed.
 
 // Build ">> ALICE (30) lives in NYC <<" from "user=alice,age=30,city=NYC".
-fn format_log(r: Region, input: Array[byte]) -> Array[byte] {
+fn format_log(r: Region, input: Handle[byte]) -> Handle[byte] {
     let name = lookup(input, "user");
     let age  = parse_int(lookup(input, "age"));
     let city = lookup(input, "city");

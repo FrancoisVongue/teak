@@ -1,9 +1,12 @@
+absurd RUN 42
 address_book RUN 0
 array_basic RUN 14
 bin NOMAIN_OR_ERR
 builtin_values RUN 100
 closures RUN 147
 closures_generic RUN 125
+composite RUN 196
+constants RUN 2
 db NOMAIN_OR_ERR
 db_driver NOMAIN_OR_ERR
 fact RUN 176
@@ -12,6 +15,7 @@ file_io GCCFAIL
 file_io_uring GCCFAIL
 first RUN 41
 float_basic RUN 0
+for_ref RUN 210
 handler RUN 101
 hello_putchar RUN 0
 higher_order RUN 157
@@ -21,16 +25,21 @@ iouring NOMAIN_OR_ERR
 iouring_batch GCCFAIL
 lambda RUN 42
 linear_basic RUN 0
+list RUN 6
 log_format RUN 29
 loops_basic RUN 55
 netlink_msg RUN 0
 ops RUN 100
 option_result RUN 11
+place_assign RUN 126
 poly_adt RUN 117
 poly_id RUN 42
+ptr_arith RUN 52
+ptr_reinterpret RUN 7
 raw_pointers GCCFAIL
 records RUN 73
 region_as_file RUN 120
+region_reset RUN 100
 regions RUN 116
 shapes RUN 123
 stackcalc RUN 42
@@ -41,3 +50,10 @@ strings_print RUN 0
 strings_real RUN 29
 strings_slice RUN 119
 sys NOMAIN_OR_ERR
+tree RUN 123
+unit RUN 67
+stdtest_collections RUN 38
+stdtest_numeric_wide RUN 48
+stdtest_raw_codec RUN 7
+stdtest_text RUN 23
+stdtest_word_freq RUN 4

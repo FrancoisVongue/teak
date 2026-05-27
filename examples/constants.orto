@@ -1,0 +1,17 @@
+// Module-level constants. `const name: T = expr;` — a named value usable
+// anywhere a value of type T is. Lowered to a 0-argument function and the
+// uses to calls, so it costs nothing and needs no new machinery. Const
+// values live at the top level (no region in scope), so they are pure
+// (literals, arithmetic, other consts) — never allocations.
+
+const max_cap: int = 4096;
+const half: int = max_cap / 2;     // a const may use another const
+const greeting: Handle[byte] = "hi";
+
+fn main() -> int {
+    let mut s = 0;
+    for i in 0..3 {
+        s := s + max_cap;          // used as a value
+    }
+    s + half + len(greeting)       // 3*4096 + 2048 + 2 = 14338
+}

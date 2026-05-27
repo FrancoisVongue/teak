@@ -46,19 +46,18 @@ let lower_ident_or_keyword s =
   | "match" -> TMatch
   | "extern" -> TExtern
   | "use"   -> TUse
-  | "array" -> TArray
+  | "const" -> TConst
   | "len"   -> TLen
   | "slice" -> TSlice
   | "to_int" -> TToInt
   | "to_byte" -> TToByte
-  | "to_u16" -> TToU16
-  | "to_u32" -> TToU32
-  | "to_u64" -> TToU64
   | "c_alloc" -> TCAlloc
   | "c_free"  -> TCFree
   | "null_ptr" -> TNullPtr
   | "is_null" -> TIsNull
-  | "array_data" -> TArrayData
+  | "as_ptr" -> TAsPtr
+  | "ptr_cast" -> TPtrCast
+  | "reset" -> TReset
   | "try_at" -> TTryAt
   | "region" -> TRegion
   | "stack_region" -> TStackRegion
@@ -73,6 +72,7 @@ let lower_ident_or_keyword s =
   | "println" -> TPrintln
   | "arena"   -> TArena
   | "closure" -> TClosure
+  | "ref"     -> TRef
   | "_"     -> TUnderscore
   | _       -> TIdent s
 
@@ -221,7 +221,7 @@ let lex (src : string) : token list =
           done;
           if Buffer.length buf = 0 then
             raise (Lex_error ("hex literal needs at least one digit", !i));
-          push (TInt (int_of_string ("0x" ^ Buffer.contents buf)))
+          push (TInt (Int64.of_string ("0x" ^ Buffer.contents buf)))
         end
         else if c = '0' && !i + 1 < n
                 && (src.[!i + 1] = 'b' || src.[!i + 1] = 'B') then begin
@@ -232,7 +232,7 @@ let lex (src : string) : token list =
           done;
           if Buffer.length buf = 0 then
             raise (Lex_error ("binary literal needs at least one digit", !i));
-          push (TInt (int_of_string ("0b" ^ Buffer.contents buf)))
+          push (TInt (Int64.of_string ("0b" ^ Buffer.contents buf)))
         end
         else begin
           Buffer.clear buf;
@@ -273,7 +273,7 @@ let lex (src : string) : token list =
             end;
             push (TFloat (float_of_string (Buffer.contents buf)))
           end else
-            push (TInt (int_of_string (Buffer.contents buf)))
+            push (TInt (Int64.of_string (Buffer.contents buf)))
         end
 
     | c when is_lower_ident_start c ->

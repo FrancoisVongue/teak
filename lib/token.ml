@@ -2,7 +2,7 @@
 
 type token =
   (* literals *)
-  | TInt of int
+  | TInt of int64
   | TFloat of float
   | TIdent of string
   | TCtorIdent of string
@@ -37,19 +37,18 @@ type token =
   | TLinear        (* linear — marks a struct/enum as move-only with user drop *)
   | TDrop          (* drop(x) — consume and run the type's destructor *)
   | TUse           (* use mod::item; — selective import *)
-  | TArray        (* array — sized buffer allocated in a region *)
+  | TConst         (* const NAME: T = expr; — named compile-time value *)
   | TLen          (* len — array length *)
   | TSlice        (* slice(a, lo, hi) — sub-handle into the same region *)
   | TToInt        (* to_int(b) — widen byte to int *)
   | TToByte       (* to_byte(n) — truncate int to byte *)
-  | TToU16        (* to_u16(n) — truncate int to u16 *)
-  | TToU32        (* to_u32(n) — truncate int to u32 *)
-  | TToU64        (* to_u64(n) — truncate int to u64 *)
   | TCAlloc       (* c_alloc[T](n) — malloc n*sizeof(T), returns *T *)
   | TCFree        (* c_free(p) — free a raw pointer *)
   | TNullPtr      (* null_ptr[T]() — typed NULL *)
   | TIsNull       (* is_null(p) — NULL check *)
-  | TArrayData    (* array_data(a) — *T pointing at the bytes of Array[T] *)
+  | TAsPtr    (* as_ptr(a) — *T pointing at the bytes of Handle[T] *)
+  | TPtrCast      (* ptr_cast[T](e) — reinterpret a raw pointer/address as *T *)
+  | TReset        (* reset(r) — rewind a region, invalidating its refs *)
   | TTryAt        (* try_at(a, i) — defensive read, returns Option[T] *)
   | TRegion       (* region(N) — heap arena, malloc'd block *)
   | TStackRegion  (* stack_region(N) — N literal, block on stack *)
@@ -66,6 +65,7 @@ type token =
   | TPrintln      (* println(expr)  — same, plus trailing '\n' *)
   | TArena        (* arena r = region(N); — scope-bound region binding *)
   | TClosure      (* closure(r, fn...) — capturing lambda, env in region r *)
+  | TRef          (* ref(r, v) — allocate cell(s) in region r, return Handle[T] *)
   (* punctuation *)
   | TLParen
   | TRParen
@@ -107,7 +107,7 @@ type token =
   | TEOF
 
 let show = function
-  | TInt n        -> Printf.sprintf "INT(%d)" n
+  | TInt n        -> Printf.sprintf "INT(%Ld)" n
   | TFloat f      -> Printf.sprintf "FLOAT(%g)" f
   | TIdent s      -> Printf.sprintf "IDENT(%s)" s
   | TCtorIdent s  -> Printf.sprintf "CTOR(%s)" s
@@ -141,19 +141,18 @@ let show = function
   | TLinear       -> "LINEAR"
   | TDrop         -> "DROP"
   | TUse          -> "USE"
-  | TArray        -> "ARRAY"
+  | TConst        -> "CONST"
   | TLen          -> "LEN"
   | TSlice        -> "SLICE"
   | TToInt        -> "TO_INT"
   | TToByte       -> "TO_BYTE"
-  | TToU16        -> "TO_U16"
-  | TToU32        -> "TO_U32"
-  | TToU64        -> "TO_U64"
   | TCAlloc       -> "C_ALLOC"
   | TCFree        -> "C_FREE"
   | TNullPtr      -> "NULL_PTR"
   | TIsNull       -> "IS_NULL"
-  | TArrayData    -> "ARRAY_DATA"
+  | TAsPtr    -> "AS_PTR"
+  | TPtrCast      -> "PTR_CAST"
+  | TReset        -> "RESET"
   | TTryAt        -> "TRY_AT"
   | TRegion       -> "REGION"
   | TStackRegion  -> "STACK_REGION"
@@ -170,6 +169,7 @@ let show = function
   | TPrintln      -> "PRINTLN"
   | TArena        -> "ARENA"
   | TClosure      -> "CLOSURE"
+  | TRef          -> "REF"
   | TLParen       -> "("
   | TRParen       -> ")"
   | TLBrace       -> "{"
