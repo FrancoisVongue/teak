@@ -34,7 +34,8 @@ type token =
   | TExtern
   | TStruct
   | TEnum
-  | TLinear        (* linear — marks a struct/enum as move-only with user drop *)
+  | TResource      (* resource — a struct that can't be copied or silently
+                      dropped; must be moved or consumed by a by-value method *)
   | TDrop          (* drop(x) — consume and run the type's destructor *)
   | TUse           (* use mod::item; — selective import *)
   | TConst         (* const NAME: T = expr; — named compile-time value *)
@@ -138,7 +139,7 @@ let show = function
   | TExtern       -> "EXTERN"
   | TStruct       -> "STRUCT"
   | TEnum         -> "ENUM"
-  | TLinear       -> "LINEAR"
+  | TResource     -> "RESOURCE"
   | TDrop         -> "DROP"
   | TUse          -> "USE"
   | TConst        -> "CONST"

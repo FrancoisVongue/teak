@@ -86,11 +86,15 @@ module T = struct
     | TETryAt of expr * expr * ty
                   (* try_at(a, i) — third field is result Option[T] *)
     | TEDrop  of expr * ty
-                  (* drop(x) — second field is x's (linear) type *)
+                  (* drop(x) — second field is x's (resource) type *)
     | TEReset of expr
                   (* reset(r) — rewind region r (operand is a region var) *)
     | TEDeref  of expr * ty
                   (* p deref — second field is element type T *)
+    | TEBorrow of expr * ty
+                  (* &place — take the address of a place. The borrow IS a
+                     pointer (checked, unlike *T); second field is the borrow
+                     type TyBorrow t. Emit lowers it to C `&(place)`. *)
     | TEAssign of string * expr * ty
     | TEAssignField of expr * string * expr
                   (* place.f := v — write the field f of a place
@@ -287,25 +291,25 @@ let loop_depth = ref 0
    can verify the type of its expression. Reset on every check_func. *)
 let current_return_ty : ty option ref = ref None
 
-(* Set of type names that are linear: Region (always) plus every
-   user-declared `linear struct/enum`. Populated by build_env. *)
-let linear_type_names : (string, unit) Hashtbl.t = Hashtbl.create 8
+(* Set of type names that are resource: Region (always) plus every
+   user-declared `resource struct/enum`. Populated by build_env. *)
+let resource_type_names : (string, unit) Hashtbl.t = Hashtbl.create 8
 
-let reset_linear_table () =
-  Hashtbl.clear linear_type_names;
-  Hashtbl.add linear_type_names "Region" ();
+let reset_resource_table () =
+  Hashtbl.clear resource_type_names;
+  Hashtbl.add resource_type_names "Region" ();
   (* Stage 3: Task[T] is an in-flight computation; Stream[T] is a
      multishot source of events. Both are owned, move-only handles
      into the dispatcher's slot pool, so they live alongside Region
-     as builtin linear types. *)
-  Hashtbl.add linear_type_names "Task" ();
-  Hashtbl.add linear_type_names "Stream" ()
+     as builtin resource types. *)
+  Hashtbl.add resource_type_names "Task" ();
+  Hashtbl.add resource_type_names "Stream" ()
 
-let mark_linear n = Hashtbl.replace linear_type_names n ()
+let mark_resource n = Hashtbl.replace resource_type_names n ()
 
-let is_linear_name n = Hashtbl.mem linear_type_names n
+let is_resource_name n = Hashtbl.mem resource_type_names n
 
-(* The mangled name of the drop function for a linear type. Given the
+(* The mangled name of the drop function for a resource type. Given the
    type's (possibly mangled) name "<mod>__<base>", returns
    "<mod>__drop_<base>". For unmangled names like "Region" (builtin),
    returns "drop_Region". *)
@@ -346,19 +350,19 @@ let rec place_root_var = function
   | EIndex (a, _) -> place_root_var a
   | _ -> None
 
-let rec is_linear_ty (t : ty) : bool =
+let rec is_resource_ty (t : ty) : bool =
   match prune t with
   | TyApp ("Handle", [inner]) ->
-      (* Induced linearity: an Handle of a linear element type is itself
-         linear — its drop frees the elements first. Builtin containers
+      (* Induced linearity: an Handle of a resource element type is itself
+         resource — its drop frees the elements first. Builtin containers
          propagate; nominal user types do not (they declare linearity
-         explicitly via `linear struct`). *)
-      is_linear_ty inner
-  | TyApp (n, _) -> is_linear_name n
+         explicitly via `resource struct`). *)
+      is_resource_ty inner
+  | TyApp (n, _) -> is_resource_name n
   | TyTuple ts ->
-      (* Induced linearity: a tuple containing any linear component is
-         itself linear — destructuring moves every component out. *)
-      List.exists is_linear_ty ts
+      (* Induced linearity: a tuple containing any resource component is
+         itself resource — destructuring moves every component out. *)
+      List.exists is_resource_ty ts
   | _ -> false
 
 (* A Region is bound exclusively with `arena`, never `let`. This keeps
@@ -376,6 +380,7 @@ let rec zonk (t : ty) : ty =
   | TyApp (n, args) -> TyApp (n, List.map zonk args)
   | TyFun (args, ret) -> TyFun (List.map zonk args, zonk ret)
   | TyPtr inner -> TyPtr (zonk inner)
+  | TyBorrow inner -> TyBorrow (zonk inner)
   | TyTuple ts -> TyTuple (List.map zonk ts)
   | TyMeta _ as t -> t
 
@@ -386,6 +391,7 @@ let rec occurs (m : meta) (t : ty) : bool =
   | TyFun (args, ret) ->
       List.exists (occurs m) args || occurs m ret
   | TyPtr inner -> occurs m inner
+  | TyBorrow inner -> occurs m inner
   | TyTuple ts -> List.exists (occurs m) ts
   | TyMeta m' -> m.id = m'.id
 
@@ -403,6 +409,7 @@ let rec unify (t1 : ty) (t2 : ty) : unit =
       List.iter2 unify a1 a2;
       unify r1 r2
   | TyPtr a, TyPtr b -> unify a b
+  | TyBorrow a, TyBorrow b -> unify a b
   | TyTuple ts1, TyTuple ts2 when List.length ts1 = List.length ts2 ->
       List.iter2 unify ts1 ts2
   | TyMeta m1, TyMeta m2 when m1.id = m2.id -> ()
@@ -429,6 +436,7 @@ let rec subst_ty (subst : (string * ty) list) (t : ty) : ty =
   | TyFun (args, ret) ->
       TyFun (List.map (subst_ty subst) args, subst_ty subst ret)
   | TyPtr inner -> TyPtr (subst_ty subst inner)
+  | TyBorrow inner -> TyBorrow (subst_ty subst inner)
   | TyTuple ts -> TyTuple (List.map (subst_ty subst) ts)
   | TyMeta _ -> t
 
@@ -452,6 +460,21 @@ type env = {
   ctors   : (string * ctor_info) list;
   fns     : (string * (string list * (ty list * ty))) list;
 }
+
+(* A USER-declared `resource` (struct or enum). Region/Task/Stream are
+   builtins with their own lifecycle (auto-free / auto-cancel) and are NOT in
+   records/types, so they return false here. User resources have NO auto-drop:
+   they must be explicitly consumed or moved before their scope ends. *)
+let is_user_resource (env : env) (t : ty) : bool =
+  match prune t with
+  | TyApp (n, _) ->
+      (match List.assoc_opt n env.records with
+       | Some rd -> rd.rec_is_resource
+       | None ->
+         (match List.assoc_opt n env.types with
+          | Some td -> td.is_resource
+          | None -> false))
+  | _ -> false
 
 let split_program (prog : program)
   : type_decl list * record_decl list * func list * extern_decl list * test_decl list =
@@ -479,32 +502,33 @@ let split_program (prog : program)
 
 (* ---------- type validation ---------- *)
 
-(* Tests whether a type contains a linear builtin or user-linear type
-   anywhere except behind a function arrow or raw pointer. Linear types
+(* Tests whether a type contains a resource builtin or user-resource type
+   anywhere except behind a function arrow or raw pointer. resource types
    may only live as the top-level type of a name — never as a record
-   field, variant argument, or type-argument of a non-linear container. *)
-let rec ty_contains_linear (t : ty) : bool =
+   field, variant argument, or type-argument of a non-resource container. *)
+let rec ty_contains_resource (t : ty) : bool =
   match t with
-  | TyApp (n, _) when is_linear_name n -> true
-  | TyApp (_, args) -> List.exists ty_contains_linear args
+  | TyApp (n, _) when is_resource_name n -> true
+  | TyApp (_, args) -> List.exists ty_contains_resource args
   | TyFun _ -> false
   | TyPtr _ -> false
-  | TyTuple ts -> List.exists ty_contains_linear ts
+  | TyBorrow _ -> false   (* a borrow is never consumed — never resource *)
+  | TyTuple ts -> List.exists ty_contains_resource ts
   | TyInt | TyBool | TyVar _ | TyMeta _ -> false
 
 (* When a generic is instantiated (function call, ctor application,
    record literal), every type meta receives values by copy. Resolving
-   it to a linear type (Region) violates that contract — Region cannot
+   it to a resource type (Region) violates that contract — Region cannot
    be copied, only moved. Catch this at the call site rather than
    crashing later in mono. *)
 let check_instantiation (where : string) (metas : ty list) : unit =
   List.iter (fun m ->
     let mz = zonk m in
-    if ty_contains_linear mz then
+    if ty_contains_resource mz then
       raise (Type_error
         (Printf.sprintf
            "%s: cannot instantiate a generic type parameter with the \
-            linear type %s — only copyable types are allowed here"
+            resource type %s — only copyable types are allowed here"
            where (show_ty mz))))
     metas
 
@@ -519,28 +543,28 @@ let rec validate_ty
   | TyMeta _ -> t
   | TyApp (n, args) ->
       let args = List.map (validate_ty type_env record_env in_scope) args in
-      (* A linear type cannot appear in data position — only as the
+      (* A resource type cannot appear in data position — only as the
          immediate top-level type of a name (variable, parameter,
-         function return). We enforce this by forbidding linear types
+         function return). We enforce this by forbidding resource types
          in any type argument of any TyApp. The check on field types
          and variant arg types happens separately after build_env.
          Function types are not "data position" — they hide their
          contents, so fn(...) -> Region stays legal.
 
-         Exception: Task[T] and Stream[T] are themselves linear, so a
-         linear T is fine — the task/stream owns the inner value and
+         Exception: Task[T] and Stream[T] are themselves resource, so a
+         resource T is fine — the task/stream owns the inner value and
          transfers it via await/for-in. This is the first sliver of
          "induced linearity" — the full version (Handle[T] when T is
-         linear) lands in phase 3. *)
-      let propagates_linearity =
+         resource) lands in phase 3. *)
+      let propagates_resource =
         (n = "Task" || n = "Stream" || n = "Handle") in
-      if not propagates_linearity then
+      if not propagates_resource then
         List.iter (fun arg ->
-          if ty_contains_linear arg then
+          if ty_contains_resource arg then
             raise (Type_error
               (Printf.sprintf
-                 "A linear type is not allowed as a type argument of %S — \
-                  linear types must be a top-level type of a name, not nested in data"
+                 "A resource type is not allowed as a type argument of %S — \
+                  resource types must be a top-level type of a name, not nested in data"
                  n))) args;
       if List.mem n in_scope then begin
         if args <> [] then
@@ -558,7 +582,7 @@ let rec validate_ty
                (List.length args)));
         TyApp ("Handle", args)
       end else if n = "Region" then begin
-        (* Region is a built-in nullary type — owned arena. Linear. *)
+        (* Region is a built-in nullary type — owned arena. resource. *)
         if List.length args <> 0 then
           raise (Type_error
             (Printf.sprintf
@@ -566,7 +590,7 @@ let rec validate_ty
                (List.length args)));
         TyApp ("Region", [])
       end else if n = "Task" then begin
-        (* Task[T] — Stage 3 builtin, linear handle to an in-flight
+        (* Task[T] — Stage 3 builtin, resource handle to an in-flight
            task. The slot is owned; T is the future result type. *)
         if List.length args <> 1 then
           raise (Type_error
@@ -575,7 +599,7 @@ let rec validate_ty
                (List.length args)));
         TyApp ("Task", args)
       end else if n = "Stream" then begin
-        (* Stream[T] — Stage 3 builtin, linear multishot source.
+        (* Stream[T] — Stage 3 builtin, resource multishot source.
            Drained with `for x in stream { ... }`. *)
         if List.length args <> 1 then
           raise (Type_error
@@ -633,11 +657,40 @@ let rec validate_ty
              validate_ty type_env record_env in_scope ret)
   | TyPtr inner ->
       TyPtr (validate_ty type_env record_env in_scope inner)
+  | TyBorrow inner ->
+      TyBorrow (validate_ty type_env record_env in_scope inner)
   | TyTuple ts ->
       if List.length ts = 1 then
         raise (Type_error "1-component tuple type is not a thing — drop the parens");
       (* [] is unit `()`; >= 2 is a real tuple. *)
       TyTuple (List.map (validate_ty type_env record_env in_scope) ts)
+
+(* A borrow `&T` is second-class: it may appear ONLY as a direct, top-level
+   function parameter. It can never be returned, stored in a struct field or
+   enum payload, or nested inside another type — that is exactly what keeps a
+   borrow from outliving the call without any lifetime machinery (CLAUDE.md §7).
+   Without this, `fn f(a: &Foo) -> &Foo { a }` or `struct W { f: &Foo }` would
+   smuggle a borrow out of its owner's scope. *)
+let rec ty_has_borrow (t : ty) : bool =
+  match prune t with
+  | TyBorrow _ -> true
+  | TyApp (_, args) -> List.exists ty_has_borrow args
+  | TyFun (a, r) -> List.exists ty_has_borrow a || ty_has_borrow r
+  | TyPtr i -> ty_has_borrow i
+  | TyTuple ts -> List.exists ty_has_borrow ts
+  | TyInt | TyBool | TyVar _ | TyMeta _ -> false
+
+let reject_borrow ~(where : string) (t : ty) : unit =
+  if ty_has_borrow t then
+    raise (Type_error (Printf.sprintf
+      "a borrow `&T` cannot be %s — a borrow is second-class: it may only be a \
+       function parameter, never returned, stored, or nested" where))
+
+(* A parameter may be a direct top-level `&T`, but not a nested borrow. *)
+let check_param_ty (t : ty) : unit =
+  match prune t with
+  | TyBorrow inner -> reject_borrow ~where:"a borrow of a borrow" inner
+  | _ -> reject_borrow ~where:"nested inside a parameter type" t
 
 (* ---------- building environment ---------- *)
 
@@ -646,11 +699,11 @@ let build_env
   (records : record_decl list)
   (funcs : func list)
   (externs : extern_decl list) : env =
-  reset_linear_table ();
+  reset_resource_table ();
   List.iter (fun (td : type_decl) ->
-    if td.is_linear then mark_linear td.type_name) types;
+    if td.is_resource then mark_resource td.type_name) types;
   List.iter (fun (rd : record_decl) ->
-    if rd.rec_is_linear then mark_linear rd.rec_name) records;
+    if rd.rec_is_resource then mark_resource rd.rec_name) records;
   let seen_types = Hashtbl.create 16 in
   List.iter (fun (td : type_decl) ->
     check_not_c_reserved "type" td.type_name;
@@ -700,18 +753,19 @@ let build_env
           let arg_tys =
             List.map (validate_ty type_env record_env in_scope) v.arg_tys
           in
-          (* A non-linear ADT cannot carry linear data — its drop is
-             a no-op and the resource would silently leak. A `linear`
-             ADT can carry linears; its user-written drop_T is
+          List.iter (reject_borrow ~where:"an enum variant argument") arg_tys;
+          (* A non-resource ADT cannot carry resource data — its drop is
+             a no-op and the resource would silently leak. A `resource`
+             ADT can carry resources; its user-written drop_T is
              responsible for releasing them via match + drop. *)
-          if not td.is_linear then
+          if not td.is_resource then
             List.iter (fun aty ->
-              if ty_contains_linear aty then
+              if ty_contains_resource aty then
                 raise (Type_error
                   (Printf.sprintf
-                     "constructor %S of %S: a linear type cannot \
-                      be a variant argument of a non-linear ADT — \
-                      mark the ADT `linear` if you want it to own \
+                     "constructor %S of %S: a resource type cannot \
+                      be a variant argument of a non-resource ADT — \
+                      mark the ADT `resource` if you want it to own \
                       the resource"
                      v.ctor_name td.type_name))) arg_tys;
           { v with arg_tys })
@@ -725,12 +779,13 @@ let build_env
       let fields =
         List.map (fun (fname, fty) ->
           let fty = validate_ty type_env record_env in_scope fty in
-          if not rd.rec_is_linear && ty_contains_linear fty then
+          reject_borrow ~where:"a struct field" fty;
+          if not rd.rec_is_resource && ty_contains_resource fty then
             raise (Type_error
               (Printf.sprintf
-                 "field %S of record %S: a linear type cannot be a \
-                  field of a non-linear struct — mark the struct \
-                  `linear` if you want it to own the resource"
+                 "field %S of record %S: a resource type cannot be a \
+                  field of a non-resource struct — mark the struct \
+                  `resource` if you want it to own the resource"
                  fname rd.rec_name));
           (fname, fty))
           rd.rec_fields
@@ -779,10 +834,12 @@ let build_env
       let in_scope = f.type_params in
       let param_tys =
         List.map (fun (_, t) ->
-          validate_ty type_env record_env in_scope t) f.params
+          let t = validate_ty type_env record_env in_scope t in
+          check_param_ty t; t) f.params
       in
       let ret_ty =
         validate_ty type_env record_env in_scope f.return_ty in
+      reject_borrow ~where:"a return type" ret_ty;
       (match prune ret_ty with
        | TyApp ("Region", _) ->
            raise (Type_error
@@ -806,9 +863,11 @@ let build_env
         check_not_c_reserved "parameter" pname) e.ext_params;
       let param_tys =
         List.map (fun (_, t) ->
-          validate_ty type_env record_env [] t) e.ext_params
+          let t = validate_ty type_env record_env [] t in
+          check_param_ty t; t) e.ext_params
       in
       let ret_ty = validate_ty type_env record_env [] e.ext_return_ty in
+      reject_borrow ~where:"a return type" ret_ty;
       (* Calling convention is read straight off the declared return
          type. The C-side glue exposed by an extern returning Task[T]
          or Stream[T] writes results back via a hidden frame pointer
@@ -819,21 +878,12 @@ let build_env
               records = record_env;
               ctors = ctor_env;
               fns = user_sigs @ extern_sigs } in
-  (* For every user-declared linear type, require a matching drop fn
-     in the same module. The fn is found by name convention. *)
-  let check_drop_fn type_name =
-    let fn_name = drop_fn_name_for type_name in
-    if not (List.mem_assoc fn_name env.fns) then
-      raise (Type_error
-        (Printf.sprintf
-           "linear type %S requires a drop function %S in the same module \
-            (signature: fn %s(<param>: %s) -> int)"
-           type_name fn_name fn_name type_name))
-  in
-  List.iter (fun (td : type_decl) ->
-    if td.is_linear then check_drop_fn td.type_name) types;
-  List.iter (fun (rd : record_decl) ->
-    if rd.rec_is_linear then check_drop_fn rd.rec_name) records;
+  (* Atom 4: a resource type no longer REQUIRES a magic `drop_<Type>` function.
+     A consumer is ANY by-value function — `close(s)`, `commit(tx)`, anything —
+     because by-value = move already ends the resource at the call site (Atom 3).
+     The author just needs to provide some consumer; its name is free. The old
+     name-convention requirement is gone. *)
+  ignore drop_fn_name_for;
   env
 
 (* ---------- recursive type detection ---------- *)
@@ -858,6 +908,7 @@ let check_no_recursive_types
         let acc = List.fold_left deps_in_ty acc args in
         deps_in_ty acc ret
     | TyPtr _ -> acc   (* pointers break by-value cycles *)
+    | TyBorrow _ -> acc (* a borrow is pointer-sized/erased — breaks cycles *)
     | TyTuple ts -> List.fold_left deps_in_ty acc ts
   in
   let direct_deps name : string list =
@@ -1410,7 +1461,11 @@ let rec infer (env : env) (tparams : string list)
 
   | EField (e, fname) ->
       let (te, te_ty) = infer env tparams vars e in
-      let te_ty_now = prune te_ty in
+      (* A field can be read through a borrow: `(&conn).fd`. Strip the borrow
+         to find the record. (Reading a *resource* field out of a borrow would
+         move it out of the borrow and is a hole to close in the move-checker;
+         the common case is reading a copyable scalar field.) *)
+      let te_ty_now = match prune te_ty with TyBorrow t -> prune t | t -> t in
       (match te_ty_now with
        | TyApp (n, args) when List.mem_assoc n env.records ->
            let rd = List.assoc n env.records in
@@ -1455,33 +1510,33 @@ let rec infer (env : env) (tparams : string list)
       (match expected with
        | None -> ()
        | Some t -> unify tv_ty t);
-      (* Linear types (Region, user `linear` structs/enums) cannot be
+      (* resource types (Region, user `resource` structs/enums) cannot be
          `mut` — reassigning would silently leak the previous value. *)
-      if is_mut && is_linear_ty tv_ty then
+      if is_mut && is_resource_ty tv_ty then
         raise (Type_error
           (Printf.sprintf
              "let mut %s : %s is forbidden — \
-              reassigning a linear binding would leak the previous value. \
+              reassigning a resource binding would leak the previous value. \
               Create a fresh let-binding instead."
              x (show_ty (zonk tv_ty))));
-      (* Linear values cannot be aliased. `let y = x` where x is linear
+      (* resource values cannot be aliased. `let y = x` where x is resource
          would silently create two owners of the same resource. *)
       (match tv, prune tv_ty with
-       | T.TEVar (src, _), t when is_linear_ty t ->
+       | T.TEVar (src, _), t when is_resource_ty t ->
            raise (Type_error
              (Printf.sprintf
-                "cannot bind one linear variable to another \
-                 (let %s = %s): linear values must come from a fresh \
+                "cannot bind one resource variable to another \
+                 (let %s = %s): resource values must come from a fresh \
                  constructor or function call"
                 x src))
        | _ -> ());
-      (* Field access of a linear container is also aliasing — it would
+      (* Field access of a resource container is also aliasing — it would
          create a binding that owns the same underlying resource. *)
       (match tv, prune tv_ty with
-       | T.TEField (_, fname, _), t when is_linear_ty t ->
+       | T.TEField (_, fname, _), t when is_resource_ty t ->
            raise (Type_error
              (Printf.sprintf
-                "cannot bind a linear field to a new name \
+                "cannot bind a resource field to a new name \
                  (let %s = ....%s): consume it directly with drop(...) \
                  or pass it to a function instead"
                 x fname))
@@ -1503,7 +1558,7 @@ let rec infer (env : env) (tparams : string list)
         | _ -> false
       in
       let x_actual =
-        if x = "_" && is_linear_ty tv_ty && not is_task_or_stream then begin
+        if x = "_" && is_resource_ty tv_ty && not is_task_or_stream then begin
           incr drop_name_counter;
           Printf.sprintf "_drop_%d" !drop_name_counter
         end else x
@@ -1515,7 +1570,10 @@ let rec infer (env : env) (tparams : string list)
       let (tb, tb_ty) = infer env tparams body_vars body in
       let auto_drop =
         if x_actual = "_" then false
-        else is_linear_ty tv_ty
+        (* User resources have NO silent auto-drop — they must be consumed or
+           moved explicitly (the move-checker enforces it). Builtins
+           (Region/Task/Stream) keep their auto-discharge. *)
+        else is_resource_ty tv_ty && not (is_user_resource env tv_ty)
       in
       (T.TELet (x_actual, tv_ty, tv, tb, tb_ty, auto_drop), tb_ty)
 
@@ -1528,7 +1586,7 @@ let rec infer (env : env) (tparams : string list)
              "`arena %s = ...` requires a region value (region(...), \
               stack_region(...), or aligned_region(...)), got %s"
              x (show_ty (zonk tv_ty))));
-      (* Reuse the linear-binding machinery: a region is linear, so
+      (* Reuse the resource-binding machinery: a region is resource, so
          `arena s = r` (aliasing an existing region) is rejected the
          same way `let s = r` would be — the value must be a fresh
          region constructor, not a bare variable / field. *)
@@ -1547,7 +1605,7 @@ let rec infer (env : env) (tparams : string list)
        | _ -> ());
       let body_vars = (x, (tv_ty, false)) :: vars in
       let (tb, tb_ty) = infer env tparams body_vars body in
-      (* Lower to a linear let with auto_drop — mono/emit never see
+      (* Lower to a resource let with auto_drop — mono/emit never see
          EArena. The region frees at this scope's end. *)
       (T.TELet (x, tv_ty, tv, tb, tb_ty, true), tb_ty)
 
@@ -1592,11 +1650,11 @@ let rec infer (env : env) (tparams : string list)
                 (Printf.sprintf
                    "assignment to field %S: field has type %s, value has type %s"
                    fname (show_ty (zonk field_ty)) (show_ty (zonk tv_ty)))));
-           (* Overwriting a linear value would leak it — forbid. *)
-           if is_linear_ty (zonk field_ty) then
+           (* Overwriting a resource value would leak it — forbid. *)
+           if is_resource_ty (zonk field_ty) then
              raise (Type_error
                (Printf.sprintf
-                  "cannot assign to linear field %S — overwriting a linear \
+                  "cannot assign to resource field %S — overwriting a resource \
                    value would leak it (consume it explicitly first)" fname));
            (* A pure field/var path (no index) mutates a local, so its root
               must be `mut`. A path through an index writes region memory
@@ -1810,10 +1868,10 @@ let rec infer (env : env) (tparams : string list)
               "array(_, N, _) : size must be int, got %s"
               (show_ty (zonk tn_ty)))));
       let (tv, tv_ty) = infer env tparams vars init_e in
-      if ty_contains_linear (zonk tv_ty) then
+      if ty_contains_resource (zonk tv_ty) then
         raise (Type_error
           (Printf.sprintf
-             "array(_, _, v) : element type cannot contain a linear type (%s)"
+             "array(_, _, v) : element type cannot contain a resource type (%s)"
              (show_ty (zonk tv_ty))));
       let result_ty = TyApp ("Handle", [tv_ty]) in
       (T.TEHandle (tr, tn, tv, result_ty), result_ty)
@@ -1842,16 +1900,16 @@ let rec infer (env : env) (tparams : string list)
                 "array literal elements must all have the same type: \
                  expected %s, got %s"
                 (show_ty (zonk elem_ty)) (show_ty (zonk t)))))) typed_elems;
-      (* Linear element types are allowed in array literals — each
+      (* resource element types are allowed in array literals — each
          element value is moved into its slot exactly once, and the
-         array itself is then linear (induced linearity, phase 3).
+         array itself is then resource (induced linearity, phase 3).
          By contrast `array(r, N, init)` would copy `init` N times,
-         which is forbidden for linear types. *)
+         which is forbidden for resource types. *)
       let result_ty = TyApp ("Handle", [elem_ty]) in
       (T.TEHandleLit (tr, List.map fst typed_elems, result_ty), result_ty)
 
   | ERegion size_e ->
-      (* region(N) : int → Region. Heap arena. Linear. *)
+      (* region(N) : int → Region. Heap arena. resource. *)
       let (tn, tn_ty) = infer env tparams vars size_e in
       (try unify tn_ty TyInt
        with Type_error _ ->
@@ -1921,14 +1979,14 @@ let rec infer (env : env) (tparams : string list)
            (Printf.sprintf
               "index must be int, got %s"
               (show_ty (zonk ti_ty)))));
-      (* Reading from an Handle[Linear] would copy a linear value out
+      (* Reading from an Handle[resource] would copy a resource value out
          of its slot, leaving two owners. Forbid it — the elements
          can only be consumed when the whole Handle is dropped. *)
-      if is_linear_ty (zonk elem) then
+      if is_resource_ty (zonk elem) then
         raise (Type_error
           (Printf.sprintf
              "cannot read element of Handle[%s] — that would copy a \
-              linear value out of its slot. Elements are only consumed \
+              resource value out of its slot. Elements are only consumed \
               when the whole array is dropped."
              (show_ty (zonk elem))));
       (T.TEIndex (ta, ti, elem), elem)
@@ -1962,14 +2020,14 @@ let rec infer (env : env) (tparams : string list)
            (Printf.sprintf
               "type mismatch in a[i] := v: element is %s, value is %s"
               (show_ty (zonk elem)) (show_ty (zonk tv_ty)))));
-      (* Writing to a slot of Handle[Linear] would either drop the old
+      (* Writing to a slot of Handle[resource] would either drop the old
          element or leak it. Both need machinery we don't have yet —
          forbid until phase 5/6 if ever. *)
-      if is_linear_ty (zonk elem) then
+      if is_resource_ty (zonk elem) then
         raise (Type_error
           (Printf.sprintf
              "cannot assign element of Handle[%s] — overwriting would \
-              either drop or leak the old linear value."
+              either drop or leak the old resource value."
              (show_ty (zonk elem))));
       (T.TEAssignIdx (ta, ti, tv, TyTuple []), TyTuple [])
 
@@ -2011,12 +2069,12 @@ let rec infer (env : env) (tparams : string list)
            (Printf.sprintf
               "slice(_, _, hi) : hi must be int, got %s"
               (show_ty (zonk thi_ty)))));
-      (* Slicing an Handle[Linear] would produce a second linear handle
+      (* Slicing an Handle[resource] would produce a second resource handle
          viewing the same elements — two owners. Forbid. *)
-      if is_linear_ty (zonk elem) then
+      if is_resource_ty (zonk elem) then
         raise (Type_error
           (Printf.sprintf
-             "cannot slice Handle[%s] — would create a second linear \
+             "cannot slice Handle[%s] — would create a second resource \
               handle over the same elements."
              (show_ty (zonk elem))));
       let result_ty = TyApp ("Handle", [elem]) in
@@ -2074,10 +2132,10 @@ let rec infer (env : env) (tparams : string list)
 
   | ECAlloc (elem_t, n_e) ->
       let elem_t = validate_ty_for_ascription env tparams elem_t in
-      if ty_contains_linear elem_t then
+      if ty_contains_resource elem_t then
         raise (Type_error
           (Printf.sprintf
-             "c_alloc[T](_) : T cannot contain a linear type (%s)"
+             "c_alloc[T](_) : T cannot contain a resource type (%s)"
              (show_ty (zonk elem_t))));
       let (tn, tn_ty) = infer env tparams vars n_e in
       (try unify tn_ty TyInt
@@ -2162,6 +2220,24 @@ let rec infer (env : env) (tparams : string list)
               (show_ty (zonk tp_ty)))));
       (T.TEDeref (tp, elem), elem)
 
+  | EBorrow p_e ->
+      (* `&place` — a second-class borrow, which IS a pointer (checked, unlike
+         *T): emit lowers it to C `&(place)`. The move-checker leaves the
+         borrowed owner live (a TEBorrow never consumes its place); call-site /
+         signature agreement and the no-escape rule (cannot return / store /
+         spawn a borrow) fall out of unification — `&T` does not unify with
+         owned `T`. Borrowing is idempotent: `&(&x)` is still `&x`. *)
+      let (tp, tp_ty) = infer env tparams vars p_e in
+      (match prune tp_ty with
+       | TyBorrow _ -> (tp, tp_ty)            (* already a borrow — no double *)
+       | inner ->
+           (match tp with
+            | T.TEVar _ | T.TEField _ | T.TETupleIdx _ -> ()
+            | _ -> raise (Type_error
+                "`&` can only borrow a place — a variable or a field/tuple component"));
+           let bty = TyBorrow inner in
+           (T.TEBorrow (tp, bty), bty))
+
   | ETryAt (a_e, i_e) ->
       let (ta, ta_ty) = infer env tparams vars a_e in
       let elem = TyMeta (fresh_meta ()) in
@@ -2183,10 +2259,10 @@ let rec infer (env : env) (tparams : string list)
 
   | EDrop x_e ->
       let (tx, tx_ty) = infer env tparams vars x_e in
-      if not (is_linear_ty tx_ty) then
+      if not (is_resource_ty tx_ty) then
         raise (Type_error
           (Printf.sprintf
-             "drop() requires a linear value (Region or a user `linear` \
+             "drop() requires a resource value (Region or a user `resource` \
               type), got %s"
              (show_ty (zonk tx_ty))));
       (T.TEDrop (tx, tx_ty), TyTuple [])
@@ -2343,19 +2419,19 @@ let rec infer (env : env) (tparams : string list)
           vars binders
       in
       let (tb, tb_ty) = infer env tparams body_vars body in
-      (* Per-binder auto_drop: a linear component takes ownership of its
+      (* Per-binder auto_drop: a resource component takes ownership of its
          slot, so when the let scope ends we drop each that's still
          live.  Underscore components are dropped immediately (well —
-         a linear component bound to `_` would silently leak; the move
+         a resource component bound to `_` would silently leak; the move
          check below allocates a fresh `_drop_N` name for it). *)
       let auto_drops =
         List.map (fun (n, t) ->
-          if n = "_" then false else is_linear_ty t)
+          if n = "_" then false else is_resource_ty t)
           binders
       in
       let names_actual =
         List.map (fun (n, t) ->
-          if n = "_" && is_linear_ty t then begin
+          if n = "_" && is_resource_ty t then begin
             incr drop_name_counter;
             Printf.sprintf "_tuple_drop_%d" !drop_name_counter
           end else n)
@@ -2426,7 +2502,7 @@ let rec infer (env : env) (tparams : string list)
       (* `await all coll` requires coll : Handle[Task[T]], returns
          Handle[Result[T]] — each Task is awaited, each result wrapped
          in Result the same way `await Task[T]` would. The original
-         array is consumed (linear) by the join. *)
+         array is consumed (resource) by the join. *)
       let (tc, tc_ty) = infer env tparams vars coll_e in
       let elem = TyMeta (fresh_meta ()) in
       (try unify tc_ty (TyApp ("Handle", [TyApp ("Task", [elem])]))
@@ -2561,6 +2637,7 @@ let rec zonk_expr (e : T.expr) : T.expr =
   | T.TEHandleData (a, t) -> T.TEHandleData (zonk_expr a, zonk_expect t)
   | T.TEPtrCast (e, t) -> T.TEPtrCast (zonk_expr e, zonk_expect t)
   | T.TEDeref (p, t) -> T.TEDeref (zonk_expr p, zonk_expect t)
+  | T.TEBorrow (p, t) -> T.TEBorrow (zonk_expr p, zonk_expect t)
   | T.TEAssign (x, v, t) -> T.TEAssign (x, zonk_expr v, zonk_expect t)
   | T.TEAssignField (p, f, v) ->
       T.TEAssignField (zonk_expr p, f, zonk_expr v)
@@ -2604,6 +2681,7 @@ and zonk_expect (t : ty) : ty =
     | TyFun (args, ret) ->
         List.exists has_unresolved args || has_unresolved ret
     | TyPtr inner -> has_unresolved inner
+    | TyBorrow inner -> has_unresolved inner
     | TyTuple ts -> List.exists has_unresolved ts
     | TyMeta _ -> true
   in
@@ -2631,6 +2709,36 @@ and zonk_expect (t : ty) : ty =
    type on scope exit. *)
 module SM = Map.Make (String)
 
+(* A branch DIVERGES if control cannot fall through it — it always exits via
+   `return`. Such a branch's post-ownership is irrelevant to the join after an
+   `if`/`match`, so it is exempt from the branch-symmetry check. This is what
+   makes `if c { drop(x); return e }` legal: the then-branch returns, so only
+   the else-branch's ownership flows past the `if`. *)
+let rec branch_diverges (e : T.expr) : bool =
+  match e with
+  | T.TEReturn _ -> true
+  (* `let _ = v in b` diverges if the value diverges (b unreachable) — this is
+     how `if c { ...; return e }` desugars: the block sits in the value slot
+     with a trailing unit tail — OR if the body diverges. *)
+  | T.TELet (_, _, v, b, _, _) -> branch_diverges v || branch_diverges b
+  | T.TELetTuple (_, _, v, b, _, _) -> branch_diverges v || branch_diverges b
+  | T.TEIf (_, t, el, _) -> branch_diverges t && branch_diverges el
+  | T.TEMatch (_, _, arms, _) ->
+      arms <> [] && List.for_all (fun (_, _, b) -> branch_diverges b) arms
+  | _ -> false
+
+(* Atom 3 (the flip): passing a bare owned user-resource variable BY VALUE is a
+   MOVE that consumes it (F5: `commit(tx)` → tx is gone). A borrow (`&x`, type
+   TyBorrow) is NOT a user resource, so it is never consumed (F8: `read(&c)`
+   leaves c alive). Builtins (Region/Handle/Task/Stream) keep their borrow-
+   passed, auto-managed lifecycle — is_user_resource is false for them — which
+   is why region arguments are not consumed and regions need no `&` migration
+   until they move to stdlib (Atom 5). *)
+let consume_arg (env : env) (live : ty SM.t) (a : T.expr) : ty SM.t =
+  match a with
+  | T.TEVar (x, t) when is_user_resource env t -> SM.remove x live
+  | _ -> live
+
 let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.expr)
   : T.expr * ty SM.t =
   match e with
@@ -2643,7 +2751,7 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
              "use of moved name %S — its ownership was transferred earlier"
              x));
       let live' =
-        if in_tail && is_linear_ty t then SM.remove x live
+        if in_tail && is_resource_ty t then SM.remove x live
         else live
       in
       (e, live')
@@ -2674,6 +2782,7 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       let (callee', live) = check_moves_expr env live false callee in
       let (args_rev, live) = List.fold_left (fun (acc, live) a ->
         let (a', live) = check_moves_expr env live false a in
+        let live = consume_arg env live a' in   (* flip: by-value = move *)
         (a' :: acc, live)) ([], live) args
       in
       (T.TECall (callee', List.rev args_rev, ty), live)
@@ -2681,6 +2790,7 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
   | T.TECtor (c, ts, args, ty) ->
       let (args_rev, live) = List.fold_left (fun (acc, live) a ->
         let (a', live) = check_moves_expr env live false a in
+        let live = consume_arg env live a' in   (* flip: by-value = move *)
         (a' :: acc, live)) ([], live) args
       in
       (T.TECtor (c, ts, List.rev args_rev, ty), live)
@@ -2688,6 +2798,7 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
   | T.TERecord (n, ts, fields, ty) ->
       let (fields_rev, live) = List.fold_left (fun (acc, live) (f, e) ->
         let (e', live) = check_moves_expr env live false e in
+        let live = consume_arg env live e' in   (* flip: by-value = move *)
         ((f, e') :: acc, live)) ([], live) fields
       in
       (T.TERecord (n, ts, List.rev fields_rev, ty), live)
@@ -2696,17 +2807,27 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       let (cond', live) = check_moves_expr env live false cond in
       let (t', live_t) = check_moves_expr env live in_tail t in
       let (el', live_e) = check_moves_expr env live in_tail el in
-      if not (SM.equal (fun _ _ -> true) live_t live_e) then
-        raise (Type_error
-          (Printf.sprintf
-             "if branches diverge in ownership: \
-              then leaves [%s] live, else leaves [%s] live. \
-              Both branches must end with the same ownership state. \
-              Use `let _ = x` to consume a linear value in a branch that \
-              doesn't otherwise use it."
-             (String.concat ", " (List.map fst (SM.bindings live_t)))
-             (String.concat ", " (List.map fst (SM.bindings live_e)))));
-      (T.TEIf (cond', t', el', ty), live_t)
+      (* A diverging branch (always returns) is exempt — only the
+         falling-through branch's ownership flows past the `if`. *)
+      let result_live =
+        match branch_diverges t', branch_diverges el' with
+        | true, true   -> live_t              (* nothing falls through *)
+        | true, false  -> live_e              (* only else continues *)
+        | false, true  -> live_t              (* only then continues *)
+        | false, false ->
+            if not (SM.equal (fun _ _ -> true) live_t live_e) then
+              raise (Type_error
+                (Printf.sprintf
+                   "if branches diverge in ownership: \
+                    then leaves [%s] live, else leaves [%s] live. \
+                    Both branches must end with the same ownership state. \
+                    Use `let _ = x` to consume a resource value in a branch that \
+                    doesn't otherwise use it."
+                   (String.concat ", " (List.map fst (SM.bindings live_t)))
+                   (String.concat ", " (List.map fst (SM.bindings live_e)))));
+            live_t
+      in
+      (T.TEIf (cond', t', el', ty), result_live)
 
   | T.TELet (x, vt, v, b, bt, ad) ->
       let (v', live) = check_moves_expr env live false v in
@@ -2717,6 +2838,16 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
         let outer_had = SM.find_opt x live in
         let live_inner = SM.add x vt live in
         let (b', live_after) = check_moves_expr env live_inner in_tail b in
+        (* A user resource has no auto-drop: if it is still live when its scope
+           ends, it was neither consumed nor moved out — the forgotten-resource
+           bug, caught here. (Builtins keep auto-drop and never trip this.) *)
+        if SM.mem x live_after && is_user_resource env vt then
+          raise (Type_error
+            (Printf.sprintf
+               "resource %S is neither consumed nor moved out before its scope \
+                ends — consume it (pass it to a by-value consumer the author \
+                provides) or return it"
+               x));
         (* If x was consumed somewhere in the body (drop, tail-return),
            it's no longer in live_after — skip the scope-end auto-drop
            to avoid double-free. *)
@@ -2902,6 +3033,12 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       let (p', live) = check_moves_expr env live false p in
       (T.TEDeref (p', t), live)
 
+  | T.TEBorrow (p, t) ->
+      (* `&place` reads the place but NEVER consumes it — the borrowed owner
+         stays live. (The inner check still rejects borrowing a moved value.) *)
+      let (p', live) = check_moves_expr env live false p in
+      (T.TEBorrow (p', t), live)
+
   | T.TEAssign (x, v, t) ->
       let (v', live) = check_moves_expr env live false v in
       (T.TEAssign (x, v', t), live)
@@ -2932,7 +3069,7 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       (* Explicit drop of a bare variable consumes it. After drop, the
          name is no longer live (use-after-drop is a compile error). *)
       let live = match sub' with
-        | T.TEVar (x, _) when is_linear_ty t -> SM.remove x live
+        | T.TEVar (x, _) when is_resource_ty t -> SM.remove x live
         | _ -> live
       in
       (T.TEDrop (sub', t), live)
@@ -2944,14 +3081,14 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
 
   | T.TEAwait (sub, t, p) ->
       (* await consumes the Task/Stream-shaped operand: if the inner
-         expression is a bare linear name, retire it (await-after-await
+         expression is a bare resource name, retire it (await-after-await
          on the same handle is a compile error). For Stream the inner
          handle stays live across multiple awaits — but the phase-2
          surface only types it; multishot semantics arrive with
          `for x in stream` in phase 6. Treat both uniformly: consume. *)
       let (sub', live) = check_moves_expr env live false sub in
       let live = match sub' with
-        | T.TEVar (x, vt) when is_linear_ty vt -> SM.remove x live
+        | T.TEVar (x, vt) when is_resource_ty vt -> SM.remove x live
         | _ -> live
       in
       (T.TEAwait (sub', t, p), live)
@@ -2964,12 +3101,12 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       (T.TESpawn (sub', t), live)
 
   | T.TEForStream (x, et, src, body) ->
-      (* The stream source is consumed by the loop: a bare linear
+      (* The stream source is consumed by the loop: a bare resource
          name passed in is retired (like await on a Task). The binder
          is in scope only for the body. *)
       let (src', live) = check_moves_expr env live false src in
       let live = match src' with
-        | T.TEVar (sx, vt) when is_linear_ty vt -> SM.remove sx live
+        | T.TEVar (sx, vt) when is_resource_ty vt -> SM.remove sx live
         | _ -> live
       in
       let outer_had = if x = "_" then None else SM.find_opt x live in
@@ -3042,7 +3179,7 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       (T.TEPrint (nl, List.rev es_rev, ts), live)
 
   | T.TEMakeClosure (name, type_args, caps, region, fn_ty) ->
-      (* Captures are non-linear copies (linear capture is rejected at
+      (* Captures are non-resource copies (resource capture is rejected at
          finalize), so only the region expression needs move tracking. *)
       let (region', live) = check_moves_expr env live false region in
       (T.TEMakeClosure (name, type_args, caps, region', fn_ty), live)
@@ -3111,6 +3248,7 @@ let rec body_has_suspension (e : T.expr) : bool =
   | TEHandleData (a, _) -> body_has_suspension a
   | TEPtrCast (e, _) -> body_has_suspension e
   | TEDeref (p, _) -> body_has_suspension p
+  | TEBorrow (p, _) -> body_has_suspension p
   | TEAssign (_, v, _) -> body_has_suspension v
   | TEAssignField (p, _, v) ->
       body_has_suspension p || body_has_suspension v
@@ -3149,9 +3287,9 @@ let check_func (env : env) (f : func) : T.func =
           f.name (show_ty (zonk tbody_ty)) (show_ty (zonk ret_ty)))));
   let tbody = zonk_expr tbody in
   let param_tys = List.map zonk param_tys in
-  (* Linear params (Region and user `linear` types) are borrowed from
+  (* resource params (Region and user `resource` types) are borrowed from
      the caller — caller's creating scope frees them. Callees never
-     drop received linear values, so there is no per-param drop logic
+     drop received resource values, so there is no per-param drop logic
      in the typed AST. *)
   let initial_live =
     List.fold_left2 (fun m (p, _) t -> SM.add p t m)
@@ -3160,6 +3298,15 @@ let check_func (env : env) (f : func) : T.func =
   let (body_with_moves, _final_live) =
     check_moves_expr env initial_live true tbody
   in
+  (* By design there is NO param-consumption check: a function that receives a
+     resource BY VALUE and does not return it IS that resource's terminal
+     consumer — it ended at the call site (the caller already lost it). The
+     consumer reads the fields and releases the raw resource; whether it does so
+     correctly is the author's responsibility, not the language's. The compiler
+     guarantees single-consumption (linearity), not cleanup correctness. The
+     "can't silently drop" rule applies to LOCALS you create (the TELet check
+     above), which is the only place a resource can be abandoned. So _final_live
+     is intentionally discarded here. *)
   (* Finalize closures discovered while inferring this function: each
      becomes a lifted top-level function with its captures. *)
   let my_lambdas = List.rev !pending_lambdas in
@@ -3173,10 +3320,10 @@ let check_func (env : env) (f : func) : T.func =
       (* A Region handle is a gen-checked observer: capturing a copy is
          safe because calling the closure after the region is dropped
          aborts on the generation check, exactly like a stale array
-         handle. Other linear values have no such guard and no copy. *)
-      if is_linear_ty t && not (is_region_ty t) then
+         handle. Other resource values have no such guard and no copy. *)
+      if is_resource_ty t && not (is_region_ty t) then
         raise (Type_error (Printf.sprintf
-          "closure cannot capture %S: it has linear type %s, which has no \
+          "closure cannot capture %S: it has resource type %s, which has no \
            copy operation (closures capture by copy)" n (show_ty t))))
       caps;
     let lam_live =
@@ -3221,7 +3368,7 @@ let builtin_option_decl : type_decl = {
     { ctor_name = "Some"; arg_tys = [TyVar "T"] };
     { ctor_name = "None"; arg_tys = [] };
   ];
-  is_linear = false;
+  is_resource = false;
 }
 
 (* Built-in Result[T] — privileged. Phase 7 of Stage 3 wraps every
@@ -3235,7 +3382,7 @@ let builtin_result_decl : type_decl = {
     { ctor_name = "Ok";  arg_tys = [TyVar "T"] };
     { ctor_name = "Err"; arg_tys = [TyInt] };
   ];
-  is_linear = false;
+  is_resource = false;
 }
 
 (* `yield` parses to `await orto_nop()`. orto_nop is injected as a

@@ -41,11 +41,11 @@ extern fn orto_ring_send(handle: *byte, fd: int,
 extern fn orto_ring_recv(handle: *byte, fd: int,
                           buf: *byte, len_: int, flags: int) -> int
 
-// ---------- linear ring handle ----------
+// ---------- resource ring handle ----------
 
-linear struct Ring { handle: *byte }
+resource struct Ring { handle: *byte }
 
-fn drop_Ring(r: Ring) -> int {
+fn ring_close(r: Ring) -> int {
     orto_ring_exit(r.handle);
     0
 }
@@ -57,7 +57,7 @@ fn ring_new(entries: int) -> Ring {
     Ring { handle: orto_ring_create(entries) }
 }
 
-fn ring_failed(r: Ring) -> bool { is_null(r.handle) }
+fn ring_failed(r: &Ring) -> bool { is_null(r.handle) }
 
 // ---------- I/O operations ----------
 //
@@ -67,48 +67,48 @@ fn ring_failed(r: Ring) -> bool { is_null(r.handle) }
 //   < 0   — -errno (negate to get the C errno value).
 //
 // File descriptors here are plain `int`. Pair with `sys::Fd` to get
-// the linear close-at-scope behaviour: wrap with `fd_wrap(raw)`
+// the resource close-at-scope behaviour: wrap with `fd_wrap(raw)`
 // after `uring_open`.
 
-fn uring_read(r: Ring, fd: int, buf: Handle[byte], offset: int) -> int {
+fn uring_read(r: &Ring, fd: int, buf: Handle[byte], offset: int) -> int {
     orto_ring_read(r.handle, fd, as_ptr(buf), len(buf), offset)
 }
 
-fn uring_write(r: Ring, fd: int, buf: Handle[byte], offset: int) -> int {
+fn uring_write(r: &Ring, fd: int, buf: Handle[byte], offset: int) -> int {
     orto_ring_write(r.handle, fd, as_ptr(buf), len(buf), offset)
 }
 
-fn uring_open(r: Ring, path: Handle[byte], flags: int, mode: int) -> int {
+fn uring_open(r: &Ring, path: Handle[byte], flags: int, mode: int) -> int {
     orto_ring_openat(r.handle, as_ptr(path), flags, mode)
 }
 
-fn uring_close(r: Ring, fd: int) -> int {
+fn uring_close(r: &Ring, fd: int) -> int {
     orto_ring_close(r.handle, fd)
 }
 
-fn uring_fsync(r: Ring, fd: int) -> int {
+fn uring_fsync(r: &Ring, fd: int) -> int {
     orto_ring_fsync(r.handle, fd)
 }
 
 // ---------- socket operations ----------
 
-fn uring_socket(r: Ring, domain: int, type_: int, protocol: int) -> int {
+fn uring_socket(r: &Ring, domain: int, type_: int, protocol: int) -> int {
     orto_ring_socket(r.handle, domain, type_, protocol)
 }
 
-fn uring_connect(r: Ring, fd: int, addr: Handle[byte]) -> int {
+fn uring_connect(r: &Ring, fd: int, addr: Handle[byte]) -> int {
     orto_ring_connect(r.handle, fd, as_ptr(addr), len(addr))
 }
 
-fn uring_accept(r: Ring, fd: int) -> int {
+fn uring_accept(r: &Ring, fd: int) -> int {
     orto_ring_accept(r.handle, fd)
 }
 
-fn uring_send(r: Ring, fd: int, buf: Handle[byte], flags: int) -> int {
+fn uring_send(r: &Ring, fd: int, buf: Handle[byte], flags: int) -> int {
     orto_ring_send(r.handle, fd, as_ptr(buf), len(buf), flags)
 }
 
-fn uring_recv(r: Ring, fd: int, buf: Handle[byte], flags: int) -> int {
+fn uring_recv(r: &Ring, fd: int, buf: Handle[byte], flags: int) -> int {
     orto_ring_recv(r.handle, fd, as_ptr(buf), len(buf), flags)
 }
 
@@ -140,31 +140,31 @@ struct Completion {
 // Queue a read. `user_data` is your tag — pick any int; you'll see
 // it back in `wait_one().id`. Returns 0 on success, -errno if the
 // submission queue is full.
-fn submit_read(r: Ring, fd: int, buf: Handle[byte], offset: int, id: int) -> int {
+fn submit_read(r: &Ring, fd: int, buf: Handle[byte], offset: int, id: int) -> int {
     orto_ring_submit_read(r.handle, fd, as_ptr(buf), len(buf), offset, id)
 }
 
-fn submit_write(r: Ring, fd: int, buf: Handle[byte], offset: int, id: int) -> int {
+fn submit_write(r: &Ring, fd: int, buf: Handle[byte], offset: int, id: int) -> int {
     orto_ring_submit_write(r.handle, fd, as_ptr(buf), len(buf), offset, id)
 }
 
-fn submit_send(r: Ring, fd: int, buf: Handle[byte], flags: int, id: int) -> int {
+fn submit_send(r: &Ring, fd: int, buf: Handle[byte], flags: int, id: int) -> int {
     orto_ring_submit_send(r.handle, fd, as_ptr(buf), len(buf), flags, id)
 }
 
-fn submit_recv(r: Ring, fd: int, buf: Handle[byte], flags: int, id: int) -> int {
+fn submit_recv(r: &Ring, fd: int, buf: Handle[byte], flags: int, id: int) -> int {
     orto_ring_submit_recv(r.handle, fd, as_ptr(buf), len(buf), flags, id)
 }
 
 // Hand the kernel everything we've queued. One syscall regardless of
 // how many ops we batched. Returns number of SQEs accepted, -errno
 // on failure.
-fn flush(r: Ring) -> int {
+fn flush(r: &Ring) -> int {
     orto_ring_flush(r.handle)
 }
 
 // Block until one CQE is available. Returns (id, res) as Completion.
-fn wait_one(r: Ring) -> Completion {
+fn wait_one(r: &Ring) -> Completion {
     let id_buf = c_alloc[int](1);
     let res = orto_ring_wait_one(r.handle, id_buf);
     let id = id_buf[0];
@@ -174,7 +174,7 @@ fn wait_one(r: Ring) -> Completion {
 
 // Try to pick a completion without blocking. Returns None if none
 // ready, Some(Completion) if one was consumed.
-fn try_wait_one(r: Ring) -> Option[Completion] {
+fn try_wait_one(r: &Ring) -> Option[Completion] {
     let id_buf  = c_alloc[int](1);
     let res_buf = c_alloc[int](1);
     let rc = orto_ring_peek_one(r.handle, id_buf, res_buf);

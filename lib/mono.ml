@@ -28,6 +28,7 @@ let rec mangle_ty (t : ty) : string =
       in
       String.concat "_" parts
   | TyPtr inner -> "ptr_" ^ mangle_ty inner
+  | TyBorrow inner -> "brw_" ^ mangle_ty inner
   | TyTuple [] -> "unit"
   | TyTuple ts ->
       "Tuple_" ^ String.concat "_" (List.map mangle_ty ts)
@@ -59,20 +60,30 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
     Hashtbl.replace extern_names e.name ()) prog.externs;
   let is_extern name = Hashtbl.mem extern_names name in
 
+  (* Atom 4: a resource type is no longer required to have a `drop_<Type>`
+     function. So we only force-include one when it actually exists. *)
+  let fn_names : (string, unit) Hashtbl.t = Hashtbl.create 64 in
+  List.iter (fun (f : Check.T.func) ->
+    Hashtbl.replace fn_names f.name ()) prog.funcs;
+  let fn_is_defined name = Hashtbl.mem fn_names name in
+
   let request_fn name ts =
     if not (Hashtbl.mem fn_seen (name, ts)) then begin
       Hashtbl.add fn_seen (name, ts) ();
       Queue.add (name, ts) fn_queue
     end
   in
-  (* For a linear ADT/record instantiation, force-include its drop fn
+  (* For a resource ADT/record instantiation, force-include its drop fn
      in the mono'd output. The drop fn is non-generic and named by the
      `drop_fn_name_for` convention applied to the mono'd type name. *)
-  let request_drop_for_linear (orig_name : string) (ts : ty list) (is_linear : bool) =
-    if is_linear then
+  let request_drop_for_linear (orig_name : string) (ts : ty list) (is_resource : bool) =
+    if is_resource then
       let mono_name = mangle_name orig_name ts in
       let drop_name = Check.drop_fn_name_for mono_name in
-      request_fn drop_name []
+      (* Only force-include the drop fn if the author actually wrote one. A
+         resource consumed by a differently-named by-value function (Atom 4)
+         has no `drop_<Type>`, and that is fine. *)
+      if fn_is_defined drop_name then request_fn drop_name []
   in
   let request_adt name ts =
     if not (Hashtbl.mem adt_seen (name, ts)) then begin
@@ -97,13 +108,13 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
     Hashtbl.create (List.length prog.records)
   in
   List.iter (fun (rd : record_decl) ->
-    if rd.rec_is_linear then Hashtbl.replace record_linear rd.rec_name ())
+    if rd.rec_is_resource then Hashtbl.replace record_linear rd.rec_name ())
     prog.records;
   let adt_linear : (string, unit) Hashtbl.t =
     Hashtbl.create (List.length prog.types)
   in
   List.iter (fun (td : type_decl) ->
-    if td.is_linear then Hashtbl.replace adt_linear td.type_name ())
+    if td.is_resource then Hashtbl.replace adt_linear td.type_name ())
     prog.types;
 
   let rec rewrite_ty (subst : (string * ty) list) (t : ty) : ty =
@@ -151,6 +162,9 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
     | TyFun (args, ret) ->
         TyFun (List.map (rewrite_ty subst) args, rewrite_ty subst ret)
     | TyPtr inner -> TyPtr (rewrite_ty subst inner)
+    (* A borrow IS a pointer (checked, unlike *T) — keep it so emit lowers it to
+       `T*`. `&x` is an address-of, field access through it is `->`. *)
+    | TyBorrow inner -> TyBorrow (rewrite_ty subst inner)
     | TyTuple ts -> TyTuple (List.map (rewrite_ty subst) ts)
     | TyMeta _ ->
         failwith "mono rewrite_ty: TyMeta after checking"
@@ -270,6 +284,8 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         Check.T.TEPtrCast (rewrite_expr subst e, rt t)
     | Check.T.TEDeref (p, t) ->
         Check.T.TEDeref (rewrite_expr subst p, rt t)
+    | Check.T.TEBorrow (p, t) ->
+        Check.T.TEBorrow (rewrite_expr subst p, rt t)
     | Check.T.TEAssign (x, v, t) ->
         Check.T.TEAssign (x, rewrite_expr subst v, rt t)
     | Check.T.TEAssignField (p, f, v) ->
@@ -396,7 +412,7 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
           type_name   = mangle_name name ts;
           type_params = [];
           variants    = new_variants;
-          is_linear   = orig.is_linear;
+          is_resource   = orig.is_resource;
         } in
         Hashtbl.replace mono_adts mono.type_name mono
       done;
@@ -415,7 +431,7 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
           rec_name        = mangle_name name ts;
           rec_type_params = [];
           rec_fields      = new_fields;
-          rec_is_linear   = orig.rec_is_linear;
+          rec_is_resource   = orig.rec_is_resource;
         } in
         Hashtbl.replace mono_recs mono.rec_name mono
       done;

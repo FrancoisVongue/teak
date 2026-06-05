@@ -1,5 +1,5 @@
 // File I/O via raw syscalls (open/read/write/close) wrapped in
-// linear Fd. Writes a string to /tmp, reads it back, prints to stdout.
+// resource Fd. Writes a string to /tmp, reads it back, prints to stdout.
 //
 // Pattern for descriptor-returning syscalls:
 //   - sys_*  fn returns raw int (or -1).
@@ -10,7 +10,7 @@
 // kernel level (programmer's bug, visible in syscall trace);
 // forgetting to close after wrap is impossible — drop fires.
 
-use sys::{Fd, fd_wrap, fd_read, fd_write,
+use sys::{Fd, fd_wrap, fd_read, fd_write, fd_close,
           sys_open, o_wronly, o_rdonly, o_creat, o_trunc};
 use str::c_str;
 // print is an intrinsic
@@ -19,9 +19,9 @@ fn do_write(path: Handle[byte]) -> int {
     let raw = sys_open(path, o_wronly() + o_creat() + o_trunc(), 420);
     if raw < 0 { return 1 }
     let f = fd_wrap(raw);
-    fd_write(f, "hello from orto\n");
+    fd_write(&f, "hello from orto\n");   // borrow — write only reads the fd
+    fd_close(f);  // by-value = move: consume via sys's named fn
     0
-    // f drops here — close(raw) is called
 }
 
 fn do_read(r: Region, path: Handle[byte]) -> int {
@@ -29,7 +29,8 @@ fn do_read(r: Region, path: Handle[byte]) -> int {
     if raw < 0 { return 2 }
     let f = fd_wrap(raw);
     let buf = ref(r, 256, to_byte(0));
-    let n = fd_read(f, buf);
+    let n = fd_read(&f, buf);   // borrow — read only reads the fd
+    fd_close(f);  // by-value = move: consume it before any exit path
     if n <= 0 { return 3 }
     print(slice(buf, 0, n));
     0

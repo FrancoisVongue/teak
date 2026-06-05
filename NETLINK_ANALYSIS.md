@@ -82,8 +82,6 @@ IfAddrmsg { ... }` + хелперы из `std::bin`. См. `netlink_msg.orto` �
 
 2. **Variadic format** — `fmt.Errorf("...%d", x)` много где. Сейчас `concat_all` с `int_to_bytes`. Работает но многословно.
 
-3. **Generic Result/Option для linear types** — пока workaround: возвращать raw int + wrap manually (см. `sys.orto:fd_wrap`).
-
 ---
 
 ## Что не хватает (compiler)
@@ -101,7 +99,6 @@ IfAddrmsg { ... }` + хелперы из `std::bin`. См. `netlink_msg.orto` �
 **Нужны:**
 - Хешмап в stdlib.
 - Variadic format() или string interpolation.
-- Generic `Result[T, E]` (через linear container если T линеен).
 
 **Возможно полезно:**
 - Bit-flags syntax `0b00000001` или хотя бы named bitwise ops (`|`, `&` для int).

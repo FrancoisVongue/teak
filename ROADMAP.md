@@ -192,8 +192,6 @@ orto-код, не compiler) и крупные архитектурные шаг�
 
 - **Variadic format `format(r, "...", a, b, c)`** — сильно болит в практике (netlink error messages, debug print). Без неё `concat_all + int_to_bytes` chains.
 
-- **Generic Option/Result для linear types** — сейчас `Option[Fd]` запрещён (Fd linear, Option не linear). Workaround: возвращать raw int + wrap manually (`fd_wrap`). Чище — разрешить linear-aware generic instantiation: если T linear, container становится linear.
-
 - **`format(r, "...", a, b, c)` variadic.** Текущее `concat_all(r, ref(r, [...]))` многословно. Variadic + типизированные args существенно улучшат, но variadic — серьёзная фича.
 
 - **Nested patterns в match.** `Some(0) =>`, `Some(_) =>`. Сейчас `Some(x)` биндит x, литерал на месте не работает. Закроется guards (есть!) на 80%; nested cleaner но big refactor.

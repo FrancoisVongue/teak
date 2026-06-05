@@ -179,6 +179,7 @@ let ty_of (e : expr) : A.ty =
   | TEFloat _ -> A.TyApp ("float", [])
   | TEIndex (_, _, t) -> t
   | TEDeref (_, t) -> t
+  | TEBorrow (_, t) -> t
   | TEHandle (_, _, _, t) -> t
   | TEHandleLit (_, _, t) -> t
   | TERegion (_, t) | TEStackRegion (_, t) | TEAlignedRegion (_, _, t) -> t
@@ -239,6 +240,7 @@ let subexprs (e : expr) : expr list =
   | TEDrop (a, _) -> [a]
   | TEReset a -> [a]
   | TEDeref (a, _) -> [a]
+  | TEBorrow (a, _) -> [a]
   | TEAssign (_, v, _) -> [v]
   | TEAssignField (p, _, v) -> [p; v]
   | TEWhile (c, b) -> [c; b]
@@ -822,7 +824,7 @@ let rec lower (e : expr) : string =
       let v = lower e in
       (match t with
        | A.TyApp ("Region", []) -> ins "call $orto_rt_drop(l %s)" v
-       | _ -> ());   (* user-linear drops: side effect only, no exit-code impact *)
+       | _ -> ());   (* user-resource drops: side effect only, no exit-code impact *)
       "0"
 
   | TEStringLit s ->
@@ -908,6 +910,12 @@ let rec lower (e : expr) : string =
         end;
         off + size_of ct) 0 names tys);
       lower body
+
+  | TEBorrow _ ->
+      (* A borrow is an address-of; lowering it correctly needs the place in
+         memory. The QBE backend doesn't do that yet — fail loudly rather than
+         miscompile. The C backend supports borrows. *)
+      failwith "qbe backend: borrows (&T) are not yet supported — use the C backend"
 
   | e ->
       let tag = match e with

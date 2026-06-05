@@ -23,6 +23,13 @@ and ty =
   | TyApp  of string * ty list   (* e.g. Option[int], Shape (= TyApp("Shape", [])) *)
   | TyFun  of ty list * ty       (* fn(args) -> ret *)
   | TyPtr  of ty                 (* *T — raw C pointer, escape hatch for FFI *)
+  | TyBorrow of ty               (* &T — second-class borrow. Read it, or pass it
+                                    on as `&`; it can NOT be returned, stored in a
+                                    field, sent to spawn, or moved out. Borrow-ness
+                                    lives in the type: is_resource_ty (TyBorrow _) is
+                                    false, so the move-checker never consumes it,
+                                    and `&T` does not unify with owned `T`, so the
+                                    no-escape rule falls out of unification. *)
   | TyTuple of ty list           (* (T1, T2, ..., Tn) for n >= 2 — anonymous product *)
   | TyMeta of meta               (* unification variable, only inside the checker *)
 
@@ -120,8 +127,11 @@ type expr =
   | EPtrCast of ty * expr                 (* ptr_cast[T](e) — reinterpret raw pointer/address as *T *)
   | EReset of expr                        (* reset(r) — rewind region r, invalidate its refs *)
   | ETryAt  of expr * expr                (* try_at(a, i) — None on dangling/oob *)
-  | EDrop   of expr                       (* drop(x) — consume linear value, run its drop fn *)
+  | EDrop   of expr                       (* drop(x) — consume resource value, run its drop fn *)
   | EDeref  of expr                       (* *p — pointer deref *)
+  | EBorrow of expr                       (* &x — borrow a place. Erased by the
+                                             checker into the place's typed node
+                                             retyped to TyBorrow; no typed node. *)
   (* Stage 3 — completion-based concurrency. See STAGE3_ASYNC.md. *)
   | EAwait    of expr                     (* await op — suspend until op completes *)
   | EAwaitAll of expr list                (* await all { e1, e2, ... } — static concurrent block *)
@@ -137,7 +147,7 @@ type expr =
   | EArena    of string * expr * expr     (* arena r = <region-expr>; body
                                              Scope-bound region binding. Value
                                              must type to Region. Lowers to a
-                                             linear let in the checker; mono and
+                                             resource let in the checker; mono and
                                              emit never see EArena. *)
   | EPrint    of bool * expr              (* print/println intrinsic.
                                              bool = newline?  Inner expr is
@@ -159,14 +169,14 @@ type type_decl = {
   type_name   : string;
   type_params : string list;
   variants    : variant list;
-  is_linear   : bool;   (* `linear enum Foo { ... }` — move-only with user drop fn *)
+  is_resource   : bool;   (* `resource enum Foo { ... }` — move-only with user drop fn *)
 }
 
 type record_decl = {
   rec_name        : string;
   rec_type_params : string list;
   rec_fields      : (string * ty) list;
-  rec_is_linear   : bool;   (* `linear struct Foo { ... }` *)
+  rec_is_resource   : bool;   (* `resource struct Foo { ... }` *)
 }
 
 type func = {
@@ -258,6 +268,7 @@ let rec show_ty = function
         (String.concat ", " (List.map show_ty args))
         (show_ty ret)
   | TyPtr t -> "*" ^ show_ty t
+  | TyBorrow t -> "&" ^ show_ty t
   | TyTuple ts ->
       Printf.sprintf "(%s)" (String.concat ", " (List.map show_ty ts))
   | TyMeta { resolved = Some t; _ } -> show_ty t
@@ -390,6 +401,7 @@ let rec show_expr = function
   | ETryAt (a, i) -> Printf.sprintf "try_at(%s, %s)" (show_expr a) (show_expr i)
   | EDrop e -> Printf.sprintf "drop(%s)" (show_expr e)
   | EDeref p -> Printf.sprintf "*%s" (show_expr p)
+  | EBorrow p -> Printf.sprintf "&%s" (show_expr p)
   | EAwait e -> Printf.sprintf "await %s" (show_expr e)
   | EAwaitAll branches ->
       Printf.sprintf "await all { %s }"

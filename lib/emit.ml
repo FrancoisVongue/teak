@@ -100,6 +100,7 @@ let rec collect_unsafe (e : Check.T.expr) : unit =
   | TEPtrCast (a, _) -> go a
   | TETryAt (a, b, _) -> go a; go b
   | TEDeref (a, _) -> go a
+  | TEBorrow (a, _) -> go a
   | TEAssignField (p, _, v) -> go p; go v
   | TEWhile (c, b) -> go c; go b
   | TEReturn (a, _) -> go a
@@ -354,6 +355,7 @@ let rec collect_ty (t : ty) : unit =
         fn_types_order := (m, t) :: !fn_types_order
       end
   | TyPtr inner -> collect_ty inner
+  | TyBorrow inner -> collect_ty inner
   | TyMeta _ -> failwith "emit collect_ty: TyMeta"
 
 let rec collect_expr (e : Check.T.expr) : unit =
@@ -418,6 +420,7 @@ let rec collect_expr (e : Check.T.expr) : unit =
   | Check.T.TEHandleData (a, t) -> collect_expr a; collect_ty t
   | Check.T.TEPtrCast (e, t) -> collect_expr e; collect_ty t
   | Check.T.TEDeref (p, t) -> collect_expr p; collect_ty t
+  | Check.T.TEBorrow (p, t) -> collect_expr p; collect_ty t
   | Check.T.TEAssign (_, v, t) -> collect_expr v; collect_ty t
   | Check.T.TEAssignField (p, _, v) -> collect_expr p; collect_expr v
   | Check.T.TEWhile (c, b) -> collect_expr c; collect_expr b
@@ -484,6 +487,7 @@ let rec scan_fnvals (e : Check.T.expr) : unit =
   | TEHandleData (a, _) -> scan_fnvals a
   | TEPtrCast (e, _) -> scan_fnvals e
   | TEDeref (p, _) -> scan_fnvals p
+  | TEBorrow (p, _) -> scan_fnvals p
   | TEAssign (_, v, _) -> scan_fnvals v
   | TEAssignField (p, _, v) -> scan_fnvals p; scan_fnvals v
   | TEWhile (c, b) -> scan_fnvals c; scan_fnvals b
@@ -563,6 +567,7 @@ let rec c_type (t : ty) : string =
   | TyApp (n, []) -> n
   | TyFun _ -> Mono.mangle_ty t
   | TyPtr inner -> c_type inner ^ "*"
+  | TyBorrow inner -> c_type inner ^ "*"   (* a borrow IS a (checked) pointer *)
   | TyTuple [] -> "int"   (* unit *)
   | TyTuple _ -> Mono.mangle_ty t
   | TyApp (n, _) ->
@@ -665,11 +670,11 @@ let emit_tuple_forwards () : string list =
     Printf.sprintf "struct %s { %s };" mangled fields)
     !tuple_types_order
 
-(* drop_<TupleX> for every tuple shape that contains a linear component.
-   Walks the tuple's components and drops each linear one in turn. *)
+(* drop_<TupleX> for every tuple shape that contains a resource component.
+   Walks the tuple's components and drops each resource one in turn. *)
 let emit_tuple_drop_forwards () : string list =
   List.rev_map (fun (mangled, ts) ->
-    if List.exists Check.is_linear_ty ts then
+    if List.exists Check.is_resource_ty ts then
       Some (Printf.sprintf "static void drop_%s(%s t);" mangled mangled)
     else None)
     !tuple_types_order
@@ -677,11 +682,11 @@ let emit_tuple_drop_forwards () : string list =
 
 let emit_tuple_drop_defs () : string list =
   List.rev_map (fun (mangled, ts) ->
-    if not (List.exists Check.is_linear_ty ts) then None
+    if not (List.exists Check.is_resource_ty ts) then None
     else
       let drops =
         List.mapi (fun i ty ->
-          if Check.is_linear_ty ty then
+          if Check.is_resource_ty ty then
             Some (Printf.sprintf "    %s"
                     (let _ = ty in
                      let fn_call = match ty with
@@ -751,10 +756,10 @@ let emit_stream_drop_forwards () : string list =
     Printf.sprintf "static void drop_Stream_%s(Stream_%s s);" m m)
     !stream_wrappers_order
 
-(* Emit a call to the right drop function for a linear type. After mono,
+(* Emit a call to the right drop function for a resource type. After mono,
    the type name carries its module mangling (`net__Socket`); the helper
    in check.ml derives the matching drop fn name. For Region the runtime
-   supplies `drop_Region` directly. Handle[Linear T] gets a generated
+   supplies `drop_Region` directly. Handle[resource T] gets a generated
    drop_Handle_<T> per instantiation (phase 3 induced linearity). *)
 let drop_call_stmt (var_name : string) (t : ty) : string =
   match t with
@@ -779,22 +784,22 @@ let drop_call_stmt (var_name : string) (t : ty) : string =
 
 (* Forward declarations for every drop_Handle_<T> we'll emit, so they
    can be referenced before their definition (e.g. nested
-   Handle[Handle[Linear]] drops the inner array). *)
+   Handle[Handle[resource]] drops the inner array). *)
 let emit_array_drop_forwards () : string list =
   List.rev_map (fun (mangled, inner) ->
-    if Check.is_linear_ty inner then
+    if Check.is_resource_ty inner then
       Some (Printf.sprintf "static void drop_%s(%s a);" mangled mangled)
     else None)
     !array_types_order
   |> List.filter_map (fun x -> x)
 
-(* Cascade drop for Handle[T] when T is linear: walks the live slots
+(* Cascade drop for Handle[T] when T is resource: walks the live slots
    of the element backing buffer (gen-checked) and drops each. The
    array handle itself doesn't free memory — the surrounding Region
    does that. *)
 let emit_array_drop_defs () : string list =
   List.rev_map (fun (mangled, inner) ->
-    if not (Check.is_linear_ty inner) then None
+    if not (Check.is_resource_ty inner) then None
     else
       let elem_c = c_type inner in
       let drop_elem = drop_call_stmt "data[i]" inner in
@@ -945,6 +950,7 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
     | TEHandleData (a, t) -> TEHandleData (rn env a, t)
     | TEPtrCast (e, t) -> TEPtrCast (rn env e, t)
     | TEDeref (p, t) -> TEDeref (rn env p, t)
+    | TEBorrow (p, t) -> TEBorrow (rn env p, t)
     | TEAssign (x, v, t) ->
         let x' = try List.assoc x env with Not_found -> x in
         TEAssign (x', rn env v, t)
@@ -1026,6 +1032,7 @@ let topo_sort_structs
     | TyApp _ -> acc
     | TyFun _ -> acc   (* fn pointers don't transmit by-value deps *)
     | TyPtr _ -> acc   (* raw pointers don't transmit by-value deps either *)
+    | TyBorrow _ -> acc (* borrows erase — no by-value dep *)
     | TyTuple _ -> acc (* tuples are structural; topo sort treats them
                           as transparent — they will be typedef'd later. *)
   in
@@ -1143,6 +1150,7 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TEHandleData (_, t) -> t
   | Check.T.TEPtrCast (_, t) -> t
   | Check.T.TEDeref (_, t) -> t
+  | Check.T.TEBorrow (_, t) -> t
   | Check.T.TEAssign (_, _, _) -> TyTuple []
   | Check.T.TEAssignField (_, _, _) -> TyTuple []
   | Check.T.TEWhile (_, _) -> TyTuple []
@@ -1324,11 +1332,19 @@ let rec emit_expr
 
   | Check.T.TEField (e, fname, _) ->
       let ce = emit_expr ctor_map e in
-      let value = match e with
-        | Check.T.TEVar _ | Check.T.TEFnRef _ ->
-            Printf.sprintf "%s.%s" ce.value fname
-        | _ ->
-            Printf.sprintf "(%s).%s" ce.value fname
+      (* Through a borrow the receiver is a pointer → `->`; otherwise `.`. *)
+      let arrow = match ty_of_expr e with TyBorrow _ -> true | _ -> false in
+      let value =
+        if arrow then
+          (match e with
+           | Check.T.TEVar _ | Check.T.TEFnRef _ ->
+               Printf.sprintf "%s->%s" ce.value fname
+           | _ -> Printf.sprintf "(%s)->%s" ce.value fname)
+        else
+          (match e with
+           | Check.T.TEVar _ | Check.T.TEFnRef _ ->
+               Printf.sprintf "%s.%s" ce.value fname
+           | _ -> Printf.sprintf "(%s).%s" ce.value fname)
       in
       { stmts = ce.stmts; value }
 
@@ -1978,6 +1994,11 @@ let rec emit_expr
       { stmts = cp.stmts;
         value = Printf.sprintf "(*%s)" cp.value }
 
+  | Check.T.TEBorrow (p_e, _) ->
+      (* `&place` — take the address of the place lvalue. *)
+      let (stmts, lv) = emit_place ctor_map p_e in
+      { stmts; value = Printf.sprintf "(&(%s))" lv }
+
   | Check.T.TEAssign (x, v_e, _) ->
       let cv = emit_expr ctor_map v_e in
       let stmts = cv.stmts @ [Printf.sprintf "%s = %s;" x cv.value] in
@@ -2186,7 +2207,7 @@ let rec emit_expr
           (List.combine names comp_tys)
       in
       (* If any binder has auto_drop=true, after body finishes we run
-         drops for the linear components. Materialise body result first. *)
+         drops for the resource components. Materialise body result first. *)
       let needs_drop = List.exists (fun b -> b) auto_drops in
       if needs_drop then
         let body_ty = ty_of_expr body in
@@ -2628,6 +2649,7 @@ let async_collect_locals (body : Check.T.expr) : (string * ty) list =
     | TEHandleData (a, _) -> go a
     | TEPtrCast (e, _) -> go e
     | TEDeref (p, _) -> go p
+    | TEBorrow (p, _) -> go p
     | TEAssign (_, v, _) -> go v
     | TEAssignField (p, _, v) -> go p; go v
     | TEWhile (c, b) -> go c; go b
@@ -2716,6 +2738,7 @@ let async_rewrite_to_frame
     | TEHandleData (a, t) -> TEHandleData (go a, t)
     | TEPtrCast (e, t) -> TEPtrCast (go e, t)
     | TEDeref (p, t) -> TEDeref (go p, t)
+    | TEBorrow (p, t) -> TEBorrow (go p, t)
     | TEAssign (x, v, t) -> TEAssign (rename x, go v, t)
     | TEAssignField (p, f, v) -> TEAssignField (go p, f, go v)
     | TEWhile (c, b) -> TEWhile (go c, go b)
@@ -2797,6 +2820,7 @@ let rec emit_has_suspension (e : Check.T.expr) : bool =
   | TEHandleData (a, _) -> emit_has_suspension a
   | TEPtrCast (e, _) -> emit_has_suspension e
   | TEDeref (p, _) -> emit_has_suspension p
+  | TEBorrow (p, _) -> emit_has_suspension p
   | TEAssign (_, v, _) -> emit_has_suspension v
   | TEAssignField (p, _, v) ->
       emit_has_suspension p || emit_has_suspension v
@@ -2868,6 +2892,7 @@ let allocate_await_all_locals_in_body (body : Check.T.expr) : Check.T.expr =
     | TEHandleData (a, t) -> TEHandleData (go a, t)
     | TEPtrCast (e, t) -> TEPtrCast (go e, t)
     | TEDeref (p, t) -> TEDeref (go p, t)
+    | TEBorrow (p, t) -> TEBorrow (go p, t)
     | TEAssign (x, v, t) -> TEAssign (x, go v, t)
     | TEAssignField (p, f, v) -> TEAssignField (go p, f, go v)
     | TEWhile (c, b) -> TEWhile (go c, go b)
@@ -2980,6 +3005,7 @@ let rec desugar_let_tuples (e : Check.T.expr) : Check.T.expr =
   | TEHandleData (a, t) -> TEHandleData (r a, t)
   | TEPtrCast (e, t) -> TEPtrCast (r e, t)
   | TEDeref (p, t) -> TEDeref (r p, t)
+  | TEBorrow (p, t) -> TEBorrow (r p, t)
   | TEAssign (x, v, t) -> TEAssign (x, r v, t)
   | TEAssignField (p, f, v) -> TEAssignField (r p, f, r v)
   | TEWhile (c, b) -> TEWhile (r c, r b)

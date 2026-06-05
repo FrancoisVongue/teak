@@ -89,6 +89,10 @@ let rec parse_ty st =
       (* *T — raw C pointer. Prefix only; infix * is multiplication. *)
       let inner = parse_ty st in
       TyPtr inner
+  | TAmp          ->
+      (* &T — a borrow. Prefix only; infix & is bitwise-and on int. *)
+      let inner = parse_ty st in
+      TyBorrow inner
   | TFn           ->
       expect st TLParen;
       let args =
@@ -274,6 +278,13 @@ and parse_unary st =
       advance st;
       let inner = parse_unary st in
       EDeref inner
+  | TAmp ->
+      (* &x — borrow a place. Prefix-only here; infix & (bitwise-and) is
+         matched in parse_binop_chain, which only triggers after an operand
+         has been parsed, so there is no ambiguity. *)
+      advance st;
+      let inner = parse_unary st in
+      EBorrow inner
   | TAwait ->
       advance st;
       parse_await_tail st
@@ -1090,7 +1101,7 @@ let parse_extern st =
 
 (* ---------- type declarations ---------- *)
 
-let parse_struct st ~is_linear : top_decl =
+let parse_struct st ~is_resource : top_decl =
   expect st TStruct;
   let name = match eat st with
     | TCtorIdent s -> s
@@ -1124,10 +1135,10 @@ let parse_struct st ~is_linear : top_decl =
     rec_name = name;
     rec_type_params = type_params;
     rec_fields = fields;
-    rec_is_linear = is_linear;
+    rec_is_resource = is_resource;
   }
 
-let parse_enum st ~is_linear : top_decl =
+let parse_enum st ~is_resource : top_decl =
   expect st TEnum;
   let name = match eat st with
     | TCtorIdent s -> s
@@ -1165,7 +1176,7 @@ let parse_enum st ~is_linear : top_decl =
   in
   let variants = collect_variants () in
   expect st TRBrace;
-  TopType { type_name = name; type_params; variants; is_linear }
+  TopType { type_name = name; type_params; variants; is_resource }
 
 (* ---------- use declarations ---------- *)
 
@@ -1291,23 +1302,24 @@ let parse (toks : token list) : program =
         let f = parse_func st in
         loop terminator (TopFunc f :: acc)
     | TStruct ->
-        let td = parse_struct st ~is_linear:false in
+        let td = parse_struct st ~is_resource:false in
         loop terminator (td :: acc)
     | TEnum ->
-        let td = parse_enum st ~is_linear:false in
+        let td = parse_enum st ~is_resource:false in
         loop terminator (td :: acc)
-    | TLinear ->
+    | TResource ->
+        let kw = "resource" in
         advance st;
         (match peek st with
          | TStruct ->
-             let td = parse_struct st ~is_linear:true in
+             let td = parse_struct st ~is_resource:true in
              loop terminator (td :: acc)
          | TEnum ->
-             let td = parse_enum st ~is_linear:true in
+             let td = parse_enum st ~is_resource:true in
              loop terminator (td :: acc)
          | t -> raise (Parse_error
-           (Printf.sprintf "expected `struct` or `enum` after `linear`, got %s"
-              (Token.show t))))
+           (Printf.sprintf "expected `struct` or `enum` after `%s`, got %s"
+              kw (Token.show t))))
     | TType ->
         advance st;
         let name = match eat st with
@@ -1353,7 +1365,7 @@ let parse (toks : token list) : program =
         let body = parse_block st in
         loop terminator (TopTest { test_name = name; test_body = body } :: acc)
     | t -> raise (Parse_error
-      (Printf.sprintf "expected `use`, `fn`, `struct`, `enum`, `linear`, `type`, `extern`, `test`, or `namespace`, got %s"
+      (Printf.sprintf "expected `use`, `fn`, `struct`, `enum`, `resource`, `type`, `extern`, `test`, or `namespace`, got %s"
          (Token.show t)))
   in
   loop TEOF []

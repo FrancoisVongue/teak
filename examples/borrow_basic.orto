@@ -1,0 +1,43 @@
+// Borrow `&T` — a read-only, second-class loan of a resource.
+//
+// A `&Socket` parameter can READ the socket (its fields) but cannot consume
+// it: the borrow type does not unify with the owned type, so the callee can
+// neither return it, store it, nor drop it. The caller therefore still owns
+// the socket after the call and must consume it explicitly (resources have no
+// auto-drop). This is the F8 read-only-receiver pattern: `self: &T` reads,
+// `self: T` consumes.
+//
+// Borrow-ness lives in the TYPE (TyBorrow). is_resource_ty(&T) is false, so the
+// move-checker never consumes a borrowed value, and call-site `&s` must match
+// the signature's `&Socket` — that agreement falls out of unification.
+
+extern fn putchar(c: int) -> int
+
+resource struct Socket { fd: int }
+
+fn open_fake() -> Socket {
+    Socket { fd: 7 }
+}
+
+// Borrow: reads through `&Socket`, does NOT consume. The same `s` is still
+// usable at the call site afterwards.
+fn peek(s: &Socket) -> int {
+    s.fd
+}
+
+// The consuming form takes the socket BY VALUE (owned). A consumer is just a
+// by-value function the author writes — any name, no magic. Calling it is a
+// move, so it ends the resource.
+fn close(s: Socket) -> int {
+    putchar(68);   // 'D' — marker so we can see the consume ran
+    putchar(10);
+    0
+}
+
+fn main() -> int {
+    let s = open_fake();
+    let a = peek(&s);        // borrow — s stays alive
+    let b = peek(&s);        // borrow again — still alive
+    close(s);          // consume via the author's by-value fn (move)
+    a + b - 14               // 7 + 7 - 14 = 0  → exit 0
+}

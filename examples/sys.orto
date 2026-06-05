@@ -1,6 +1,6 @@
 // std::sys — thin layer over libc system calls.
 //
-// File / socket descriptors are wrapped in a `linear struct Fd` so the
+// File / socket descriptors are wrapped in a `resource struct Fd` so the
 // compiler ensures you can't accidentally clone, alias, or forget to
 // close them. The underlying syscalls are accessed via plain `extern
 // fn` declarations — that's the "through-hole" to libc, no language
@@ -55,11 +55,11 @@ fn seek_set() -> int { 0 }
 fn seek_cur() -> int { 1 }
 fn seek_end() -> int { 2 }
 
-// ---------- linear file/socket descriptor ----------
+// ---------- resource file/socket descriptor ----------
 
-linear struct Fd { raw: int }
+resource struct Fd { raw: int }
 
-fn drop_Fd(f: Fd) -> int { close(f.raw); 0 }
+fn fd_close(f: Fd) -> int { close(f.raw); 0 }
 
 // fd_wrap takes a raw int from libc and wraps it in a Fd, asserting
 // it's a real descriptor. Use after checking raw >= 0.
@@ -75,7 +75,7 @@ fn fd_wrap(raw: int) -> Fd { Fd { raw: raw } }
 //     // f drops automatically at scope end
 //
 // The pattern is a couple of lines and totally explicit; the
-// alternative would be a custom `linear enum FdResult` per-call,
+// alternative would be a custom `resource enum FdResult` per-call,
 // which is more boilerplate for the same effect.
 
 fn sys_open(path: Handle[byte], flags: int, mode: int) -> int {
@@ -86,15 +86,16 @@ fn sys_socket(domain: int, type_: int, protocol: int) -> int {
     socket(domain, type_, protocol)
 }
 
-// Borrow operations on Fd — the descriptor stays alive.
-fn fd_read(f: Fd, buf: Handle[byte]) -> int {
+// Borrow operations on Fd (`&Fd`) — read only, the descriptor stays alive and
+// the caller keeps ownership. By value these would MOVE the Fd in and close it.
+fn fd_read(f: &Fd, buf: Handle[byte]) -> int {
     read(f.raw, as_ptr(buf), len(buf))
 }
 
-fn fd_write(f: Fd, buf: Handle[byte]) -> int {
+fn fd_write(f: &Fd, buf: Handle[byte]) -> int {
     write(f.raw, as_ptr(buf), len(buf))
 }
 
-fn fd_seek(f: Fd, offset: int, whence: int) -> int {
+fn fd_seek(f: &Fd, offset: int, whence: int) -> int {
     lseek(f.raw, offset, whence)
 }

@@ -24,7 +24,7 @@
 
 /* Returns an opaque pointer-sized handle, or NULL on failure. The
  * handle is just a heap-allocated struct io_uring; the orto side
- * holds it inside a `linear struct Ring { handle: *byte }`. */
+ * holds it inside a `resource struct Ring { handle: *byte }`. */
 void *orto_ring_create(int entries) {
     struct io_uring *ring = malloc(sizeof(struct io_uring));
     if (!ring) return NULL;

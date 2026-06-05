@@ -285,6 +285,7 @@ let rec resolve_ty
       TyFun (List.map (resolve_ty map locals) args,
              resolve_ty map locals ret)
   | TyPtr inner -> TyPtr (resolve_ty map locals inner)
+  | TyBorrow inner -> TyBorrow (resolve_ty map locals inner)
   | TyTuple ts -> TyTuple (List.map (resolve_ty map locals) ts)
   | TyMeta _ -> t
 
@@ -383,6 +384,7 @@ let rec resolve_expr
   | EHandleData a -> EHandleData (r a)
   | EPtrCast (t, e) -> EPtrCast (rt t, r e)
   | EDeref p -> EDeref (r p)
+  | EBorrow p -> EBorrow (r p)
   | ETryAt (a, i) -> ETryAt (r a, r i)
   | EDrop e -> EDrop (r e)
   | EReset e -> EReset (r e)
@@ -440,7 +442,7 @@ let resolve_decl
       Some (TopType {
         type_name = m_name td.type_name;
         type_params; variants;
-        is_linear = td.is_linear;
+        is_resource = td.is_resource;
       })
   | TopRecord rd ->
       let type_params = rd.rec_type_params in
@@ -452,7 +454,7 @@ let resolve_decl
         rec_name = m_name rd.rec_name;
         rec_type_params = type_params;
         rec_fields;
-        rec_is_linear = rd.rec_is_linear;
+        rec_is_resource = rd.rec_is_resource;
       })
   | TopFunc f ->
       let type_params = f.type_params in
@@ -509,6 +511,7 @@ let rec expand_alias_ty
       TyFun (List.map (expand_alias_ty aliases visited) args,
              expand_alias_ty aliases visited ret)
   | TyPtr inner -> TyPtr (expand_alias_ty aliases visited inner)
+  | TyBorrow inner -> TyBorrow (expand_alias_ty aliases visited inner)
   | TyTuple ts -> TyTuple (List.map (expand_alias_ty aliases visited) ts)
 
 let expand_in_expr (aliases : (string * ty) list) (e : expr) : expr =
@@ -561,6 +564,7 @@ let expand_in_expr (aliases : (string * ty) list) (e : expr) : expr =
     | EHandleData a -> EHandleData (ex a)
     | EPtrCast (t, e) -> EPtrCast (xt t, ex e)
     | EDeref p -> EDeref (ex p)
+    | EBorrow p -> EBorrow (ex p)
     | ETryAt (a, i) -> ETryAt (ex a, ex i)
     | EDrop e -> EDrop (ex e)
     | EReset e -> EReset (ex e)
@@ -583,11 +587,11 @@ let expand_in_decl (aliases : (string * ty) list) (d : top_decl) : top_decl =
       TopType { td with variants =
         List.map (fun v ->
           { v with arg_tys = List.map xt v.arg_tys }) td.variants;
-        is_linear = td.is_linear; }
+        is_resource = td.is_resource; }
   | TopRecord rd ->
       TopRecord { rd with rec_fields =
         List.map (fun (f, t) -> (f, xt t)) rd.rec_fields;
-        rec_is_linear = rd.rec_is_linear; }
+        rec_is_resource = rd.rec_is_resource; }
   | TopFunc f ->
       TopFunc { f with
         params = List.map (fun (n, t) -> (n, xt t)) f.params;

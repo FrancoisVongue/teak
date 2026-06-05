@@ -13,13 +13,13 @@
 //      -luring -fsanitize=address,leak -g -o /tmp/file_io_uring
 //   /tmp/file_io_uring
 
-use iouring::{Ring, ring_new, ring_failed,
+use iouring::{Ring, ring_new, ring_failed, ring_close,
               uring_open, uring_read, uring_write, uring_close};
 use sys::{o_wronly, o_rdonly, o_creat, o_trunc};
 use str::c_str;
 // print is an intrinsic
 
-fn do_write(r: Region, ring: Ring, path: Handle[byte]) -> int {
+fn do_write(r: Region, ring: &Ring, path: Handle[byte]) -> int {
     let flags = o_wronly() + o_creat() + o_trunc();
     let fd = uring_open(ring, path, flags, 420);
     if fd < 0 { return 1 }
@@ -30,7 +30,7 @@ fn do_write(r: Region, ring: Ring, path: Handle[byte]) -> int {
     0
 }
 
-fn do_read(r: Region, ring: Ring, path: Handle[byte]) -> int {
+fn do_read(r: Region, ring: &Ring, path: Handle[byte]) -> int {
     let fd = uring_open(ring, path, o_rdonly(), 0);
     if fd < 0 { return 3 }
     let buf = ref(r, 256, to_byte(0));
@@ -44,12 +44,13 @@ fn do_read(r: Region, ring: Ring, path: Handle[byte]) -> int {
 fn main() -> int {
     arena r = region(4096);
     let ring = ring_new(8);
-    if ring_failed(ring) { return 10 }
+    if ring_failed(&ring) { ring_close(ring); return 10 }
 
     let path = c_str(r, "/tmp/orto_iouring_demo.txt");
 
-    let w = do_write(r, ring, path);
-    if w != 0 { return w }
-    do_read(r, ring, path)
-    // ring drops here → orto_ring_exit → io_uring_queue_exit + free
+    let w = do_write(r, &ring, path);   // borrow the ring — do_write only uses it
+    if w != 0 { ring_close(ring); return w }
+    let res = do_read(r, &ring, path);
+    ring_close(ring);   // by-value = move: explicit consume on the success path
+    res
 }
