@@ -465,6 +465,7 @@ let resolve_decl
       Some (TopFunc {
         name        = m_name c.const_name;
         type_params = [];
+        resource_tparams = [];
         params      = [];
         return_ty   = resolve_ty map [] c.const_ty;
         body        = resolve_expr map [] c.const_value;
@@ -480,7 +481,7 @@ let resolve_decl
       in
       Some (TopType {
         type_name = m_name td.type_name;
-        type_params; variants;
+        type_params; resource_tparams = td.resource_tparams; variants;
         is_resource = td.is_resource;
         is_pub = td.is_pub;
       })
@@ -493,6 +494,7 @@ let resolve_decl
       Some (TopRecord {
         rec_name = m_name rd.rec_name;
         rec_type_params = type_params;
+        rec_resource_tparams = rd.rec_resource_tparams;
         rec_fields;
         rec_is_resource = rd.rec_is_resource;
         rec_is_pub = rd.rec_is_pub;
@@ -509,7 +511,7 @@ let resolve_decl
       let body = resolve_expr map body_locals f.body in
       Some (TopFunc {
         name = m_name f.name;
-        type_params; params; return_ty; body;
+        type_params; resource_tparams = f.resource_tparams; params; return_ty; body;
         is_pub = f.is_pub;
       })
   | TopExtern e ->

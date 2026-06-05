@@ -291,6 +291,13 @@ let loop_depth = ref 0
    can verify the type of its expression. Reset on every check_func. *)
 let current_return_ty : ty option ref = ref None
 
+(* The `[resource T]` type parameters in scope for the decl/func currently being
+   checked. A TyVar named here is treated as a resource: a field/value of that
+   type induces linearity on its container, and the move-checker moves it. Set
+   per-decl in build_env and per-func in check_func; otherwise empty. This is
+   a KIND ("T may be a resource"), not a type-class — T is never inspected. *)
+let current_resource_tparams : string list ref = ref []
+
 (* Set of type names that are resource: Region (always) plus every
    user-declared `resource struct/enum`. Populated by build_env. *)
 let resource_type_names : (string, unit) Hashtbl.t = Hashtbl.create 8
@@ -363,6 +370,7 @@ let rec is_resource_ty (t : ty) : bool =
       (* Induced linearity: a tuple containing any resource component is
          itself resource — destructuring moves every component out. *)
       List.exists is_resource_ty ts
+  | TyVar n -> List.mem n !current_resource_tparams   (* `[resource T]` kind *)
   | _ -> false
 
 (* A Region is bound exclusively with `arena`, never `let`. This keeps
@@ -459,6 +467,7 @@ type env = {
   records : (string * record_decl) list;
   ctors   : (string * ctor_info) list;
   fns     : (string * (string list * (ty list * ty))) list;
+  fn_res_tparams : (string * string list) list;  (* fn name -> `[resource T]` params *)
 }
 
 (* A USER-declared `resource` (struct or enum). Region/Task/Stream are
@@ -514,21 +523,26 @@ let rec ty_contains_resource (t : ty) : bool =
   | TyPtr _ -> false
   | TyBorrow _ -> false   (* a borrow is never consumed — never resource *)
   | TyTuple ts -> List.exists ty_contains_resource ts
-  | TyInt | TyBool | TyVar _ | TyMeta _ -> false
+  | TyVar n -> List.mem n !current_resource_tparams   (* `[resource T]` kind *)
+  | TyInt | TyBool | TyMeta _ -> false
 
 (* When a generic is instantiated (function call, ctor application,
    record literal), every type meta receives values by copy. Resolving
    it to a resource type (Region) violates that contract — Region cannot
    be copied, only moved. Catch this at the call site rather than
    crashing later in mono. *)
-let check_instantiation (where : string) (metas : ty list) : unit =
-  List.iter (fun m ->
+let check_instantiation
+    (where : string) (resource_positions : bool list) (metas : ty list) : unit =
+  List.iteri (fun i m ->
+    let pos_ok =
+      match List.nth_opt resource_positions i with Some b -> b | None -> false in
     let mz = zonk m in
-    if ty_contains_resource mz then
+    if (not pos_ok) && ty_contains_resource mz then
       raise (Type_error
         (Printf.sprintf
            "%s: cannot instantiate a generic type parameter with the \
-            resource type %s — only copyable types are allowed here"
+            resource type %s — only copyable types are allowed (declare the \
+            parameter `[resource T]` to allow a resource)"
            where (show_ty mz))))
     metas
 
@@ -558,13 +572,28 @@ let rec validate_ty
          resource) lands in phase 3. *)
       let propagates_resource =
         (n = "Task" || n = "Stream" || n = "Handle") in
+      (* A user generic declared `[resource T]` allows a resource in THAT
+         position. We map the container's resource-kind params to arg positions. *)
+      let resource_positions =
+        (match List.assoc_opt n record_env with
+         | Some rd ->
+             List.map (fun p -> List.mem p rd.rec_resource_tparams) rd.rec_type_params
+         | None ->
+           (match List.assoc_opt n type_env with
+            | Some td ->
+                List.map (fun p -> List.mem p td.resource_tparams) td.type_params
+            | None -> []))
+      in
       if not propagates_resource then
-        List.iter (fun arg ->
-          if ty_contains_resource arg then
+        List.iteri (fun i arg ->
+          let pos_ok =
+            match List.nth_opt resource_positions i with Some b -> b | None -> false in
+          if (not pos_ok) && ty_contains_resource arg then
             raise (Type_error
               (Printf.sprintf
                  "A resource type is not allowed as a type argument of %S — \
-                  resource types must be a top-level type of a name, not nested in data"
+                  resource types must be a top-level type of a name, not nested \
+                  in data (declare the parameter `[resource T]` to allow it)"
                  n))) args;
       if List.mem n in_scope then begin
         if args <> [] then
@@ -748,6 +777,7 @@ let build_env
   let types =
     List.map (fun (td : type_decl) ->
       let in_scope = td.type_params in
+      current_resource_tparams := td.resource_tparams;
       let variants =
         List.map (fun v ->
           let arg_tys =
@@ -776,6 +806,7 @@ let build_env
   let records =
     List.map (fun (rd : record_decl) ->
       let in_scope = rd.rec_type_params in
+      current_resource_tparams := rd.rec_resource_tparams;
       let fields =
         List.map (fun (fname, fty) ->
           let fty = validate_ty type_env record_env in_scope fty in
@@ -832,6 +863,7 @@ let build_env
                "duplicate type parameter %S in function %S" p f.name));
         Hashtbl.add seen_params p ()) f.type_params;
       let in_scope = f.type_params in
+      current_resource_tparams := f.resource_tparams;
       let param_tys =
         List.map (fun (_, t) ->
           let t = validate_ty type_env record_env in_scope t in
@@ -877,7 +909,9 @@ let build_env
   let env = { types = type_env;
               records = record_env;
               ctors = ctor_env;
-              fns = user_sigs @ extern_sigs } in
+              fns = user_sigs @ extern_sigs;
+              fn_res_tparams =
+                List.map (fun (f : func) -> (f.name, f.resource_tparams)) funcs } in
   (* Atom 4: a resource type no longer REQUIRES a magic `drop_<Type>` function.
      A consumer is ANY by-value function — `close(s)`, `commit(tx)`, anything —
      because by-value = move already ends the resource at the call site (Atom 3).
@@ -998,7 +1032,7 @@ let rec pat_compatible_with_kind kind p =
   | SK_Bytes, PStr _ -> true
   | SK_Tuple ts, PTuple ps when List.length ts = List.length ps ->
       List.for_all2 (fun t p ->
-        let sub_kind = try scrutinee_kind {types=[]; records=[]; ctors=[]; fns=[]} t
+        let sub_kind = try scrutinee_kind {types=[]; records=[]; ctors=[]; fns=[]; fn_res_tparams=[]} t
                        with _ -> SK_Int (* fallback; full check happens in real arm typing *)
         in
         pat_compatible_with_kind sub_kind p) ts ps
@@ -1348,8 +1382,15 @@ let rec infer (env : env) (tparams : string list)
       in
       (match tc with
        | T.TEFnRef (_, metas, _) ->
+           let tparams =
+             match List.assoc_opt callee_label env.fns with
+             | Some (tp, _) -> tp | None -> [] in
+           let rtp =
+             match List.assoc_opt callee_label env.fn_res_tparams with
+             | Some r -> r | None -> [] in
+           let res_pos = List.map (fun p -> List.mem p rtp) tparams in
            check_instantiation
-             (Printf.sprintf "call to %S" callee_label) metas
+             (Printf.sprintf "call to %S" callee_label) res_pos metas
        | _ -> ());
       (T.TECall (tc, typed_args, ret_ty), ret_ty)
 
@@ -1367,7 +1408,12 @@ let rec infer (env : env) (tparams : string list)
       in
       let result_ty = TyApp (info.ctor_owner, owner_tys) in
       let typed_args = check_args env tparams vars c arg_tys args in
-      check_instantiation (Printf.sprintf "constructor %S" c) metas;
+      let res_pos =
+        match List.assoc_opt info.ctor_owner env.types with
+        | Some td ->
+            List.map (fun p -> List.mem p td.resource_tparams) td.type_params
+        | None -> [] in
+      check_instantiation (Printf.sprintf "constructor %S" c) res_pos metas;
       (T.TECtor (c, metas, typed_args, result_ty), result_ty)
 
   | ERecord (name, elems) ->
@@ -1443,7 +1489,12 @@ let rec infer (env : env) (tparams : string list)
         List.map (fun (fname, _) ->
           (fname, Hashtbl.find field_map fname)) declared_fields
       in
-      check_instantiation (Printf.sprintf "record %S literal" name) metas;
+      let res_pos =
+        match List.assoc_opt name env.records with
+        | Some rd ->
+            List.map (fun p -> List.mem p rd.rec_resource_tparams) rd.rec_type_params
+        | None -> [] in
+      check_instantiation (Printf.sprintf "record %S literal" name) res_pos metas;
       let record_expr =
         T.TERecord (name, metas, typed_fields, result_ty)
       in
@@ -3271,6 +3322,7 @@ let check_func (env : env) (f : func) : T.func =
   let (_, (param_tys, ret_ty)) = List.assoc f.name env.fns in
   loop_depth := 0;
   current_return_ty := Some ret_ty;
+  current_resource_tparams := f.resource_tparams;
   let vars =
     List.combine (List.map fst f.params)
       (List.map (fun t -> (t, false)) param_tys)
@@ -3345,6 +3397,7 @@ let check_func (env : env) (f : func) : T.func =
       T.is_async = false;
     } :: !lifted_funcs)
     my_lambdas;
+  current_resource_tparams := [];
   { T.name = f.name;
     T.type_params = f.type_params;
     T.params = List.combine
@@ -3364,6 +3417,7 @@ let check_func (env : env) (f : func) : T.func =
 let builtin_option_decl : type_decl = {
   type_name   = "Option";
   type_params = ["T"];
+  resource_tparams = [];
   variants = [
     { ctor_name = "Some"; arg_tys = [TyVar "T"] };
     { ctor_name = "None"; arg_tys = [] };
@@ -3379,6 +3433,7 @@ let builtin_option_decl : type_decl = {
 let builtin_result_decl : type_decl = {
   type_name   = "Result";
   type_params = ["T"];
+  resource_tparams = [];
   variants = [
     { ctor_name = "Ok";  arg_tys = [TyVar "T"] };
     { ctor_name = "Err"; arg_tys = [TyInt] };

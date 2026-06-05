@@ -128,7 +128,7 @@ let lift (prog : program) : program =
         incr counter;
         Hashtbl.replace globals name ();
         lifted :=
-          { name; type_params = []; params; return_ty = ret; body = body';
+          { name; type_params = []; resource_tparams = []; params; return_ty = ret; body = body';
             is_pub = false }   (* lifted lambda — internal helper, never exported *)
           :: !lifted;
         EVar name

@@ -135,25 +135,37 @@ and parse_ty_list st =
 
 (* ---------- type parameter lists ---------- *)
 
-let parse_type_params st =
+(* Returns (name, is_resource_kind) pairs. `[resource T]` marks T as a kind
+   that may be instantiated with a resource type (still sealed — only moved). *)
+let parse_type_params_kinds st =
   if peek st = TLBracket then begin
     advance st;
     let rec collect () =
+      let is_res = (peek st = TResource) in
+      if is_res then advance st;
       match eat st with
       | TCtorIdent s ->
+          let this = (s, is_res) in
           if peek st = TComma then begin
             advance st;
-            s :: collect ()
+            this :: collect ()
           end else
-            [s]
+            [this]
       | t -> raise (Parse_error
         (Printf.sprintf "expected type parameter name, got %s"
            (Token.show t)))
     in
-    let names = collect () in
+    let ps = collect () in
     expect st TRBracket;
-    names
+    ps
   end else []
+
+(* Split into (all names, resource-kind names). *)
+let split_tparams (ps : (string * bool) list) : string list * string list =
+  (List.map fst ps,
+   List.filter_map (fun (n, r) -> if r then Some n else None) ps)
+
+let parse_type_params st = List.map fst (parse_type_params_kinds st)
 
 (* ---------- expressions: operator precedence ---------- *)
 
@@ -1071,14 +1083,14 @@ let parse_func ?(is_pub=false) st =
     | t -> raise (Parse_error
       (Printf.sprintf "expected function name, got %s" (Token.show t)))
   in
-  let type_params = parse_type_params st in
+  let (type_params, resource_tparams) = split_tparams (parse_type_params_kinds st) in
   expect st TLParen;
   let params = parse_params st in
   expect st TRParen;
   expect st TArrow;
   let return_ty = parse_ty st in
   let body = parse_block st in
-  { name; type_params; params; return_ty; body; is_pub }
+  { name; type_params; resource_tparams; params; return_ty; body; is_pub }
 
 let parse_extern ?(is_pub=false) st =
   expect st TExtern;
@@ -1111,7 +1123,7 @@ let parse_struct ?(is_pub=false) st ~is_resource : top_decl =
       (Printf.sprintf "expected type name after `struct`, got %s"
          (Token.show t)))
   in
-  let type_params = parse_type_params st in
+  let (type_params, rec_resource_tparams) = split_tparams (parse_type_params_kinds st) in
   expect st TLBrace;
   let rec collect_fields () =
     if peek st = TRBrace then []
@@ -1136,6 +1148,7 @@ let parse_struct ?(is_pub=false) st ~is_resource : top_decl =
   TopRecord {
     rec_name = name;
     rec_type_params = type_params;
+    rec_resource_tparams;
     rec_fields = fields;
     rec_is_resource = is_resource;
     rec_is_pub = is_pub;
@@ -1149,7 +1162,7 @@ let parse_enum ?(is_pub=false) st ~is_resource : top_decl =
       (Printf.sprintf "expected type name after `enum`, got %s"
          (Token.show t)))
   in
-  let type_params = parse_type_params st in
+  let (type_params, resource_tparams) = split_tparams (parse_type_params_kinds st) in
   expect st TLBrace;
   let rec collect_variants () =
     if peek st = TRBrace then []
@@ -1179,7 +1192,7 @@ let parse_enum ?(is_pub=false) st ~is_resource : top_decl =
   in
   let variants = collect_variants () in
   expect st TRBrace;
-  TopType { type_name = name; type_params; variants; is_resource; is_pub }
+  TopType { type_name = name; type_params; resource_tparams; variants; is_resource; is_pub }
 
 let parse_type_alias ?(is_pub=false) st : top_decl =
   expect st TType;

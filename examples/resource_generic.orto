@@ -1,0 +1,32 @@
+// `resource T` — a generic container that may hold a RESOURCE.
+//
+// `[resource T]` marks T as a KIND ("T may be a resource"), NOT a type-class:
+// the container never inspects T, never copies or compares it — it only MOVES
+// it. A container that holds a resource is itself a resource (induced
+// linearity), so it must be consumed or moved out, like any resource.
+//
+// This is orto's answer to "generic over linear types": no `T: Drop`
+// constraint, no method dispatch — a sealed box that carries a resource.
+// Without `[resource T]`, instantiating a generic with a resource is rejected.
+
+extern fn putchar(c: int) -> int
+
+resource struct Socket { fd: int }
+fn open_fake() -> Socket { Socket { fd: 7 } }
+fn close(s: Socket) -> int { putchar(67); putchar(48 + s.fd); putchar(10); 0 } // "C7\n"
+
+// A generic box. `resource T` lets it carry a resource; the `resource struct`
+// keyword (required, because it owns a resource) makes the box itself a
+// resource.
+resource struct Box[resource T] { val: T }
+
+fn box_up[resource T](v: T) -> Box[T] { Box { val: v } }  // move a resource IN
+fn unbox[resource T](b: Box[T]) -> T { b.val }            // move it OUT, consuming the box
+
+fn main() -> int {
+    let s = open_fake();
+    let b = box_up(s);   // Socket moved into the box — s is gone now
+    // b : Box[Socket] is a resource — it must be consumed or moved out.
+    let s2 = unbox(b);   // Socket moved back out; the box is consumed
+    close(s2)            // consume the socket → prints C7
+}

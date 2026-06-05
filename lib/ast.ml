@@ -168,6 +168,11 @@ type variant = {
 type type_decl = {
   type_name   : string;
   type_params : string list;
+  resource_tparams : string list;  (* subset of type_params declared `[resource T]`:
+                                      T may be instantiated with a resource type.
+                                      It is a KIND (T can be a resource), NOT a
+                                      type-class — T is still sealed, never touched,
+                                      only moved. *)
   variants    : variant list;
   is_resource   : bool;   (* `resource enum Foo { ... }` — move-only with user drop fn *)
   is_pub      : bool;     (* `pub` — visible to other namespaces; default private *)
@@ -176,6 +181,7 @@ type type_decl = {
 type record_decl = {
   rec_name        : string;
   rec_type_params : string list;
+  rec_resource_tparams : string list;  (* subset declared `[resource T]` *)
   rec_fields      : (string * ty) list;
   rec_is_resource   : bool;   (* `resource struct Foo { ... }` *)
   rec_is_pub      : bool;     (* `pub` — visible to other namespaces *)
@@ -184,6 +190,7 @@ type record_decl = {
 type func = {
   name        : string;
   type_params : string list;
+  resource_tparams : string list;  (* subset declared `[resource T]` *)
   params      : (string * ty) list;
   return_ty   : ty;
   body        : expr;
