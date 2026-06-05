@@ -56,5 +56,5 @@ unit RUN 67
 stdtest_collections RUN 38
 stdtest_numeric_wide RUN 48
 stdtest_raw_codec RUN 7
-stdtest_text RUN 23
+stdtest_text RUN 33
 stdtest_word_freq RUN 4
