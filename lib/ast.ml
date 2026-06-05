@@ -170,6 +170,7 @@ type type_decl = {
   type_params : string list;
   variants    : variant list;
   is_resource   : bool;   (* `resource enum Foo { ... }` — move-only with user drop fn *)
+  is_pub      : bool;     (* `pub` — visible to other namespaces; default private *)
 }
 
 type record_decl = {
@@ -177,6 +178,7 @@ type record_decl = {
   rec_type_params : string list;
   rec_fields      : (string * ty) list;
   rec_is_resource   : bool;   (* `resource struct Foo { ... }` *)
+  rec_is_pub      : bool;     (* `pub` — visible to other namespaces *)
 }
 
 type func = {
@@ -185,10 +187,12 @@ type func = {
   params      : (string * ty) list;
   return_ty   : ty;
   body        : expr;
+  is_pub      : bool;     (* `pub` — visible to other namespaces; default private *)
 }
 
 type extern_decl = {
   ext_name      : string;
+  ext_is_pub    : bool;     (* `pub` — visible to other namespaces; default private *)
   ext_params    : (string * ty) list;
   (* The return type drives the calling convention. Write it
      directly: `Task[T]` for SQE-prep externs lowered under `await`,
@@ -215,6 +219,7 @@ type use_decl = {
 type alias_decl = {
   alias_name : string;
   alias_ty   : ty;
+  alias_is_pub : bool;     (* `pub` — visible to other namespaces; default private *)
 }
 
 (* `const NAME: T = expr;` — a named compile-time value. Resolved away by
@@ -226,6 +231,7 @@ type const_decl = {
   const_name  : string;
   const_ty    : ty;
   const_value : expr;
+  const_is_pub : bool;     (* `pub` — visible to other namespaces; default private *)
 }
 
 (* `test "human description" { body }` — top-level test block.

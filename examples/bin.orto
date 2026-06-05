@@ -8,21 +8,21 @@
 
 // ---------- 16-bit ----------
 
-fn read_u16_le(buf: Handle[byte], off: int) -> int {
+pub fn read_u16_le(buf: Handle[byte], off: int) -> int {
     to_int(buf[off]) + to_int(buf[off + 1]) * 256
 }
 
-fn read_u16_be(buf: Handle[byte], off: int) -> int {
+pub fn read_u16_be(buf: Handle[byte], off: int) -> int {
     to_int(buf[off]) * 256 + to_int(buf[off + 1])
 }
 
-fn write_u16_le(buf: Handle[byte], off: int, v: int) -> int {
+pub fn write_u16_le(buf: Handle[byte], off: int, v: int) -> int {
     buf[off]     := to_byte(v % 256);
     buf[off + 1] := to_byte((v / 256) % 256);
     0
 }
 
-fn write_u16_be(buf: Handle[byte], off: int, v: int) -> int {
+pub fn write_u16_be(buf: Handle[byte], off: int, v: int) -> int {
     buf[off]     := to_byte((v / 256) % 256);
     buf[off + 1] := to_byte(v % 256);
     0
@@ -30,21 +30,21 @@ fn write_u16_be(buf: Handle[byte], off: int, v: int) -> int {
 
 // ---------- 32-bit ----------
 
-fn read_u32_le(buf: Handle[byte], off: int) -> int {
+pub fn read_u32_le(buf: Handle[byte], off: int) -> int {
     to_int(buf[off])
     + to_int(buf[off + 1]) * 256
     + to_int(buf[off + 2]) * 65536
     + to_int(buf[off + 3]) * 16777216
 }
 
-fn read_u32_be(buf: Handle[byte], off: int) -> int {
+pub fn read_u32_be(buf: Handle[byte], off: int) -> int {
     to_int(buf[off]) * 16777216
     + to_int(buf[off + 1]) * 65536
     + to_int(buf[off + 2]) * 256
     + to_int(buf[off + 3])
 }
 
-fn write_u32_le(buf: Handle[byte], off: int, v: int) -> int {
+pub fn write_u32_le(buf: Handle[byte], off: int, v: int) -> int {
     buf[off]     := to_byte(v % 256);
     buf[off + 1] := to_byte((v / 256) % 256);
     buf[off + 2] := to_byte((v / 65536) % 256);
@@ -52,7 +52,7 @@ fn write_u32_le(buf: Handle[byte], off: int, v: int) -> int {
     0
 }
 
-fn write_u32_be(buf: Handle[byte], off: int, v: int) -> int {
+pub fn write_u32_be(buf: Handle[byte], off: int, v: int) -> int {
     buf[off]     := to_byte((v / 16777216) % 256);
     buf[off + 1] := to_byte((v / 65536) % 256);
     buf[off + 2] := to_byte((v / 256) % 256);
@@ -66,7 +66,7 @@ fn write_u32_be(buf: Handle[byte], off: int, v: int) -> int {
 // fit in signed i64, so we assemble in the u64 type with shifts/masks
 // (unsigned wrap is defined). u16/u32 stay `int` only because they fit.
 
-fn read_u64_le(buf: Handle[byte], off: int) -> u64 {
+pub fn read_u64_le(buf: Handle[byte], off: int) -> u64 {
     to_u64(to_int(buf[off]))
     | (to_u64(to_int(buf[off + 1])) << 8)
     | (to_u64(to_int(buf[off + 2])) << 16)
@@ -77,7 +77,7 @@ fn read_u64_le(buf: Handle[byte], off: int) -> u64 {
     | (to_u64(to_int(buf[off + 7])) << 56)
 }
 
-fn read_u64_be(buf: Handle[byte], off: int) -> u64 {
+pub fn read_u64_be(buf: Handle[byte], off: int) -> u64 {
     (to_u64(to_int(buf[off])) << 56)
     | (to_u64(to_int(buf[off + 1])) << 48)
     | (to_u64(to_int(buf[off + 2])) << 40)
@@ -88,7 +88,7 @@ fn read_u64_be(buf: Handle[byte], off: int) -> u64 {
     | to_u64(to_int(buf[off + 7]))
 }
 
-fn write_u64_le(buf: Handle[byte], off: int, v: u64) -> int {
+pub fn write_u64_le(buf: Handle[byte], off: int, v: u64) -> int {
     buf[off]     := to_byte(to_int(v & 255));
     buf[off + 1] := to_byte(to_int((v >> 8) & 255));
     buf[off + 2] := to_byte(to_int((v >> 16) & 255));
@@ -100,7 +100,7 @@ fn write_u64_le(buf: Handle[byte], off: int, v: u64) -> int {
     0
 }
 
-fn write_u64_be(buf: Handle[byte], off: int, v: u64) -> int {
+pub fn write_u64_be(buf: Handle[byte], off: int, v: u64) -> int {
     buf[off]     := to_byte(to_int((v >> 56) & 255));
     buf[off + 1] := to_byte(to_int((v >> 48) & 255));
     buf[off + 2] := to_byte(to_int((v >> 40) & 255));
@@ -114,7 +114,7 @@ fn write_u64_be(buf: Handle[byte], off: int, v: u64) -> int {
 
 // ---------- detect native endianness ----------
 
-fn is_little_endian(r: Region) -> bool {
+pub fn is_little_endian(r: Region) -> bool {
     let probe = ref(r, [to_byte(1), to_byte(0)]);
     read_u16_le(probe, 0) == 1
 }

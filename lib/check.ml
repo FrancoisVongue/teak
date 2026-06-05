@@ -3369,6 +3369,7 @@ let builtin_option_decl : type_decl = {
     { ctor_name = "None"; arg_tys = [] };
   ];
   is_resource = false;
+  is_pub = true;
 }
 
 (* Built-in Result[T] — privileged. Phase 7 of Stage 3 wraps every
@@ -3383,6 +3384,7 @@ let builtin_result_decl : type_decl = {
     { ctor_name = "Err"; arg_tys = [TyInt] };
   ];
   is_resource = false;
+  is_pub = true;
 }
 
 (* `yield` parses to `await orto_nop()`. orto_nop is injected as a
@@ -3391,6 +3393,7 @@ let builtin_result_decl : type_decl = {
    the async runtime block we emit (see emit.ml). *)
 let builtin_orto_nop_decl : extern_decl = {
   ext_name      = "orto_nop";
+  ext_is_pub    = true;
   ext_params    = [];
   ext_return_ty = TyApp ("Task", [TyInt]);
 }

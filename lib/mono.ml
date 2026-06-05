@@ -413,6 +413,7 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
           type_params = [];
           variants    = new_variants;
           is_resource   = orig.is_resource;
+          is_pub      = orig.is_pub;
         } in
         Hashtbl.replace mono_adts mono.type_name mono
       done;
@@ -432,6 +433,7 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
           rec_type_params = [];
           rec_fields      = new_fields;
           rec_is_resource   = orig.rec_is_resource;
+          rec_is_pub      = orig.rec_is_pub;
         } in
         Hashtbl.replace mono_recs mono.rec_name mono
       done;

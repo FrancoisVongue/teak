@@ -1062,7 +1062,7 @@ let parse_params st =
     let p = parse_param st in
     p :: parse_params_rest st
 
-let parse_func st =
+let parse_func ?(is_pub=false) st =
   expect st TFn;
   let name = match eat st with
     | TIdent s -> s
@@ -1076,9 +1076,9 @@ let parse_func st =
   expect st TArrow;
   let return_ty = parse_ty st in
   let body = parse_block st in
-  { name; type_params; params; return_ty; body }
+  { name; type_params; params; return_ty; body; is_pub }
 
-let parse_extern st =
+let parse_extern ?(is_pub=false) st =
   expect st TExtern;
   expect st TFn;
   let name = match eat st with
@@ -1097,11 +1097,11 @@ let parse_extern st =
        -> Stream[T]  — multishot SQE source, drained by `for x in s`
        -> T          — ordinary sync FFI call
      No modifier keywords; the type IS the signal. *)
-  { ext_name = name; ext_params = params; ext_return_ty = return_ty }
+  { ext_name = name; ext_is_pub = is_pub; ext_params = params; ext_return_ty = return_ty }
 
 (* ---------- type declarations ---------- *)
 
-let parse_struct st ~is_resource : top_decl =
+let parse_struct ?(is_pub=false) st ~is_resource : top_decl =
   expect st TStruct;
   let name = match eat st with
     | TCtorIdent s -> s
@@ -1136,9 +1136,10 @@ let parse_struct st ~is_resource : top_decl =
     rec_type_params = type_params;
     rec_fields = fields;
     rec_is_resource = is_resource;
+    rec_is_pub = is_pub;
   }
 
-let parse_enum st ~is_resource : top_decl =
+let parse_enum ?(is_pub=false) st ~is_resource : top_decl =
   expect st TEnum;
   let name = match eat st with
     | TCtorIdent s -> s
@@ -1176,7 +1177,39 @@ let parse_enum st ~is_resource : top_decl =
   in
   let variants = collect_variants () in
   expect st TRBrace;
-  TopType { type_name = name; type_params; variants; is_resource }
+  TopType { type_name = name; type_params; variants; is_resource; is_pub }
+
+let parse_type_alias ?(is_pub=false) st : top_decl =
+  expect st TType;
+  let name = match eat st with
+    | TCtorIdent s -> s
+    | t -> raise (Parse_error
+      (Printf.sprintf "expected type alias name after `type`, got %s"
+         (Token.show t)))
+  in
+  expect st TEq;
+  let target = parse_ty st in
+  expect st TSemi;
+  TopAlias { alias_name = name; alias_ty = target; alias_is_pub = is_pub }
+
+let parse_const_decl ?(is_pub=false) st : top_decl =
+  expect st TConst;
+  let name = match eat st with
+    | TIdent s -> s
+    | TCtorIdent s -> raise (Parse_error
+      (Printf.sprintf
+         "const name %S must be lowercase — constants are values, \
+          uppercase is for types and constructors" s))
+    | t -> raise (Parse_error
+      (Printf.sprintf "expected constant name after `const`, got %s"
+         (Token.show t)))
+  in
+  expect st TColon;
+  let cty = parse_ty st in
+  expect st TEq;
+  let value = parse_expr st in
+  expect st TSemi;
+  TopConst { const_name = name; const_ty = cty; const_value = value; const_is_pub = is_pub }
 
 (* ---------- use declarations ---------- *)
 
@@ -1288,8 +1321,30 @@ let parse (toks : token list) : program =
          | TUse ->
              let u = parse_use ~is_pub:true st in
              loop terminator (TopUse u :: acc)
+         | TFn ->
+             loop terminator (TopFunc (parse_func ~is_pub:true st) :: acc)
+         | TStruct ->
+             loop terminator (parse_struct ~is_pub:true st ~is_resource:false :: acc)
+         | TEnum ->
+             loop terminator (parse_enum ~is_pub:true st ~is_resource:false :: acc)
+         | TResource ->
+             advance st;
+             (match peek st with
+              | TStruct -> loop terminator (parse_struct ~is_pub:true st ~is_resource:true :: acc)
+              | TEnum   -> loop terminator (parse_enum ~is_pub:true st ~is_resource:true :: acc)
+              | t -> raise (Parse_error
+                (Printf.sprintf "expected `struct` or `enum` after `resource`, got %s"
+                   (Token.show t))))
+         | TType ->
+             loop terminator (parse_type_alias ~is_pub:true st :: acc)
+         | TConst ->
+             loop terminator (parse_const_decl ~is_pub:true st :: acc)
+         | TExtern ->
+             loop terminator (TopExtern (parse_extern ~is_pub:true st) :: acc)
          | t -> raise (Parse_error
-           (Printf.sprintf "after `pub`, expected `use`, got %s"
+           (Printf.sprintf
+              "after `pub`, expected a declaration \
+               (use/fn/struct/enum/resource/type/const/extern), got %s"
               (Token.show t))))
     | TNamespace ->
         advance st;
@@ -1321,36 +1376,9 @@ let parse (toks : token list) : program =
            (Printf.sprintf "expected `struct` or `enum` after `%s`, got %s"
               kw (Token.show t))))
     | TType ->
-        advance st;
-        let name = match eat st with
-          | TCtorIdent s -> s
-          | t -> raise (Parse_error
-            (Printf.sprintf "expected type alias name after `type`, got %s"
-               (Token.show t)))
-        in
-        expect st TEq;
-        let target = parse_ty st in
-        expect st TSemi;
-        loop terminator (TopAlias { alias_name = name; alias_ty = target } :: acc)
+        loop terminator (parse_type_alias st :: acc)
     | TConst ->
-        advance st;
-        let name = match eat st with
-          | TIdent s -> s
-          | TCtorIdent s -> raise (Parse_error
-            (Printf.sprintf
-               "const name %S must be lowercase — constants are values, \
-                uppercase is for types and constructors" s))
-          | t -> raise (Parse_error
-            (Printf.sprintf "expected constant name after `const`, got %s"
-               (Token.show t)))
-        in
-        expect st TColon;
-        let cty = parse_ty st in
-        expect st TEq;
-        let value = parse_expr st in
-        expect st TSemi;
-        loop terminator
-          (TopConst { const_name = name; const_ty = cty; const_value = value } :: acc)
+        loop terminator (parse_const_decl st :: acc)
     | TExtern ->
         let e = parse_extern st in
         loop terminator (TopExtern e :: acc)

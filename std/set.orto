@@ -6,18 +6,18 @@
 use map::{Map};
 use vec::{Vec};
 
-fn make[T](r: Region, cap: int, zt: T,
+pub fn make[T](r: Region, cap: int, zt: T,
            hash: fn(T) -> int, eq: fn(T, T) -> bool) -> Map[T, ()] {
     map::new(r, cap, zt, (), hash, eq)
 }
 
-fn add[T](s: Map[T, ()], r: Region, x: T) -> Map[T, ()] { map::insert(s, r, x, ()) }
-fn has[T](s: Map[T, ()], x: T) -> bool { map::contains(s, x) }
-fn remove[T](s: Map[T, ()], x: T) -> Map[T, ()] { map::remove(s, x) }
-fn size[T](s: Map[T, ()]) -> int { map::size(s) }
-fn is_empty[T](s: Map[T, ()]) -> bool { map::is_empty(s) }
+pub fn add[T](s: Map[T, ()], r: Region, x: T) -> Map[T, ()] { map::insert(s, r, x, ()) }
+pub fn has[T](s: Map[T, ()], x: T) -> bool { map::contains(s, x) }
+pub fn remove[T](s: Map[T, ()], x: T) -> Map[T, ()] { map::remove(s, x) }
+pub fn size[T](s: Map[T, ()]) -> int { map::size(s) }
+pub fn is_empty[T](s: Map[T, ()]) -> bool { map::is_empty(s) }
 
-fn each[T](s: Map[T, ()], f: fn(T) -> ()) -> () {
+pub fn each[T](s: Map[T, ()], f: fn(T) -> ()) -> () {
     let mut i = 0;
     while i < s.cap {
         let e = s.slots[i];
@@ -27,7 +27,7 @@ fn each[T](s: Map[T, ()], f: fn(T) -> ()) -> () {
 }
 
 // All elements of a, then all of b.
-fn union[T](r: Region, a: Map[T, ()], b: Map[T, ()]) -> Map[T, ()] {
+pub fn union[T](r: Region, a: Map[T, ()], b: Map[T, ()]) -> Map[T, ()] {
     let zt = a.ze.key;
     let mut out = map::new(r, a.cap + b.cap, zt, (), a.hash, a.eq);
     let ka = map::keys(a, r, zt);
@@ -40,7 +40,7 @@ fn union[T](r: Region, a: Map[T, ()], b: Map[T, ()]) -> Map[T, ()] {
 }
 
 // Elements present in both a and b.
-fn intersect[T](r: Region, a: Map[T, ()], b: Map[T, ()]) -> Map[T, ()] {
+pub fn intersect[T](r: Region, a: Map[T, ()], b: Map[T, ()]) -> Map[T, ()] {
     let zt = a.ze.key;
     let mut out = map::new(r, a.cap, zt, (), a.hash, a.eq);
     let ka = map::keys(a, r, zt);
@@ -54,7 +54,7 @@ fn intersect[T](r: Region, a: Map[T, ()], b: Map[T, ()]) -> Map[T, ()] {
 }
 
 // True iff every element of a is also in b.
-fn is_subset[T](r: Region, a: Map[T, ()], b: Map[T, ()]) -> bool {
+pub fn is_subset[T](r: Region, a: Map[T, ()], b: Map[T, ()]) -> bool {
     let ka = map::keys(a, r, a.ze.key);
     let mut i = 0;
     let mut ok = true;
@@ -66,7 +66,7 @@ fn is_subset[T](r: Region, a: Map[T, ()], b: Map[T, ()]) -> bool {
 }
 
 // Elements in a but not in b.
-fn difference[T](r: Region, a: Map[T, ()], b: Map[T, ()]) -> Map[T, ()] {
+pub fn difference[T](r: Region, a: Map[T, ()], b: Map[T, ()]) -> Map[T, ()] {
     let zt = a.ze.key;
     let mut out = map::new(r, a.cap, zt, (), a.hash, a.eq);
     let ka = map::keys(a, r, zt);

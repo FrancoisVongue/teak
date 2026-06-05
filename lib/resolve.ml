@@ -42,6 +42,12 @@ let is_builtin name = List.mem name builtin_names
    a call. Populated in `summarize`, read in `resolve_expr`. *)
 let const_set : (string, unit) Hashtbl.t = Hashtbl.create 16
 
+(* Visibility of every mangled name: is it `pub`? Used to enforce `pub` on
+   QUALIFIED references (`mod::item`), which take the absolute-mangle path in
+   `resolve_name` and so bypass the `use`-import visibility check. Populated in
+   `resolve` once summaries exist. *)
+let visibility : (string, bool) Hashtbl.t = Hashtbl.create 64
+
 (* `main` is the C entry point — every program has exactly one and it
    keeps its bare name. Any module can declare it, but only one in the
    whole compilation may. *)
@@ -69,6 +75,9 @@ type module_summary = {
   ctor_names    : (string * string) list;
   alias_names   : (string * string) list;
   extern_names  : string list;
+  pub_names     : string list;   (* bare names declared `pub` — the public surface.
+                                    Default-private: a name not here (and not a
+                                    re-export) cannot be imported by another namespace. *)
   mutable re_exports : (string * string) list;
 }
 
@@ -112,25 +121,36 @@ let summarize (module_path : string list) (prog : top_decl list) : module_summar
   let ctors   = ref [] in
   let aliases = ref [] in
   let externs = ref [] in
+  let pubs    = ref [] in   (* bare names marked `pub` — the public surface *)
   List.iter (fun decl ->
     match decl with
     | TopType td ->
         types := (td.type_name, m td.type_name) :: !types;
         List.iter (fun v ->
-          ctors := (v.ctor_name, m v.ctor_name) :: !ctors) td.variants
+          ctors := (v.ctor_name, m v.ctor_name) :: !ctors) td.variants;
+        if td.is_pub then begin
+          (* a public enum exports its constructors too — you need them to
+             construct and match *)
+          pubs := td.type_name :: List.map (fun v -> v.ctor_name) td.variants @ !pubs
+        end
     | TopRecord rd ->
-        records := (rd.rec_name, m rd.rec_name) :: !records
+        records := (rd.rec_name, m rd.rec_name) :: !records;
+        if rd.rec_is_pub then pubs := rd.rec_name :: !pubs
     | TopFunc f ->
-        fns := (f.name, m f.name) :: !fns
+        fns := (f.name, m f.name) :: !fns;
+        if f.is_pub then pubs := f.name :: !pubs
     | TopExtern e ->
-        externs := e.ext_name :: !externs
+        externs := e.ext_name :: !externs;
+        if e.ext_is_pub then pubs := e.ext_name :: !pubs
     | TopAlias a ->
-        aliases := (a.alias_name, m a.alias_name) :: !aliases
+        aliases := (a.alias_name, m a.alias_name) :: !aliases;
+        if a.alias_is_pub then pubs := a.alias_name :: !pubs
     | TopConst c ->
         (* A const resolves like a (0-arg) function name, and its mangled
            name is recorded so uses get rewritten to calls. *)
         fns := (c.const_name, m c.const_name) :: !fns;
-        Hashtbl.replace const_set (m c.const_name) ()
+        Hashtbl.replace const_set (m c.const_name) ();
+        if c.const_is_pub then pubs := c.const_name :: !pubs
     | TopTest _ -> ()  (* test blocks don't introduce namespace-level names *)
     | TopUse _ -> ()
     | TopNamespace _ -> ()  (* flattened away by flatten_namespaces *)
@@ -142,6 +162,7 @@ let summarize (module_path : string list) (prog : top_decl list) : module_summar
     ctor_names   = !ctors;
     alias_names  = !aliases;
     extern_names = !externs;
+    pub_names    = !pubs;
     re_exports   = [] }
 
 (* Second pass: fill in re_exports for every namespace from its
@@ -211,30 +232,34 @@ let build_resolution_map
       in
       List.map (fun item ->
         let lookup name lst = List.assoc_opt name lst in
-        match lookup item other.type_names with
-        | Some m -> (item, m)
+        let mangled =
+          match lookup item other.type_names   with Some m -> Some m | None ->
+          match lookup item other.record_names with Some m -> Some m | None ->
+          match lookup item other.fn_names     with Some m -> Some m | None ->
+          match lookup item other.ctor_names   with Some m -> Some m | None ->
+          match lookup item other.alias_names  with Some m -> Some m | None ->
+          match lookup item other.re_exports   with Some m -> Some m | None ->
+            if List.mem item other.extern_names then Some item else None
+        in
+        match mangled with
         | None ->
-        match lookup item other.record_names with
-        | Some m -> (item, m)
-        | None ->
-        match lookup item other.fn_names with
-        | Some m -> (item, m)
-        | None ->
-        match lookup item other.ctor_names with
-        | Some m -> (item, m)
-        | None ->
-        match lookup item other.alias_names with
-        | Some m -> (item, m)
-        | None ->
-        match lookup item other.re_exports with
-        | Some m -> (item, m)
-        | None ->
-          if List.mem item other.extern_names then (item, item)
-          else raise (Resolve_error
-            (Printf.sprintf
-               "use %s::%s — %S is not declared in namespace %S"
-               (path_to_string u.use_module) item item
-               (path_to_string u.use_module)))) u.use_items)
+            raise (Resolve_error
+              (Printf.sprintf
+                 "use %s::%s — %S is not declared in namespace %S"
+                 (path_to_string u.use_module) item item
+                 (path_to_string u.use_module)))
+        | Some m ->
+            (* Visibility: the imported name must be `pub` in the source
+               namespace, or a re-export (public by construction). Default is
+               private. *)
+            let is_reexport = List.mem_assoc item other.re_exports in
+            if is_reexport || List.mem item other.pub_names then (item, m)
+            else raise (Resolve_error
+              (Printf.sprintf
+                 "use %s::%s — %S is private to namespace %S; mark it `pub` \
+                  to export it"
+                 (path_to_string u.use_module) item item
+                 (path_to_string u.use_module)))) u.use_items)
       uses
   in
   let bare_own = List.map fst own in
@@ -262,10 +287,22 @@ let resolve_name
   if String.contains name ':' then
     (* Qualified `mod::item` — mangle to `mod__item`, the same form a
        module's own decls take. Absolute, so the local resolution map is
-       not consulted. *)
-    String.split_on_char ':' name
-    |> List.filter (fun s -> s <> "")
-    |> String.concat "__"
+       not consulted. Visibility is still enforced: a qualified reference may
+       only name a `pub` declaration (otherwise it would bypass the
+       use-import pub check). *)
+    let mangled =
+      String.split_on_char ':' name
+      |> List.filter (fun s -> s <> "")
+      |> String.concat "__"
+    in
+    (match Hashtbl.find_opt visibility mangled with
+     | Some false ->
+         raise (Resolve_error
+           (Printf.sprintf
+              "%S is private — a qualified reference may only name a `pub` \
+               declaration; mark it `pub` to use it across namespaces" name))
+     | _ -> ());
+    mangled
   else if List.mem name locals then name
   else if is_builtin name then name
   else
@@ -420,6 +457,7 @@ let resolve_decl
       Some (TopAlias {
         alias_name = m_name a.alias_name;
         alias_ty   = resolve_ty map [] a.alias_ty;
+        alias_is_pub = a.alias_is_pub;
       })
   | TopConst c ->
       (* Lower a const to a 0-argument function. Uses of the const name
@@ -430,6 +468,7 @@ let resolve_decl
         params      = [];
         return_ty   = resolve_ty map [] c.const_ty;
         body        = resolve_expr map [] c.const_value;
+        is_pub      = c.const_is_pub;
       })
   | TopType td ->
       let type_params = td.type_params in
@@ -443,6 +482,7 @@ let resolve_decl
         type_name = m_name td.type_name;
         type_params; variants;
         is_resource = td.is_resource;
+        is_pub = td.is_pub;
       })
   | TopRecord rd ->
       let type_params = rd.rec_type_params in
@@ -455,6 +495,7 @@ let resolve_decl
         rec_type_params = type_params;
         rec_fields;
         rec_is_resource = rd.rec_is_resource;
+        rec_is_pub = rd.rec_is_pub;
       })
   | TopFunc f ->
       let type_params = f.type_params in
@@ -469,6 +510,7 @@ let resolve_decl
       Some (TopFunc {
         name = m_name f.name;
         type_params; params; return_ty; body;
+        is_pub = f.is_pub;
       })
   | TopExtern e ->
       let params = List.map (fun (pn, pt) ->
@@ -477,6 +519,7 @@ let resolve_decl
       let return_ty = resolve_ty map [] e.ext_return_ty in
       Some (TopExtern {
         ext_name = e.ext_name;
+        ext_is_pub = e.ext_is_pub;
         ext_params = params;
         ext_return_ty = return_ty;
       })
@@ -628,6 +671,21 @@ let resolve (modules : (string * program) list) : program =
   in
   let summaries = List.map (fun (p, decls) -> summarize p decls) merged in
   fill_re_exports summaries merged;
+  (* Record the visibility of every mangled name, so qualified `mod::item`
+     references can be pub-checked in resolve_name. *)
+  Hashtbl.clear visibility;
+  List.iter (fun s ->
+    let mark bare mangled =
+      Hashtbl.replace visibility mangled (List.mem bare s.pub_names) in
+    List.iter (fun (b, m) -> mark b m) s.type_names;
+    List.iter (fun (b, m) -> mark b m) s.record_names;
+    List.iter (fun (b, m) -> mark b m) s.fn_names;
+    List.iter (fun (b, m) -> mark b m) s.ctor_names;
+    List.iter (fun (b, m) -> mark b m) s.alias_names;
+    List.iter (fun b -> mark b b) s.extern_names;
+    (* re-exports are public by construction *)
+    List.iter (fun (_, m) -> Hashtbl.replace visibility m true) s.re_exports
+  ) summaries;
   let resolved_per_module = List.map (fun (path, prog) ->
     let m_summary = List.find (fun s -> s.mod_path = path) summaries in
     let uses = List.filter_map (function

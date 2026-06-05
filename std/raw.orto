@@ -10,21 +10,21 @@
 
 // ---------- 16-bit ----------
 
-fn read_u16_le(p: *byte, off: int) -> int {
+pub fn read_u16_le(p: *byte, off: int) -> int {
     to_int(p[off]) + to_int(p[off + 1]) * 256
 }
 
-fn read_u16_be(p: *byte, off: int) -> int {
+pub fn read_u16_be(p: *byte, off: int) -> int {
     to_int(p[off]) * 256 + to_int(p[off + 1])
 }
 
-fn write_u16_le(p: *byte, off: int, v: int) -> int {
+pub fn write_u16_le(p: *byte, off: int, v: int) -> int {
     p[off]     := to_byte(v % 256);
     p[off + 1] := to_byte((v / 256) % 256);
     0
 }
 
-fn write_u16_be(p: *byte, off: int, v: int) -> int {
+pub fn write_u16_be(p: *byte, off: int, v: int) -> int {
     p[off]     := to_byte((v / 256) % 256);
     p[off + 1] := to_byte(v % 256);
     0
@@ -32,21 +32,21 @@ fn write_u16_be(p: *byte, off: int, v: int) -> int {
 
 // ---------- 32-bit ----------
 
-fn read_u32_le(p: *byte, off: int) -> int {
+pub fn read_u32_le(p: *byte, off: int) -> int {
     to_int(p[off])
     + to_int(p[off + 1]) * 256
     + to_int(p[off + 2]) * 65536
     + to_int(p[off + 3]) * 16777216
 }
 
-fn read_u32_be(p: *byte, off: int) -> int {
+pub fn read_u32_be(p: *byte, off: int) -> int {
     to_int(p[off]) * 16777216
     + to_int(p[off + 1]) * 65536
     + to_int(p[off + 2]) * 256
     + to_int(p[off + 3])
 }
 
-fn write_u32_le(p: *byte, off: int, v: int) -> int {
+pub fn write_u32_le(p: *byte, off: int, v: int) -> int {
     p[off]     := to_byte(v % 256);
     p[off + 1] := to_byte((v / 256) % 256);
     p[off + 2] := to_byte((v / 65536) % 256);
@@ -54,7 +54,7 @@ fn write_u32_le(p: *byte, off: int, v: int) -> int {
     0
 }
 
-fn write_u32_be(p: *byte, off: int, v: int) -> int {
+pub fn write_u32_be(p: *byte, off: int, v: int) -> int {
     p[off]     := to_byte((v / 16777216) % 256);
     p[off + 1] := to_byte((v / 65536) % 256);
     p[off + 2] := to_byte((v / 256) % 256);
@@ -69,7 +69,7 @@ fn write_u32_be(p: *byte, off: int, v: int) -> int {
 // we read/write into the `u64` type and use shifts/masks (unsigned wrap
 // is defined). u16/u32 stay `int` only because they fit losslessly.
 
-fn read_u64_le(p: *byte, off: int) -> u64 {
+pub fn read_u64_le(p: *byte, off: int) -> u64 {
     to_u64(to_int(p[off]))
     | (to_u64(to_int(p[off + 1])) << 8)
     | (to_u64(to_int(p[off + 2])) << 16)
@@ -80,7 +80,7 @@ fn read_u64_le(p: *byte, off: int) -> u64 {
     | (to_u64(to_int(p[off + 7])) << 56)
 }
 
-fn read_u64_be(p: *byte, off: int) -> u64 {
+pub fn read_u64_be(p: *byte, off: int) -> u64 {
     (to_u64(to_int(p[off])) << 56)
     | (to_u64(to_int(p[off + 1])) << 48)
     | (to_u64(to_int(p[off + 2])) << 40)
@@ -91,7 +91,7 @@ fn read_u64_be(p: *byte, off: int) -> u64 {
     | to_u64(to_int(p[off + 7]))
 }
 
-fn write_u64_le(p: *byte, off: int, v: u64) -> int {
+pub fn write_u64_le(p: *byte, off: int, v: u64) -> int {
     p[off]     := to_byte(to_int(v & 255));
     p[off + 1] := to_byte(to_int((v >> 8) & 255));
     p[off + 2] := to_byte(to_int((v >> 16) & 255));
@@ -103,7 +103,7 @@ fn write_u64_le(p: *byte, off: int, v: u64) -> int {
     0
 }
 
-fn write_u64_be(p: *byte, off: int, v: u64) -> int {
+pub fn write_u64_be(p: *byte, off: int, v: u64) -> int {
     p[off]     := to_byte(to_int((v >> 56) & 255));
     p[off + 1] := to_byte(to_int((v >> 48) & 255));
     p[off + 2] := to_byte(to_int((v >> 40) & 255));
@@ -118,18 +118,18 @@ fn write_u64_be(p: *byte, off: int, v: u64) -> int {
 // ---------- byte swap (reverse byte order of a value) ----------
 // 16/32 fit in int; 64 must use u64 (full range, unsigned wrap).
 
-fn bswap16(x: int) -> int {
+pub fn bswap16(x: int) -> int {
     (x % 256) * 256 + (x / 256) % 256
 }
 
-fn bswap32(x: int) -> int {
+pub fn bswap32(x: int) -> int {
     (x % 256) * 16777216
     + ((x / 256) % 256) * 65536
     + ((x / 65536) % 256) * 256
     + (x / 16777216) % 256
 }
 
-fn bswap64(x: u64) -> u64 {
+pub fn bswap64(x: u64) -> u64 {
     ((x & 255) << 56)
     | (((x >> 8) & 255) << 48)
     | (((x >> 16) & 255) << 40)

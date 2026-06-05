@@ -6,7 +6,7 @@
 
 use vec::{Vec, new, push, slice_of};
 
-fn format(r: Region, template: Handle[byte], parts: Handle[Handle[byte]]) -> Handle[byte] {
+pub fn format(r: Region, template: Handle[byte], parts: Handle[Handle[byte]]) -> Handle[byte] {
     let mut out = new(r, len(template) + 8, to_byte(0));
     let n = len(template);
     let mut i = 0;
@@ -55,7 +55,7 @@ fn format(r: Region, template: Handle[byte], parts: Handle[Handle[byte]]) -> Han
 // string never escapes this call, so the function provisions its own
 // scratch arena, fills it, writes, and frees it on return. The caller's
 // region is for values the caller keeps — not for throwaway output.
-fn line(template: Handle[byte], parts: Handle[Handle[byte]]) -> () {
+pub fn line(template: Handle[byte], parts: Handle[Handle[byte]]) -> () {
     let mut total = len(template);
     let mut i = 0;
     while i < len(parts) { total := total + len(parts[i]); i := i + 1; }

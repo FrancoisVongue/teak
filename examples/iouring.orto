@@ -19,33 +19,33 @@
 
 // ---------- C-side helpers (thin glue over liburing) ----------
 
-extern fn orto_ring_create(entries: int) -> *byte
-extern fn orto_ring_exit(handle: *byte) -> int
+pub extern fn orto_ring_create(entries: int) -> *byte
+pub extern fn orto_ring_exit(handle: *byte) -> int
 
-extern fn orto_ring_read(handle: *byte, fd: int,
+pub extern fn orto_ring_read(handle: *byte, fd: int,
                           buf: *byte, len_: int, offset: int) -> int
-extern fn orto_ring_write(handle: *byte, fd: int,
+pub extern fn orto_ring_write(handle: *byte, fd: int,
                            buf: *byte, len_: int, offset: int) -> int
-extern fn orto_ring_openat(handle: *byte, path: *byte,
+pub extern fn orto_ring_openat(handle: *byte, path: *byte,
                             flags: int, mode: int) -> int
-extern fn orto_ring_close(handle: *byte, fd: int) -> int
-extern fn orto_ring_fsync(handle: *byte, fd: int) -> int
+pub extern fn orto_ring_close(handle: *byte, fd: int) -> int
+pub extern fn orto_ring_fsync(handle: *byte, fd: int) -> int
 
-extern fn orto_ring_socket(handle: *byte,
+pub extern fn orto_ring_socket(handle: *byte,
                             domain: int, type_: int, protocol: int) -> int
-extern fn orto_ring_connect(handle: *byte, fd: int,
+pub extern fn orto_ring_connect(handle: *byte, fd: int,
                              addr: *byte, addrlen: int) -> int
-extern fn orto_ring_accept(handle: *byte, fd: int) -> int
-extern fn orto_ring_send(handle: *byte, fd: int,
+pub extern fn orto_ring_accept(handle: *byte, fd: int) -> int
+pub extern fn orto_ring_send(handle: *byte, fd: int,
                           buf: *byte, len_: int, flags: int) -> int
-extern fn orto_ring_recv(handle: *byte, fd: int,
+pub extern fn orto_ring_recv(handle: *byte, fd: int,
                           buf: *byte, len_: int, flags: int) -> int
 
 // ---------- resource ring handle ----------
 
-resource struct Ring { handle: *byte }
+pub resource struct Ring { handle: *byte }
 
-fn ring_close(r: Ring) -> int {
+pub fn ring_close(r: Ring) -> int {
     orto_ring_exit(r.handle);
     0
 }
@@ -53,11 +53,11 @@ fn ring_close(r: Ring) -> int {
 // Create a ring with capacity for `entries` in-flight ops. Returned
 // Ring drops automatically (releases kernel resources). If creation
 // fails the inner handle is NULL — the drop is still safe (no-op).
-fn ring_new(entries: int) -> Ring {
+pub fn ring_new(entries: int) -> Ring {
     Ring { handle: orto_ring_create(entries) }
 }
 
-fn ring_failed(r: &Ring) -> bool { is_null(r.handle) }
+pub fn ring_failed(r: &Ring) -> bool { is_null(r.handle) }
 
 // ---------- I/O operations ----------
 //
@@ -70,69 +70,69 @@ fn ring_failed(r: &Ring) -> bool { is_null(r.handle) }
 // the resource close-at-scope behaviour: wrap with `fd_wrap(raw)`
 // after `uring_open`.
 
-fn uring_read(r: &Ring, fd: int, buf: Handle[byte], offset: int) -> int {
+pub fn uring_read(r: &Ring, fd: int, buf: Handle[byte], offset: int) -> int {
     orto_ring_read(r.handle, fd, as_ptr(buf), len(buf), offset)
 }
 
-fn uring_write(r: &Ring, fd: int, buf: Handle[byte], offset: int) -> int {
+pub fn uring_write(r: &Ring, fd: int, buf: Handle[byte], offset: int) -> int {
     orto_ring_write(r.handle, fd, as_ptr(buf), len(buf), offset)
 }
 
-fn uring_open(r: &Ring, path: Handle[byte], flags: int, mode: int) -> int {
+pub fn uring_open(r: &Ring, path: Handle[byte], flags: int, mode: int) -> int {
     orto_ring_openat(r.handle, as_ptr(path), flags, mode)
 }
 
-fn uring_close(r: &Ring, fd: int) -> int {
+pub fn uring_close(r: &Ring, fd: int) -> int {
     orto_ring_close(r.handle, fd)
 }
 
-fn uring_fsync(r: &Ring, fd: int) -> int {
+pub fn uring_fsync(r: &Ring, fd: int) -> int {
     orto_ring_fsync(r.handle, fd)
 }
 
 // ---------- socket operations ----------
 
-fn uring_socket(r: &Ring, domain: int, type_: int, protocol: int) -> int {
+pub fn uring_socket(r: &Ring, domain: int, type_: int, protocol: int) -> int {
     orto_ring_socket(r.handle, domain, type_, protocol)
 }
 
-fn uring_connect(r: &Ring, fd: int, addr: Handle[byte]) -> int {
+pub fn uring_connect(r: &Ring, fd: int, addr: Handle[byte]) -> int {
     orto_ring_connect(r.handle, fd, as_ptr(addr), len(addr))
 }
 
-fn uring_accept(r: &Ring, fd: int) -> int {
+pub fn uring_accept(r: &Ring, fd: int) -> int {
     orto_ring_accept(r.handle, fd)
 }
 
-fn uring_send(r: &Ring, fd: int, buf: Handle[byte], flags: int) -> int {
+pub fn uring_send(r: &Ring, fd: int, buf: Handle[byte], flags: int) -> int {
     orto_ring_send(r.handle, fd, as_ptr(buf), len(buf), flags)
 }
 
-fn uring_recv(r: &Ring, fd: int, buf: Handle[byte], flags: int) -> int {
+pub fn uring_recv(r: &Ring, fd: int, buf: Handle[byte], flags: int) -> int {
     orto_ring_recv(r.handle, fd, as_ptr(buf), len(buf), flags)
 }
 
 // ---------- Stage 2: queue many ops, drain completions manually ----------
 
-extern fn orto_ring_submit_read(handle: *byte, fd: int,
+pub extern fn orto_ring_submit_read(handle: *byte, fd: int,
                                  buf: *byte, len_: int, offset: int,
                                  user_data: int) -> int
-extern fn orto_ring_submit_write(handle: *byte, fd: int,
+pub extern fn orto_ring_submit_write(handle: *byte, fd: int,
                                   buf: *byte, len_: int, offset: int,
                                   user_data: int) -> int
-extern fn orto_ring_submit_send(handle: *byte, fd: int,
+pub extern fn orto_ring_submit_send(handle: *byte, fd: int,
                                  buf: *byte, len_: int, flags: int,
                                  user_data: int) -> int
-extern fn orto_ring_submit_recv(handle: *byte, fd: int,
+pub extern fn orto_ring_submit_recv(handle: *byte, fd: int,
                                  buf: *byte, len_: int, flags: int,
                                  user_data: int) -> int
-extern fn orto_ring_flush(handle: *byte) -> int
-extern fn orto_ring_wait_one(handle: *byte, out_id: *int) -> int
-extern fn orto_ring_peek_one(handle: *byte, out_id: *int, out_res: *int) -> int
+pub extern fn orto_ring_flush(handle: *byte) -> int
+pub extern fn orto_ring_wait_one(handle: *byte, out_id: *int) -> int
+pub extern fn orto_ring_peek_one(handle: *byte, out_id: *int, out_res: *int) -> int
 
 // One I/O completion. `id` is whatever tag the caller assigned to
 // the corresponding submit_*; `res` is io_uring's result code.
-struct Completion {
+pub struct Completion {
     id:  int,
     res: int,
 }
@@ -140,31 +140,31 @@ struct Completion {
 // Queue a read. `user_data` is your tag — pick any int; you'll see
 // it back in `wait_one().id`. Returns 0 on success, -errno if the
 // submission queue is full.
-fn submit_read(r: &Ring, fd: int, buf: Handle[byte], offset: int, id: int) -> int {
+pub fn submit_read(r: &Ring, fd: int, buf: Handle[byte], offset: int, id: int) -> int {
     orto_ring_submit_read(r.handle, fd, as_ptr(buf), len(buf), offset, id)
 }
 
-fn submit_write(r: &Ring, fd: int, buf: Handle[byte], offset: int, id: int) -> int {
+pub fn submit_write(r: &Ring, fd: int, buf: Handle[byte], offset: int, id: int) -> int {
     orto_ring_submit_write(r.handle, fd, as_ptr(buf), len(buf), offset, id)
 }
 
-fn submit_send(r: &Ring, fd: int, buf: Handle[byte], flags: int, id: int) -> int {
+pub fn submit_send(r: &Ring, fd: int, buf: Handle[byte], flags: int, id: int) -> int {
     orto_ring_submit_send(r.handle, fd, as_ptr(buf), len(buf), flags, id)
 }
 
-fn submit_recv(r: &Ring, fd: int, buf: Handle[byte], flags: int, id: int) -> int {
+pub fn submit_recv(r: &Ring, fd: int, buf: Handle[byte], flags: int, id: int) -> int {
     orto_ring_submit_recv(r.handle, fd, as_ptr(buf), len(buf), flags, id)
 }
 
 // Hand the kernel everything we've queued. One syscall regardless of
 // how many ops we batched. Returns number of SQEs accepted, -errno
 // on failure.
-fn flush(r: &Ring) -> int {
+pub fn flush(r: &Ring) -> int {
     orto_ring_flush(r.handle)
 }
 
 // Block until one CQE is available. Returns (id, res) as Completion.
-fn wait_one(r: &Ring) -> Completion {
+pub fn wait_one(r: &Ring) -> Completion {
     let id_buf = c_alloc[int](1);
     let res = orto_ring_wait_one(r.handle, id_buf);
     let id = id_buf[0];
@@ -174,7 +174,7 @@ fn wait_one(r: &Ring) -> Completion {
 
 // Try to pick a completion without blocking. Returns None if none
 // ready, Some(Completion) if one was consumed.
-fn try_wait_one(r: &Ring) -> Option[Completion] {
+pub fn try_wait_one(r: &Ring) -> Option[Completion] {
     let id_buf  = c_alloc[int](1);
     let res_buf = c_alloc[int](1);
     let rc = orto_ring_peek_one(r.handle, id_buf, res_buf);

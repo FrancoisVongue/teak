@@ -11,9 +11,9 @@
 use vec::{Vec};
 
 // slot state: 0 = empty, 1 = used, 2 = tombstone
-struct Entry[K, V] { state: int, key: K, val: V }
+pub struct Entry[K, V] { state: int, key: K, val: V }
 
-struct Map[K, V] {
+pub struct Map[K, V] {
     slots : Handle[Entry[K, V]],
     cap   : int,           // always a power of two
     count : int,           // live entries
@@ -23,7 +23,7 @@ struct Map[K, V] {
     ze    : Entry[K, V]
 }
 
-fn pow2_at_least(n: int) -> int {
+pub fn pow2_at_least(n: int) -> int {
     let mut p = 4;
     while p < n { p := p << 1; }
     p
@@ -31,9 +31,9 @@ fn pow2_at_least(n: int) -> int {
 
 // Slot index from a hash. cap is a power of two, so the low bits are a
 // uniform index even when h is negative (two's-complement low bits).
-fn slot(h: int, cap: int) -> int { h & (cap - 1) }
+pub fn slot(h: int, cap: int) -> int { h & (cap - 1) }
 
-fn new[K, V](r: Region, cap: int, zk: K, zv: V,
+pub fn new[K, V](r: Region, cap: int, zk: K, zv: V,
              hash: fn(K) -> int, eq: fn(K, K) -> bool) -> Map[K, V] {
     let c = pow2_at_least(cap);
     let ze = Entry { state: 0, key: zk, val: zv };
@@ -42,7 +42,7 @@ fn new[K, V](r: Region, cap: int, zk: K, zv: V,
 }
 
 // Index of the used slot holding k, or -1 if absent.
-fn find_slot[K, V](m: Map[K, V], k: K) -> int {
+pub fn find_slot[K, V](m: Map[K, V], k: K) -> int {
     let mut i = slot((m.hash)(k), m.cap);
     let mut steps = 0;
     let mut res = 0 - 1;
@@ -58,7 +58,7 @@ fn find_slot[K, V](m: Map[K, V], k: K) -> int {
     res
 }
 
-fn grow[K, V](m: Map[K, V], r: Region) -> Map[K, V] {
+pub fn grow[K, V](m: Map[K, V], r: Region) -> Map[K, V] {
     let mut nm = new(r, m.cap * 2, m.ze.key, m.ze.val, m.hash, m.eq);
     let mut i = 0;
     while i < m.cap {
@@ -69,7 +69,7 @@ fn grow[K, V](m: Map[K, V], r: Region) -> Map[K, V] {
     nm
 }
 
-fn insert[K, V](m0: Map[K, V], r: Region, k: K, v: V) -> Map[K, V] {
+pub fn insert[K, V](m0: Map[K, V], r: Region, k: K, v: V) -> Map[K, V] {
     let m = if (m0.occ + 1) * 4 >= m0.cap * 3 { grow(m0, r) } else { m0 };
     let mut i = slot((m.hash)(k), m.cap);
     let mut first_tomb = 0 - 1;
@@ -101,18 +101,18 @@ fn insert[K, V](m0: Map[K, V], r: Region, k: K, v: V) -> Map[K, V] {
     Map { ..m, count: newcount, occ: newocc }
 }
 
-fn get[K, V](m: Map[K, V], k: K) -> Option[V] {
+pub fn get[K, V](m: Map[K, V], k: K) -> Option[V] {
     let i = find_slot(m, k);
     if i < 0 { None } else { Some(m.slots[i].val) }
 }
 
-fn get_or[K, V](m: Map[K, V], k: K, fallback: V) -> V {
+pub fn get_or[K, V](m: Map[K, V], k: K, fallback: V) -> V {
     match get(m, k) { Some(v) => v, None => fallback }
 }
 
-fn contains[K, V](m: Map[K, V], k: K) -> bool { find_slot(m, k) >= 0 }
+pub fn contains[K, V](m: Map[K, V], k: K) -> bool { find_slot(m, k) >= 0 }
 
-fn remove[K, V](m: Map[K, V], k: K) -> Map[K, V] {
+pub fn remove[K, V](m: Map[K, V], k: K) -> Map[K, V] {
     let i = find_slot(m, k);
     if i < 0 {
         m
@@ -122,16 +122,16 @@ fn remove[K, V](m: Map[K, V], k: K) -> Map[K, V] {
     }
 }
 
-fn size[K, V](m: Map[K, V]) -> int { m.count }
-fn is_empty[K, V](m: Map[K, V]) -> bool { m.count == 0 }
+pub fn size[K, V](m: Map[K, V]) -> int { m.count }
+pub fn is_empty[K, V](m: Map[K, V]) -> bool { m.count == 0 }
 
-fn clear[K, V](m: Map[K, V]) -> Map[K, V] {
+pub fn clear[K, V](m: Map[K, V]) -> Map[K, V] {
     let mut i = 0;
     while i < m.cap { m.slots[i] := m.ze; i := i + 1; }
     Map { ..m, count: 0, occ: 0 }
 }
 
-fn each[K, V](m: Map[K, V], f: fn(K, V) -> ()) -> () {
+pub fn each[K, V](m: Map[K, V], f: fn(K, V) -> ()) -> () {
     let mut i = 0;
     while i < m.cap {
         let e = m.slots[i];
@@ -140,7 +140,7 @@ fn each[K, V](m: Map[K, V], f: fn(K, V) -> ()) -> () {
     }
 }
 
-fn fold[A, K, V](m: Map[K, V], init: A, step: fn(A, K, V) -> A) -> A {
+pub fn fold[A, K, V](m: Map[K, V], init: A, step: fn(A, K, V) -> A) -> A {
     let mut acc = init;
     let mut i = 0;
     while i < m.cap {
@@ -151,7 +151,7 @@ fn fold[A, K, V](m: Map[K, V], init: A, step: fn(A, K, V) -> A) -> A {
     acc
 }
 
-fn keys[K, V](m: Map[K, V], r: Region, zk: K) -> Vec[K] {
+pub fn keys[K, V](m: Map[K, V], r: Region, zk: K) -> Vec[K] {
     let mut out = vec::new(r, m.count + 1, zk);
     let mut i = 0;
     while i < m.cap {
@@ -162,7 +162,7 @@ fn keys[K, V](m: Map[K, V], r: Region, zk: K) -> Vec[K] {
     out
 }
 
-fn values[K, V](m: Map[K, V], r: Region, zv: V) -> Vec[V] {
+pub fn values[K, V](m: Map[K, V], r: Region, zv: V) -> Vec[V] {
     let mut out = vec::new(r, m.count + 1, zv);
     let mut i = 0;
     while i < m.cap {
