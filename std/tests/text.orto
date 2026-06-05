@@ -47,8 +47,30 @@ fn check_fmt(r: Region) -> int {
     s                                                           // 2
 }
 
+fn check_classify() -> int {
+    let mut s = 0;
+    if str::is_digit("5"[0]) && !str::is_digit("A"[0]) { s := s + 1; }
+    if str::is_alpha("A"[0]) && !str::is_alpha("5"[0]) { s := s + 1; }
+    if str::is_lower("a"[0]) && str::is_upper("A"[0]) { s := s + 1; }
+    if str::is_alnum("z"[0]) && str::is_alnum("9"[0]) && !str::is_alnum(" "[0]) { s := s + 1; }
+    if str::is_ws(" "[0]) && !str::is_ws("x"[0]) { s := s + 1; }
+    s                                                           // 5
+}
+
+fn check_lex() -> int {
+    let mut s = 0;
+    // char literals (a single byte) + escapes
+    if 'a' == to_byte(97) && 'Z' == to_byte(90) { s := s + 1; }
+    if to_int('\n') == 10 && to_int('\t') == 9 && to_int('\x41') == 65 { s := s + 1; }
+    // string escapes: \xNN raw byte, \u{...} -> UTF-8 bytes
+    if str::eq("\x41\x42", "AB") { s := s + 1; }
+    if len("\u{e9}") == 2 && len("\u{1F600}") == 4 { s := s + 1; }   // é=2B, 😀=4B
+    if to_int("\u{e9}"[0]) == 195 && to_int("\u{e9}"[1]) == 169 { s := s + 1; }   // C3 A9
+    s                                                           // 5
+}
+
 fn main() -> int {
     arena r = region(65536);
-    check_str(r) + check_split_join(r) + check_fmt(r)
-    // 19 + 2 + 2 = 23
+    check_str(r) + check_split_join(r) + check_fmt(r) + check_classify() + check_lex()
+    // 19 + 2 + 2 + 5 + 5 = 33
 }

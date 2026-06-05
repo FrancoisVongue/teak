@@ -7,6 +7,7 @@ type token =
   | TIdent of string
   | TCtorIdent of string
   | TStringLit of string   (* "..." — byte string literal *)
+  | TCharLit of int        (* 'a' — a single byte (0..255) *)
   (* keywords *)
   | TFn
   | TLet
@@ -113,6 +114,7 @@ let show = function
   | TIdent s      -> Printf.sprintf "IDENT(%s)" s
   | TCtorIdent s  -> Printf.sprintf "CTOR(%s)" s
   | TStringLit s  -> Printf.sprintf "STR(%S)" s
+  | TCharLit n    -> Printf.sprintf "CHAR(%d)" n
   | TFn           -> "FN"
   | TLet          -> "LET"
   | TMut          -> "MUT"

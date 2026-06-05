@@ -133,17 +133,27 @@ fn count(s: Handle[byte], needle: Handle[byte]) -> int {
 
 fn sub(s: Handle[byte], lo: int, hi: int) -> Handle[byte] { slice(s, lo, hi) }
 
-fn is_ws(c: int) -> bool { c == 32 || c == 9 || c == 10 || c == 13 }
+// ---------- character classification (ASCII; one byte = one char) ----------
+// These take a `byte` directly, so `is_digit(s[i])` reads cleanly. Strings are
+// raw bytes here; for non-ASCII text decode codepoints first (a future
+// std/utf8.orto), then classify.
+
+fn is_ws(b: byte) -> bool { let n = to_int(b); n == 32 || n == 9 || n == 10 || n == 13 }
+fn is_digit(b: byte) -> bool { let n = to_int(b); n >= 48 && n <= 57 }
+fn is_lower(b: byte) -> bool { let n = to_int(b); n >= 97 && n <= 122 }
+fn is_upper(b: byte) -> bool { let n = to_int(b); n >= 65 && n <= 90 }
+fn is_alpha(b: byte) -> bool { is_lower(b) || is_upper(b) }
+fn is_alnum(b: byte) -> bool { is_alpha(b) || is_digit(b) }
 
 fn trim_left(s: Handle[byte]) -> Handle[byte] {
     let mut i = 0;
-    while i < len(s) && is_ws(to_int(s[i])) { i := i + 1; }
+    while i < len(s) && is_ws(s[i]) { i := i + 1; }
     slice(s, i, len(s))
 }
 
 fn trim_right(s: Handle[byte]) -> Handle[byte] {
     let mut j = len(s);
-    while j > 0 && is_ws(to_int(s[j - 1])) { j := j - 1; }
+    while j > 0 && is_ws(s[j - 1]) { j := j - 1; }
     slice(s, 0, j)
 }
 

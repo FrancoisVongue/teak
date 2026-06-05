@@ -431,7 +431,7 @@ and parse_atom st =
   match peek st with
   | TInt _ | TFloat _ | TTrue | TFalse | TLParen | TLBrace
   | TIdent _ | TCtorIdent _
-  | TStringLit _
+  | TStringLit _ | TCharLit _
   | TFn | TClosure | TRef
   | TIf | TMatch | TWhile | TBreak | TContinue | TFor | TReturn
   | TLen | TSlice
@@ -455,6 +455,8 @@ and parse_atom_consume st =
   | TTrue       -> EBool true
   | TFalse      -> EBool false
   | TStringLit s -> EStringLit s
+  (* 'a' is a byte literal — desugar to to_byte(<code>); no new AST node. *)
+  | TCharLit n  -> EToByte (EInt (Int64.of_int n))
   | TLParen     ->
       (* Three shapes:
            ()            — disallowed (no zero-tuple syntax for now)
