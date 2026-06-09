@@ -75,7 +75,7 @@ let rec free_vars (e : expr) : SS.t =
   | EToInt e | EToByte e | EToFloat e ->
       free_vars e
   | ECAlloc (_, n) -> free_vars n
-  | ECFree p | EIsNull p | EHandleData p | EDeref p | EBorrow p -> free_vars p
+  | ECFree p | EIsNull p | EHandleData p | EDeref p | EBorrow p | EUnsafe p -> free_vars p
   | EPtrCast (_, e) -> free_vars e
   | ENullPtr _ -> SS.empty
   | ETryAt (a, i) -> SS.union (free_vars a) (free_vars i)
@@ -181,6 +181,7 @@ let lift (prog : program) : program =
     | EReset e -> EReset (xform e)
     | EDeref p -> EDeref (xform p)
     | EBorrow p -> EBorrow (xform p)
+    | EUnsafe e -> EUnsafe (xform e)
     | EAwait e -> EAwait (xform e)
     | EAwaitAll branches -> EAwaitAll (List.map xform branches)
     | EAwaitAllDyn e -> EAwaitAllDyn (xform e)

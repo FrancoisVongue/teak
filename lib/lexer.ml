@@ -68,6 +68,7 @@ let lower_ident_or_keyword s =
   | "struct" -> TStruct
   | "enum"  -> TEnum
   | "resource" -> TResource
+  | "unsafe" -> TUnsafe
   (* `drop` is NOT a language concept — a consumer is just a named by-value
      function the type's author writes. "drop" lexes as an ordinary ident. *)
   | "match" -> TMatch

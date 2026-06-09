@@ -449,6 +449,7 @@ and parse_atom st =
   | TLen | TSlice
   | TToInt | TToByte | TToFloat
   | TCAlloc | TCFree | TNullPtr | TIsNull | TAsPtr | TPtrCast | TTryAt | TDrop | TReset
+  | TUnsafe
   | TRegion | TStackRegion | TAlignedRegion
   | TPrint | TPrintln -> parse_atom_consume st
   | t -> raise (Parse_error
@@ -460,6 +461,11 @@ and parse_atom_consume st =
       (* Bare `{ ... }` as an expression — a block. Useful in match
          arm bodies where you want let-bindings before the result. *)
       parse_block st
+  | TUnsafe ->
+      (* unsafe { ... } — a block where resource-safety on raw memory is
+         relaxed (the F10 unsafe core). Compile-time only; no runtime effect. *)
+      advance st;
+      EUnsafe (parse_block st)
   | _ ->
   match eat st with
   | TInt n      -> EInt n

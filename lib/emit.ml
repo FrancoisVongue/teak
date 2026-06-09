@@ -18,6 +18,13 @@
 
 open Ast
 
+(* User-defined function names (mono'd). Atom 4 made a resource type's
+   `drop_<Type>` OPTIONAL, so a cascade must skip a component whose drop fn
+   doesn't exist (the author consumes it manually). Populated at emit start. *)
+let emit_user_fns : (string, unit) Hashtbl.t = Hashtbl.create 64
+let drop_fn_defined (n : string) : bool =
+  Hashtbl.mem emit_user_fns (Check.drop_fn_name_for n)
+
 type c_code = {
   stmts : string list;
   value : string;
@@ -535,6 +542,7 @@ let collect_program (prog : Check.T.program) : unit =
     if e.is_async then register_async_extern e.name;
     if e.is_stream then register_stream_extern e.name) prog.externs;
   List.iter (fun (f : Check.T.func) ->
+    Hashtbl.replace emit_user_fns f.name ();   (* Atom 4: which drops exist *)
     List.iter (fun (_, t) -> collect_ty t) f.params;
     collect_ty f.return_ty;
     collect_expr f.body;
@@ -699,7 +707,9 @@ let emit_tuple_drop_defs () : string list =
                        | TyTuple _ ->
                            Printf.sprintf "drop_%s(t.f%d);" (Mono.mangle_ty ty) i
                        | TyApp (n, _) ->
-                           Printf.sprintf "%s(t.f%d);" (Check.drop_fn_name_for n) i
+                           if drop_fn_defined n then
+                             Printf.sprintf "%s(t.f%d);" (Check.drop_fn_name_for n) i
+                           else ""   (* no drop fn (Atom 4) — consumed manually *)
                        | _ -> ""
                      in fn_call))
           else None) ts
@@ -773,8 +783,9 @@ let drop_call_stmt (var_name : string) (t : ty) : string =
       let fn = "drop_Stream_" ^ Mono.mangle_ty inner in
       Printf.sprintf "%s(%s);" fn var_name
   | TyApp (n, _) ->
-      let fn = Check.drop_fn_name_for n in
-      Printf.sprintf "%s(%s);" fn var_name
+      if drop_fn_defined n then
+        Printf.sprintf "%s(%s);" (Check.drop_fn_name_for n) var_name
+      else ""   (* no drop fn (Atom 4) — component consumed manually *)
   | TyTuple _ ->
       let fn = "drop_" ^ Mono.mangle_ty t in
       Printf.sprintf "%s(%s);" fn var_name

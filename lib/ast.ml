@@ -132,6 +132,9 @@ type expr =
   | EBorrow of expr                       (* &x — borrow a place. Erased by the
                                              checker into the place's typed node
                                              retyped to TyBorrow; no typed node. *)
+  | EUnsafe of expr                       (* unsafe { body } — relaxes resource-
+                                             safety gates on raw memory inside.
+                                             Compile-time only; erased after check. *)
   (* Stage 3 — completion-based concurrency. See STAGE3_ASYNC.md. *)
   | EAwait    of expr                     (* await op — suspend until op completes *)
   | EAwaitAll of expr list                (* await all { e1, e2, ... } — static concurrent block *)
@@ -415,6 +418,7 @@ let rec show_expr = function
   | EDrop e -> Printf.sprintf "drop(%s)" (show_expr e)
   | EDeref p -> Printf.sprintf "*%s" (show_expr p)
   | EBorrow p -> Printf.sprintf "&%s" (show_expr p)
+  | EUnsafe e -> Printf.sprintf "unsafe { %s }" (show_expr e)
   | EAwait e -> Printf.sprintf "await %s" (show_expr e)
   | EAwaitAll branches ->
       Printf.sprintf "await all { %s }"

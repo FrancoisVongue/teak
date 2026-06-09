@@ -1,0 +1,22 @@
+// A resource map. The function names are PLAIN — `new`, `set`, `take`, `free` —
+// the `rmap` namespace is the qualifier (`use rmap::{...}`), exactly like
+// `vec::push` / `map::get`. No `r`-prefix hack on the names.
+
+use rmap::{new, set, take, free};
+
+extern fn putchar(c: int) -> int
+resource struct Socket { fd: int }
+fn mk(n: int) -> Socket { Socket { fd: n } }
+fn close(s: Socket) -> int { putchar(48 + s.fd); putchar(10); 0 }
+fn ihash(k: int) -> int { k }
+fn ieq(a: int, b: int) -> bool { a == b }
+
+fn main() -> int {
+    arena r = region(4096);
+    let m0 = new(r, 8, 0, ihash, ieq);   // rmap::new -> RMap[int, Socket]
+    let m1 = set(m0, 1, mk(7));
+    let m2 = set(m1, 2, mk(9));
+    let (m3, s)  = take(m2, 1);  close(s);    // '7'
+    let (m4, s2) = take(m3, 2);  close(s2);   // '9'
+    free(m4)
+}

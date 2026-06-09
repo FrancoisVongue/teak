@@ -1,0 +1,24 @@
+// How a map looks in orto. A map is NOT a language built-in — it's a stdlib
+// container, like Vec, because we have generics. Behaviour (hashing + equality)
+// is INJECTED as values (here ihash/ieq), the explicit form of a type-class
+// dictionary, chosen per map (CLAUDE.md §6). The key is always non-resource (it
+// gets hashed and compared); the value is carried.
+
+use map::{new, insert, get, size};
+
+fn ihash(k: int) -> int { k * 2654435761 }   // Knuth multiplicative hash
+fn ieq(a: int, b: int) -> bool { a == b }
+
+fn main() -> int {
+    arena r = region(4096);
+    // "" not needed: int keys. zk=0, zv=0 fill empty slots; hash/eq injected.
+    let m0 = new(r, 8, 0, 0, ihash, ieq);   // Map[int, int]
+    let m1 = insert(m0, r, 1, 100);
+    let m2 = insert(m1, r, 2, 200);
+    let m3 = insert(m2, r, 1, 111);          // overwrite key 1
+
+    let a = match get(m3, 1) { Some(v) => v, None => 0 - 1 };  // 111
+    let b = match get(m3, 2) { Some(v) => v, None => 0 - 1 };  // 200
+    let c = match get(m3, 9) { Some(v) => v, None => 0 - 1 };  // absent -> -1
+    a + b + c + size(m3)        // 111 + 200 + (-1) + 2 = 312  (exit 312 & 0xff = 56)
+}

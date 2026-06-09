@@ -37,6 +37,7 @@ type token =
   | TEnum
   | TResource      (* resource — a struct that can't be copied or silently
                       dropped; must be moved or consumed by a by-value method *)
+  | TUnsafe        (* unsafe { ... } — relax resource-safety on raw memory *)
   | TDrop          (* drop(x) — consume and run the type's destructor *)
   | TUse           (* use mod::item; — selective import *)
   | TConst         (* const NAME: T = expr; — named compile-time value *)
@@ -142,6 +143,7 @@ let show = function
   | TStruct       -> "STRUCT"
   | TEnum         -> "ENUM"
   | TResource     -> "RESOURCE"
+  | TUnsafe       -> "UNSAFE"
   | TDrop         -> "DROP"
   | TUse          -> "USE"
   | TConst        -> "CONST"

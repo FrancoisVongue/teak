@@ -298,6 +298,13 @@ let current_return_ty : ty option ref = ref None
    a KIND ("T may be a resource"), not a type-class — T is never inspected. *)
 let current_resource_tparams : string list ref = ref []
 
+(* True while checking the body of an `unsafe { ... }` block. Inside, the
+   resource-safety gates on RAW memory are relaxed: c_alloc of a resource type,
+   and reading / overwriting a resource slot of a Handle. The author takes
+   responsibility for ownership there (this is the F10 "unsafe core under a safe
+   interface"). The block has NO runtime effect — it is erased after checking. *)
+let current_unsafe = ref false
+
 (* Set of type names that are resource: Region (always) plus every
    user-declared `resource struct/enum`. Populated by build_env. *)
 let resource_type_names : (string, unit) Hashtbl.t = Hashtbl.create 8
@@ -2033,7 +2040,7 @@ let rec infer (env : env) (tparams : string list)
       (* Reading from an Handle[resource] would copy a resource value out
          of its slot, leaving two owners. Forbid it — the elements
          can only be consumed when the whole Handle is dropped. *)
-      if is_resource_ty (zonk elem) then
+      if (not !current_unsafe) && is_resource_ty (zonk elem) then
         raise (Type_error
           (Printf.sprintf
              "cannot read element of Handle[%s] — that would copy a \
@@ -2074,7 +2081,7 @@ let rec infer (env : env) (tparams : string list)
       (* Writing to a slot of Handle[resource] would either drop the old
          element or leak it. Both need machinery we don't have yet —
          forbid until phase 5/6 if ever. *)
-      if is_resource_ty (zonk elem) then
+      if (not !current_unsafe) && is_resource_ty (zonk elem) then
         raise (Type_error
           (Printf.sprintf
              "cannot assign element of Handle[%s] — overwriting would \
@@ -2183,7 +2190,7 @@ let rec infer (env : env) (tparams : string list)
 
   | ECAlloc (elem_t, n_e) ->
       let elem_t = validate_ty_for_ascription env tparams elem_t in
-      if ty_contains_resource elem_t then
+      if (not !current_unsafe) && ty_contains_resource elem_t then
         raise (Type_error
           (Printf.sprintf
              "c_alloc[T](_) : T cannot contain a resource type (%s)"
@@ -2288,6 +2295,16 @@ let rec infer (env : env) (tparams : string list)
                 "`&` can only borrow a place — a variable or a field/tuple component"));
            let bty = TyBorrow inner in
            (T.TEBorrow (tp, bty), bty))
+
+  | EUnsafe body ->
+      (* Check the body with resource-safety on raw memory relaxed. The block
+         is erased — it has no runtime effect, so we return the inner typed
+         expression directly (mono/emit never see an unsafe node). *)
+      let saved = !current_unsafe in
+      current_unsafe := true;
+      let result = infer env tparams vars body in
+      current_unsafe := saved;
+      result
 
   | ETryAt (a_e, i_e) ->
       let (ta, ta_ty) = infer env tparams vars a_e in
@@ -2881,7 +2898,11 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       (T.TEIf (cond', t', el', ty), result_live)
 
   | T.TELet (x, vt, v, b, bt, ad) ->
-      let (v', live) = check_moves_expr env live false v in
+      (* Binding a resource MOVES the RHS value into the new name, so check the
+         RHS in move (tail) position: a resource that is the tail of a block or
+         a nested let on the RHS is then correctly moved out into the binding. *)
+      let value_tail = (x <> "_") && is_resource_ty vt in
+      let (v', live) = check_moves_expr env live value_tail v in
       if x = "_" then
         let (b', live) = check_moves_expr env live in_tail b in
         (T.TELet ("_", vt, v', b', bt, ad), live)

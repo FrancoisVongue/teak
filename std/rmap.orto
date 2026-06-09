@@ -1,0 +1,77 @@
+// std/rmap.orto — a RESOURCE map. The KEY is plain data (hashed + compared, so
+// it can never be a resource); the VALUE is a resource (`[resource V]`). Because
+// the map owns resources, the map is ITSELF a resource (induced linearity) — it
+// must be consumed (drained + freed), never silently dropped.
+//
+// The values live in raw memory — the F10 "unsafe core under a safe interface":
+// only the three lines that touch raw value slots are `unsafe { ... }`; the whole
+// public surface is safe and move-checked. Open addressing, linear probing,
+// fixed capacity (no grow — keep it simple).
+//
+// Behaviour is injected as values (hash, eq), the explicit form of a type-class
+// dictionary, chosen per map. Key is copied; value is moved.
+
+resource struct RMap[K, resource V] {
+    keys: Handle[K],          // copyable keys
+    vals: *V,                 // raw array of resource values (F10 core)
+    used: Handle[int],        // 0 = empty, 1 = used
+    cap:  int,
+    hash: fn(K) -> int,
+    eq:   fn(K, K) -> bool
+}
+
+fn idx(h: int, cap: int) -> int { let i = h % cap; if i < 0 { i + cap } else { i } }
+
+pub fn new[K, resource V](r: Region, cap: int, zk: K,
+                           hash: fn(K) -> int, eq: fn(K, K) -> bool) -> RMap[K, V] {
+    RMap {
+        keys: ref(r, cap, zk),
+        vals: unsafe { c_alloc[V](cap) },   // raw value storage
+        used: ref(r, cap, 0),
+        cap: cap, hash: hash, eq: eq
+    }
+}
+
+// Find the slot for k: the used slot holding it, else the first empty slot,
+// else -1 (full). Read-only -> borrows the map.
+pub fn slot[K, resource V](m: &RMap[K, V], k: K) -> int {
+    let mut i = idx((m.hash)(k), m.cap);
+    let mut steps = 0;
+    let mut res = 0 - 1;
+    while res < 0 && steps < m.cap {
+        if m.used[i] == 0 { res := i; }
+        else { if (m.eq)(m.keys[i], k) { res := i; } else { i := idx(i + 1, m.cap); steps := steps + 1; } }
+    }
+    res
+}
+
+pub fn has[K, resource V](m: &RMap[K, V], k: K) -> bool {
+    let s = slot(m, k);
+    if s < 0 { false } else { m.used[s] == 1 }
+}
+
+// Move a value IN. Overwrites are not allowed here (would leak the old value) —
+// the key must be absent. Returns the map threaded through (move).
+pub fn set[K, resource V](m: RMap[K, V], k: K, v: V) -> RMap[K, V] {
+    let s = slot(&m, k);
+    m.keys[s] := k;
+    m.used[s] := 1;
+    unsafe { m.vals[s] := v };   // move the resource into the raw slot
+    m
+}
+
+// Move a value OUT (the key must be present — check with has first). Returns
+// the map and the value, both moved.
+pub fn take[K, resource V](m: RMap[K, V], k: K) -> (RMap[K, V], V) {
+    let s = slot(&m, k);
+    m.used[s] := 0;
+    let v = unsafe { m.vals[s] };   // move the resource out of the raw slot
+    (m, v)
+}
+
+// Free an EMPTY map (all values already taken out). Frees the raw value memory;
+// keys/used are region-backed. The map is consumed here (this is its terminal).
+pub fn free[K, resource V](m: RMap[K, V]) -> int {
+    unsafe { c_free(m.vals) };
+    0
+}

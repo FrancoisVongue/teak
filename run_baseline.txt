@@ -29,6 +29,7 @@ linear_basic RUN 0
 list RUN 6
 log_format RUN 29
 loops_basic RUN 55
+map_demo RUN 56
 netlink_msg RUN 0
 ops RUN 100
 option_result RUN 11
@@ -42,6 +43,8 @@ records RUN 73
 region_as_file RUN 120
 region_reset RUN 100
 regions RUN 116
+resource_generic RUN 0
+rmap_demo RUN 0
 shapes RUN 123
 stackcalc RUN 42
 str NOMAIN_OR_ERR
