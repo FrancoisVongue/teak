@@ -45,6 +45,7 @@ region_reset RUN 100
 regions RUN 116
 resource_generic RUN 0
 rmap_demo RUN 0
+rqueue_demo RUN 0
 shapes RUN 123
 stackcalc RUN 42
 str NOMAIN_OR_ERR

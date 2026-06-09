@@ -1,0 +1,24 @@
+// A resource FIFO queue. Plain function names — `new`, `push`, `pop`, `free` —
+// the `rqueue` namespace is the qualifier, exactly like rmap / vec / map.
+//
+// Resources move IN and OUT in FIFO order; the queue itself is a resource that
+// must be drained and freed. This is the single-owner substrate of a channel.
+
+use rqueue::{new, push, pop, free};
+
+extern fn putchar(c: int) -> int
+resource struct Conn { fd: int }
+fn mk(n: int) -> Conn { Conn { fd: n } }
+fn close(c: Conn) -> int { putchar(48 + c.fd); putchar(10); 0 }   // print fd + '\n'
+
+fn main() -> int {
+    arena r = region(4096);
+    let q0 = new(r, 8);            // rqueue::new -> RQueue[Conn]
+    let q1 = push(q0, mk(1));
+    let q2 = push(q1, mk(2));
+    let q3 = push(q2, mk(3));
+    let (q4, a) = pop(q3);  close(a);    // '1' (FIFO order)
+    let (q5, b) = pop(q4);  close(b);    // '2'
+    let (q6, c) = pop(q5);  close(c);    // '3'
+    free(q6)
+}

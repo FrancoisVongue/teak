@@ -1,0 +1,63 @@
+// std/rqueue.orto — a RESOURCE queue (FIFO ring buffer). Elements are resources
+// (`[resource T]`): they MOVE in and out, never copied. Because the queue owns
+// resources, the queue is ITSELF a resource (induced linearity) — it must be
+// drained + freed, never silently dropped.
+//
+// Elements live in a raw ring buffer — the F10 "unsafe core under a safe
+// interface": only the lines that touch raw element slots are `unsafe { ... }`;
+// the whole public surface is safe and move-checked. Fixed capacity (no grow —
+// keep it simple). Counters live in a region-backed Handle so they are mutable
+// through the queue without rebuilding the struct (same trick as rmap's `used`).
+//
+// This is the substrate for the 4th need a Go channel bundles — "pass work
+// between tasks". A thread-safe + blocking-pop + await_any layer goes ON TOP of
+// this with the async runtime; here is just the single-owner data structure.
+
+fn idx(i: int, cap: int) -> int { let m = i % cap; if m < 0 { m + cap } else { m } }
+
+resource struct RQueue[resource T] {
+    buf:  *T,            // raw ring buffer (F10 core)
+    meta: Handle[int],   // [0]=head, [1]=tail, [2]=count — region-backed, mutable
+    cap:  int
+}
+
+pub fn new[resource T](r: Region, cap: int) -> RQueue[T] {
+    RQueue {
+        buf:  unsafe { c_alloc[T](cap) },
+        meta: ref(r, 3, 0),
+        cap:  cap
+    }
+}
+
+// Read-only queries borrow the queue (`&RQueue`).
+pub fn count[resource T](q: &RQueue[T]) -> int      { q.meta[2] }
+pub fn is_empty[resource T](q: &RQueue[T]) -> bool  { q.meta[2] == 0 }
+pub fn is_full[resource T](q: &RQueue[T]) -> bool   { q.meta[2] == q.cap }
+
+// Move an element IN at the tail. The caller must check `is_full` first: a full
+// push would have to drop the element, which a resource forbids. Returns the
+// queue threaded through (move).
+pub fn push[resource T](q: RQueue[T], x: T) -> RQueue[T] {
+    let t = q.meta[1];
+    unsafe { q.buf[t] := x };          // move the resource into the raw slot
+    q.meta[1] := idx(t + 1, q.cap);
+    q.meta[2] := q.meta[2] + 1;
+    q
+}
+
+// Move the head element OUT. The caller must check `is_empty` first. Returns the
+// queue and the element, both moved.
+pub fn pop[resource T](q: RQueue[T]) -> (RQueue[T], T) {
+    let h = q.meta[0];
+    let x = unsafe { q.buf[h] };       // move the resource out of the raw slot
+    q.meta[0] := idx(h + 1, q.cap);
+    q.meta[2] := q.meta[2] - 1;
+    (q, x)
+}
+
+// Free an EMPTY queue (all elements already popped). Frees the raw buffer; meta
+// is region-backed and dies with the region. The queue is consumed here.
+pub fn free[resource T](q: RQueue[T]) -> int {
+    unsafe { c_free(q.buf) };
+    0
+}
