@@ -1,0 +1,23 @@
+// Stage 6: a forced-choice managed type (no on_exit, terminals commit/abort)
+// is discharged by an explicit handover `commit(move(t))`. The `move` makes
+// the ownership transfer visible and consumes t in the caller, so the
+// forced-choice rule is satisfied. Prints C (commit ran). Returns 0.
+
+extern fn putchar(c: int) -> int
+
+managed struct Tx {
+    id: int
+    commit(t) -> int { putchar(67); 0 }   // 'C'
+    abort(t)  -> int { putchar(65); 0 }    // 'A'
+}
+
+fn begin() -> Tx { Tx { id: 1 } }
+
+fn main() -> int {
+    let t = begin();
+    if t.id > 0 {
+        commit(move(t))      // explicit handover; t consumed here
+    } else {
+        abort(move(t))
+    }
+}

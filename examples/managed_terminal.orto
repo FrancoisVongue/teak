@@ -1,0 +1,35 @@
+// Stage 2: inline terminals. `on_exit close(s) { ... }` lives inside the
+// managed struct and desugars to `fn drop_Socket(s: Socket) -> int { ... }`,
+// reusing the existing auto-drop-at-scope-exit machinery. Same observable
+// behaviour as managed_basic.orto (prints U7, U7, D).
+
+extern fn putchar(c: int) -> int
+
+managed struct Socket {
+    fd: int
+
+    on_exit close(s) {
+        putchar(68);                 // 'D'
+        putchar(10 + s.fd - s.fd);   // newline; touch s.fd
+        0
+    }
+}
+
+fn open_fake() -> Socket {
+    Socket { fd: 7 }
+}
+
+fn use_socket(s: Socket) -> int {
+    putchar(85);             // 'U'
+    putchar(48 + s.fd);      // '7'
+    putchar(10);
+    0
+}
+
+fn main() -> int {
+    let s = open_fake();
+    use_socket(s);
+    use_socket(s);
+    // implicit drop_Socket(s) (desugared from on_exit) at scope exit
+    0
+}

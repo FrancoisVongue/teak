@@ -42,7 +42,10 @@ let lower_ident_or_keyword s =
   | "struct" -> TStruct
   | "enum"  -> TEnum
   | "linear" -> TLinear
+  | "managed" -> TManaged
+  | "on_exit" -> TOnExit
   | "drop"  -> TDrop
+  | "move"  -> TMove
   | "match" -> TMatch
   | "extern" -> TExtern
   | "use"   -> TUse

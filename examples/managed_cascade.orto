@@ -1,0 +1,24 @@
+// Stage 4: a managed struct that OWNS a linear field gets an auto-generated
+// cascade drop — no hand-written drop_Conn needed. When the Conn leaves
+// scope, the compiler closes its socket. Prints S (open marker) then D
+// (the socket's on_exit, fired by the cascade).
+
+extern fn putchar(c: int) -> int
+
+managed struct Socket {
+    fd: int
+    on_exit close(s) { putchar(68); putchar(10 + s.fd - s.fd); 0 }  // 'D' \n
+}
+
+// No drop_Conn written: cascade is auto-generated because Conn owns a Socket.
+managed struct Conn {
+    sock: Socket,
+    tag:  int
+}
+
+fn main() -> int {
+    let c = Conn { sock: Socket { fd: 7 }, tag: 1 };
+    putchar(83); putchar(10);   // 'S' \n  (we built it)
+    c.tag - 1
+    // scope exit: auto drop_Conn(c) -> drop_Socket(c.sock) -> prints D
+}

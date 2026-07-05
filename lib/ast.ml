@@ -121,6 +121,9 @@ type expr =
   | EReset of expr                        (* reset(r) — rewind region r, invalidate its refs *)
   | ETryAt  of expr * expr                (* try_at(a, i) — None on dangling/oob *)
   | EDrop   of expr                       (* drop(x) — consume linear value, run its drop fn *)
+  | EMove   of expr                       (* move(x) / move x — explicit handover: consume the
+                                             owner at the call site so the transfer is visible.
+                                             Runtime-transparent; only the move-checker acts. *)
   | EDeref  of expr                       (* *p — pointer deref *)
   (* Stage 3 — completion-based concurrency. See STAGE3_ASYNC.md. *)
   | EAwait    of expr                     (* await op — suspend until op completes *)
@@ -389,6 +392,7 @@ let rec show_expr = function
   | EReset e -> Printf.sprintf "reset(%s)" (show_expr e)
   | ETryAt (a, i) -> Printf.sprintf "try_at(%s, %s)" (show_expr a) (show_expr i)
   | EDrop e -> Printf.sprintf "drop(%s)" (show_expr e)
+  | EMove e -> Printf.sprintf "move(%s)" (show_expr e)
   | EDeref p -> Printf.sprintf "*%s" (show_expr p)
   | EAwait e -> Printf.sprintf "await %s" (show_expr e)
   | EAwaitAll branches ->

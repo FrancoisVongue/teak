@@ -237,6 +237,7 @@ let subexprs (e : expr) : expr list =
   | TEPtrCast (a, _) -> [a]
   | TETryAt (a, b, _) -> [a; b]
   | TEDrop (a, _) -> [a]
+  | TEMove (a, _) -> [a]
   | TEReset a -> [a]
   | TEDeref (a, _) -> [a]
   | TEAssign (_, v, _) -> [v]

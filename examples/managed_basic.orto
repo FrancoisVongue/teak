@@ -1,0 +1,36 @@
+// Stage 1: `managed struct` — the surface keyword of the Owner/terminal
+// model. For now a synonym of `linear struct`: move-only, with a user
+// `drop_<Type>` in the same module. Mirrors linear_basic.orto exactly so
+// the regression baseline pins identical behaviour.
+
+extern fn putchar(c: int) -> int
+
+managed struct Socket { fd: int }
+
+// Required (Stage 1): every managed/linear type still needs a matching
+// drop fn in the same module. Stage 2 will let this move inline as
+// `on_exit close(s) { ... }`.
+fn drop_Socket(s: Socket) -> int {
+    putchar(68);   // 'D'
+    putchar(10 + s.fd - s.fd);   // newline; touch s.fd so the field is used
+    0
+}
+
+fn open_fake() -> Socket {
+    Socket { fd: 7 }
+}
+
+fn use_socket(s: Socket) -> int {
+    putchar(85);             // 'U'
+    putchar(48 + s.fd);      // '7'
+    putchar(10);
+    0
+}
+
+fn main() -> int {
+    let s = open_fake();
+    use_socket(s);           // not consumed — borrow-like
+    use_socket(s);           // still alive — can use again
+    // implicit drop_Socket(s) here at scope exit
+    0
+}

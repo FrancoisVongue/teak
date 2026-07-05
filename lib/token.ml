@@ -35,7 +35,15 @@ type token =
   | TStruct
   | TEnum
   | TLinear        (* linear — marks a struct/enum as move-only with user drop *)
+  | TManaged       (* managed — same move-only discipline as linear; the
+                      surface keyword for the Owner/terminal model. For now a
+                      semantic synonym of `linear`; later carries inline
+                      terminals and optional drop. *)
+  | TOnExit        (* on_exit — inside a managed struct, marks the terminal
+                      that runs automatically at scope exit (desugars to the
+                      type's drop fn). *)
   | TDrop          (* drop(x) — consume and run the type's destructor *)
+  | TMove          (* move x — explicit ownership handover at a call site *)
   | TUse           (* use mod::item; — selective import *)
   | TConst         (* const NAME: T = expr; — named compile-time value *)
   | TLen          (* len — array length *)
@@ -139,7 +147,10 @@ let show = function
   | TStruct       -> "STRUCT"
   | TEnum         -> "ENUM"
   | TLinear       -> "LINEAR"
+  | TManaged      -> "MANAGED"
+  | TOnExit       -> "ON_EXIT"
   | TDrop         -> "DROP"
+  | TMove         -> "MOVE"
   | TUse          -> "USE"
   | TConst        -> "CONST"
   | TLen          -> "LEN"

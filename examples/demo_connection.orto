@@ -1,0 +1,27 @@
+// Сценарий агента №1 (одно соединение) — РЕАЛЬНО компилируется.
+// Показывает: фабрика ВОЗВРАЩАЕТ владельца (Socket), borrow при передаче
+// вниз, авто-close в конце скоупа. putchar вместо сети, чтобы видеть вывод.
+
+extern fn putchar(c: int) -> int
+
+managed struct Socket {
+    fd: int
+    on_exit close(s) { putchar(67); putchar(48 + s.fd); 0 }   // "C7" = закрыт
+}
+
+// ФАБРИКА: возвращает владельца наверх. ВОТ зачем нужен возврат владельцев —
+// чтобы такая функция вообще могла существовать.
+fn connect(fd: int) -> Socket { Socket { fd: fd } }
+
+// borrow: передаём вниз, не потребляя.
+fn send(s: Socket, c: int) -> int { putchar(c) }
+
+fn handle() -> int {
+    let s = connect(7);   // владею сокетом здесь
+    send(s, 72);          // 'H' — borrow
+    send(s, 73);          // 'I' — borrow, всё ещё мой
+    0
+    // конец скоупа: on_exit close(s) -> "C7"
+}
+
+fn main() -> int { handle() }

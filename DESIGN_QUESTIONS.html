@@ -1,0 +1,876 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>orto — открытые дизайн-вопросы</title>
+<style>
+  :root {
+    --ink: #1a1a1a;
+    --muted: #6b6b6b;
+    --line: #d6d6d6;
+    --bg: #fbfbfa;
+    --code-bg: #f3f3f1;
+    --rec: #1f7a5c;        /* recommended accent */
+    --rec-bg: #eef7f3;
+    --open: #8a6d1f;       /* genuinely open */
+    --open-bg: #f8f3e4;
+    --con: #9a3b3b;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: var(--ink); background: var(--bg);
+    margin: 0; padding: 0 0 120px;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 0 28px; }
+  header.top {
+    border-bottom: 2px solid var(--ink);
+    padding: 32px 0 20px; margin-bottom: 8px;
+  }
+  header.top h1 { margin: 0 0 6px; font-size: 26px; letter-spacing: -0.01em; }
+  header.top p { margin: 4px 0; color: var(--muted); max-width: 760px; }
+  code, pre { font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace; }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--line);
+    border-radius: 4px; padding: 11px 13px; margin: 0 0 10px;
+    font-size: 12.5px; line-height: 1.5; overflow-x: auto; white-space: pre;
+  }
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; margin: 14px 0 0; font-size: 13px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+  .dot { width: 11px; height: 11px; border-radius: 2px; display: inline-block; }
+  .dot.rec { background: var(--rec); }
+  .dot.open { background: var(--open); }
+
+  nav.toc {
+    margin: 22px 0 6px; padding: 14px 16px;
+    border: 1px solid var(--line); border-radius: 4px; background: #fff;
+  }
+  nav.toc h3 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+  nav.toc ol { margin: 0; padding-left: 22px; columns: 2; column-gap: 32px; }
+  nav.toc li { margin: 3px 0; break-inside: avoid; }
+  nav.toc a { color: var(--ink); text-decoration: none; }
+  nav.toc a:hover { text-decoration: underline; }
+
+  section.q { margin: 40px 0 0; padding-top: 28px; border-top: 1px solid var(--line); }
+  section.q:first-of-type { border-top: none; }
+  .qhead { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .qnum { font-size: 13px; color: var(--muted); font-weight: 600; }
+  section.q h2 { margin: 0; font-size: 20px; letter-spacing: -0.01em; }
+  .badge {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+    padding: 2px 8px; border-radius: 3px; white-space: nowrap;
+  }
+  .badge.crit { background: #2a2a2a; color: #fff; }
+  .badge.open { background: var(--open-bg); color: var(--open); border: 1px solid #e3d3a0; }
+  .badge.lean { background: var(--rec-bg); color: var(--rec); border: 1px solid #bfe0d2; }
+  .prim { margin: 12px 0 4px; }
+  .prim b { font-weight: 700; }
+  .ctx { color: var(--muted); margin: 6px 0 16px; max-width: 860px; }
+  .ctx code { background: var(--code-bg); padding: 0 4px; border-radius: 3px; font-size: 12.5px; }
+
+  .variants { display: flex; gap: 14px; flex-wrap: wrap; align-items: stretch; }
+  .variant {
+    flex: 1 1 300px; min-width: 280px;
+    border: 1px solid var(--line); border-radius: 5px; background: #fff;
+    padding: 12px 13px; display: flex; flex-direction: column;
+  }
+  .variant.rec { border-color: var(--rec); border-width: 1.5px; background: var(--rec-bg); }
+  .variant.rec pre { background: #fff; }
+  .vh { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 9px; }
+  .vh .vname { font-weight: 700; font-size: 13.5px; }
+  .vh .vtag { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; padding: 1px 6px; border-radius: 3px; }
+  .vtag.rec { background: var(--rec); color: #fff; }
+  .vtag.now { background: #2a2a2a; color: #fff; }
+  ul.pc { list-style: none; margin: 4px 0 0; padding: 0; font-size: 13px; }
+  ul.pc li { margin: 3px 0; padding-left: 18px; position: relative; }
+  ul.pc li.p::before { content: "+"; position: absolute; left: 2px; color: var(--rec); font-weight: 700; }
+  ul.pc li.c::before { content: "−"; position: absolute; left: 2px; color: var(--con); font-weight: 700; }
+
+  .opinion { margin: 16px 0 0; padding: 12px 14px; border-left: 3px solid var(--ink); background: #fff; }
+  .opinion b { font-weight: 700; }
+  .opinion.open { border-left-color: var(--open); background: var(--open-bg); }
+
+  .decision {
+    margin: 14px 0 0; padding: 12px 14px;
+    border: 1.5px dashed #b9b9b9; border-radius: 5px; background: #fff;
+  }
+  .decision strong { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 6px; }
+  .decision .answer { min-height: 24px; color: var(--ink); }
+  .decision .answer::before { content: "— "; color: #bbb; }
+
+  .subq { margin: 18px 0 0; }
+  .subq h4 { margin: 0 0 8px; font-size: 14px; }
+  footer { margin-top: 56px; padding-top: 20px; border-top: 2px solid var(--ink); color: var(--muted); font-size: 13px; }
+  kbd { background: #fff; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 0 5px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="top">
+  <h1>orto — открытые дизайн-вопросы</h1>
+  <p>Живой документ. Читается сверху вниз. Каждый вопрос — это примитив + варианты в колонках с реальным кодом на orto и плюсами/минусами. Где вкус очевиден из философии (ортогональность, явность, законы-природы, простой компилятор) — я подсвечиваю склонение. Где реально открыто — оставляю без подсветки и формулирую вопрос.</p>
+  <p>Под каждым вопросом — блок <b>«Решение Francois»</b>. Заполни его (хоть одним словом: «вариант B», «отложить», «обсудить»), верни файл — и я продолжу: либо строю, либо запускаю агентов.</p>
+  <p style="color:var(--ink)"><b>Порядок:</b> сначала то, что блокирует крит-путь к первому числу (#0), потом user-facing эргономика (#1–6), потом глубокая архитектура (#7–9), потом мелочь (#10).</p>
+  <div class="legend">
+    <span><i class="dot rec"></i> склоняюсь к варианту (вкус ясен)</span>
+    <span><i class="dot open"></i> реально открыто — нужен твой звонок</span>
+  </div>
+</header>
+
+<nav class="toc">
+  <h3>Содержание</h3>
+  <ol>
+    <li><a href="#q0">growable_region — рост региона</a></li>
+    <li><a href="#q1"><code>?</code> для Result/Option</a></li>
+    <li><a href="#q2">Ambient-регион / <code>box</code> / <code>in r</code></a></li>
+    <li><a href="#q3"><code>inout</code>-параметры</a></li>
+    <li><a href="#q4">Generic Option/Result над linear</a></li>
+    <li><a href="#q5">Variadic <code>format</code></a></li>
+    <li><a href="#q6">Nested patterns в match</a></li>
+    <li><a href="#q7">Escape-анализ / судьба <code>stack_region</code></a></li>
+    <li><a href="#q8">Кросс-ядерная конкурентность</a></li>
+    <li><a href="#q9">Threading (один хост)</a></li>
+    <li><a href="#q10">Type-level alignment</a></li>
+  </ol>
+</nav>
+
+<!-- ============================ Q0 ============================ -->
+<section class="q" id="q0">
+  <div class="qhead">
+    <span class="qnum">#0</span>
+    <h2>growable_region — регион, который растёт</h2>
+    <span class="badge crit">крит-путь</span>
+    <span class="badge lean">склонение есть, но есть и подвопрос</span>
+  </div>
+  <p class="prim"><b>Примитив:</b> регион, чей блок памяти может вырасти, когда заполнился — без инвалидации уже выданных <code>Handle</code>.</p>
+  <p class="ctx">Проверил по коду: хендл — это <code>{slot, offset, len, expected_gen}</code>, доступ резолвится <b>косвенно через слот</b> (<code>ORTO_SLOTS[slot].base + offset</code>), а не сырым указателем. Значит при росте через <code>realloc</code> достаточно обновить базу в слоте — <b>все живые хендлы остаются валидными даром</b>. Это четвёртый источник блока рядом с <code>region</code>/<code>stack_region</code>/<code>aligned_region</code>, тот же тип <code>Region</code>, та же работа. Разблокирует реальные сервера и unbounded-сценарии (парсер строит дерево неизвестного размера, vec растёт).</p>
+
+  <div class="variants">
+    <div class="variant rec">
+      <div class="vh"><span class="vname">A. Четвёртый конструктор, прозрачный рост</span><span class="vtag rec">склоняюсь</span></div>
+<pre>// тот же тип Region, тот же ref/r[i]/len.
+// growable_region(start) растёт x2 на ref,
+// когда текущий блок заполнен.
+arena g = growable_region(4096);
+
+let mut i = 0;
+while i &lt; 100000 {
+    let _ = ref(g, i);   // даже если блок полон —
+    i := i + 1;          // realloc, база в слоте обновлена,
+}                        // старые хендлы валидны.
+let h = ref(g, 42);
+g[0]                     // работает как обычно</pre>
+      <ul class="pc">
+        <li class="p">Ортогонально: ноль новых user-facing понятий, четвёртый источник блока.</li>
+        <li class="p">Косвенность хендла уже есть → реализация дёшева (~50 строк runtime + AST-узел).</li>
+        <li class="p">Та же gen/bounds-проверка, тот же синтаксис доступа.</li>
+        <li class="c">Амортизированный <code>ref</code>: изредка O(n) копия при realloc (стандартная цена роста).</li>
+      </ul>
+    </div>
+
+    <div class="variant">
+      <div class="vh"><span class="vname">B. Отдельный тип Growable + явный grow</span></div>
+<pre>arena g = growable_region(4096);
+// рост — отдельная операция, не на ref:
+grow(g, 8192);          // пользователь сам решает когда
+let h = ref(g, 42);</pre>
+      <ul class="pc">
+        <li class="p">Рост виден явно в точке вызова.</li>
+        <li class="c">Новое понятие/тип рядом с Region — НЕ ортогонально, дублирует ось.</li>
+        <li class="c">Перекладывает «когда расти» на пользователя — это и есть та грязь, которую прячут в примитив.</li>
+        <li class="c">Два типа региона = каждая функция, берущая Region, теперь думает «а какой».</li>
+      </ul>
+    </div>
+
+    <div class="variant">
+      <div class="vh"><span class="vname">C. Не добавлять — цепочка регионов</span></div>
+<pre>// пользователь сам пере-аллоцирует:
+arena r1 = region(4096);
+// заполнился — заводит новый, копирует:
+arena r2 = region(8192);
+// ... и тащит это руками</pre>
+      <ul class="pc">
+        <li class="p">Ноль изменений компилятора.</li>
+        <li class="c">Боль уезжает в каждый call-site → ровно анти-N+M.</li>
+        <li class="c">Хендлы из r1 не переносятся в r2 автоматически — ручная миграция, источник багов.</li>
+        <li class="c">Делает невозможными «сервер без заранее известного размера» элегантно.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="opinion open">
+    <b>Подвопрос, который реально надо решить тебе (и он не про синтаксис):</b> <code>as_ptr(handle)</code> отдаёт <i>сырой текущий</i> адрес. Его используют для FFI — например <code>uring_read(r, fd, as_ptr(buf), len(buf), ...)</code> передаёт буфер ядру. Если регион вырастет (realloc) <b>пока ядро пишет в этот буфер</b> (in-flight async read через await), буфер уедет → ядро пишет в освобождённую память. Тихий use-after-free, мимо gen-проверки (сырой указатель её не проходит).<br><br>
+    Варианты ответа: <b>(i)</b> growable только для построения структур, а I/O-буферы держим в обычном <code>region</code> — соглашение/документация; <b>(ii)</b> запретить рост, пока есть «pinned» хендлы, отданные через <code>as_ptr</code> (нужен учёт — сложно); <b>(iii)</b> рост только между await-точками (рантайм-инвариант одноядерного шедулера — возможно само собой выходит). Я <b>склоняюсь к A + правило (i)</b> как стартовая честная позиция: growable — для «строю дерево/вектор», I/O-буфер — фиксированный регион. Но это твой звонок, потому что он трогает модель безопасности.
+  </div>
+  <div class="decision"><strong>Решение Francois</strong><div class="answer"></div></div>
+</section>
+
+<!-- ============================ Q1 ============================ -->
+<section class="q" id="q1">
+  <div class="qhead">
+    <span class="qnum">#1</span>
+    <h2><code>?</code> для Result/Option — проброс ошибки</h2>
+    <span class="badge lean">вкусовой, лёгкое склонение</span>
+  </div>
+  <p class="prim"><b>Примитив:</b> пробросить «плохую» ветку finite-outcome значения вверх без ручного <code>match</code>, ранним возвратом.</p>
+  <p class="ctx">Напряжение с законом явности (#2): ранний возврат частично скрыт. Но он <b>виден в точке <code>?</code></b> — это не ambient catch. Работает только если охватывающая функция возвращает совместимый <code>Result</code>/<code>Option</code>; типы это форсят. Go намеренно не имеет <code>?</code> (пишут <code>if err != nil</code>) — это многословно; <code>?</code> — это Messi-слой поверх явной модели.</p>
+
+  <div class="variants">
+    <div class="variant">
+      <div class="vh"><span class="vname">A. Без <code>?</code> — явный match (как сейчас)</span><span class="vtag now">сейчас</span></div>
+<pre>fn load(r: Region) -&gt; Result[Config] {
+    let raw = match read_file(r) {
+        Ok(b)  =&gt; b,
+        Err(e) =&gt; { return Err(e); }
+    };
+    let cfg = match parse(r, raw) {
+        Ok(c)  =&gt; c,
+        Err(e) =&gt; { return Err(e); }
+    };
+    Ok(cfg)
+}</pre>
+      <ul class="pc">
+        <li class="p">Полностью явно, ноль сахара, ноль вопросов.</li>
+        <li class="p">Каждый исход обработан на месте — taste §2 в чистом виде.</li>
+        <li class="c">Реальная повторяемость: один и тот же match-проброс копируется (taste §13 — повод абстрагировать).</li>
+        <li class="c">Длинные цепочки I/O тонут в церемонии — ровно «как Go, но больно».</li>
+      </ul>
+    </div>
+
+    <div class="variant rec">
+      <div class="vh"><span class="vname">B. Постфиксный <code>?</code></span><span class="vtag rec">склоняюсь</span></div>
+<pre>fn load(r: Region) -&gt; Result[Config] {
+    let raw = read_file(r)?;   // Err -&gt; return Err(e)
+    let cfg = parse(r, raw)?;  // Ok(v) -&gt; v
+    Ok(cfg)
+}
+// `?` desugar строго в тот match из колонки A.
+// Виден в коде. Тип load обязан быть Result.</pre>
+      <ul class="pc">
+        <li class="p">Убирает ровно ту повторяемость, что в A — и ничего больше.</li>
+        <li class="p">Не ambient: <code>?</code> виден глазом, тип функции форсит совместимость.</li>
+        <li class="p">Чисто живёт с регионами: ранний возврат идёт вверх по стеку, регион ещё жив.</li>
+        <li class="c">Маленькая «магия»: поток управления в точке <code>?</code> неявен на 1 шаг.</li>
+      </ul>
+    </div>
+
+    <div class="variant">
+      <div class="vh"><span class="vname">C. Префиксный <code>try</code>-блок</span></div>
+<pre>fn load(r: Region) -&gt; Result[Config] {
+    try {
+        let raw = read_file(r);
+        let cfg = parse(r, raw);
+        Ok(cfg)
+    }
+    // любой Err внутри блока -&gt; ранний выход
+}</pre>
+      <ul class="pc">
+        <li class="p">Группирует «зону проброса» явным блоком.</li>
+        <li class="c">Сильнее скрывает: какие именно вызовы могут выйти — не видно построчно.</li>
+        <li class="c">Ближе к exception-семантике, которую мы отвергаем (ambient-ish).</li>
+        <li class="c">Новый управляющий конструкт vs точечный оператор.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="opinion">
+    <b>Моё склонение — B</b>, мягко. Аргумент: <code>?</code> не прячет исход (тип остаётся <code>Result</code>, исчерпывающность сохраняется на границе), он убирает <i>повтор проброса</i> — это taste §13, а не нарушение §2. Он виден в точке. Это honest Messi-слой: убери его — система не перестраивается. Но это вкусовой звонок про «сколько шага неявности мы терпим» — поэтому без жёсткой подсветки. Если скажешь «нет, явный match — якорь», принимаю A без спора.
+  </div>
+  <div class="decision"><strong>Решение Francois</strong><div class="answer"></div></div>
+</section>
+
+<!-- ============================ Q2 ============================ -->
+<section class="q" id="q2">
+  <div class="qhead">
+    <span class="qnum">#2</span>
+    <h2>Ambient-регион / <code>box</code> / <code>in r</code></h2>
+    <span class="badge lean">склонение ясное — упирается в уже принятый якорь</span>
+  </div>
+  <p class="prim"><b>Примитив:</b> как аллокация получает свой регион — явным параметром или из окружающего контекста.</p>
+  <p class="ctx">Прямо на законе явности. Важно: вы <b>уже отвергли</b> «implicit allocator / <code>alloc fn</code>» с формулировкой «видимость аллокации (<code>r</code>-параметр) — якорь философии orto». Ambient-регион — это тот же отвергнутый примитив под другим именем.</p>
+
+  <div class="variants">
+    <div class="variant rec">
+      <div class="vh"><span class="vname">A. Полностью явно (как сейчас)</span><span class="vtag rec">склоняюсь</span></div>
+<pre>fn build(r: Region) -&gt; Handle[Tree] {
+    let l = ref(r, Leaf);
+    let n = ref(r, Node(20, l));
+    n
+}
+// регион виден в сигнатуре И в каждой аллокации.</pre>
+      <ul class="pc">
+        <li class="p">Где аллокация — видно глазом, всегда. Якорь философии держится.</li>
+        <li class="p">Функция, берущая <code>Region</code> ⇒ она аллоцирует. Сигнатура не врёт.</li>
+        <li class="c">Многословно: <code>r</code> протаскивается через всё дерево вызовов.</li>
+      </ul>
+    </div>
+
+    <div class="variant">
+      <div class="vh"><span class="vname">B. Ambient <code>in r { }</code> + <code>box</code></span></div>
+<pre>fn build() -&gt; Handle[Tree] {
+    in r {
+        let l = box(Leaf);       // в текущий r
+        let n = box(Node(20,l)); // r не назван
+        n
+    }
+}</pre>
+      <ul class="pc">
+        <li class="p">Меньше шума: <code>r</code> не повторяется на каждой строке.</li>
+        <li class="c"><code>box(v)</code> не показывает, КУДА аллоцирует — надо сканировать вверх до <code>in r</code>. Это та самая «невидимая магия».</li>
+        <li class="c">Это <b>уже отвергнутый</b> implicit-allocator под именем ambient.</li>
+        <li class="c">Thread-local «текущий регион» плохо живёт с кросс-ядром (#8).</li>
+      </ul>
+    </div>
+
+    <div class="variant">
+      <div class="vh"><span class="vname">C. Соглашение «Handle в возврате сигналит»</span></div>
+<pre>// НЕ фича, а правило чтения:
+// возвращает Handle[T] ⇒ обязан брать Region.
+fn build(r: Region) -&gt; Handle[Tree] { ... }
+// без региона Handle вернуть нельзя —
+// компилятор и так это форсит.</pre>
+      <ul class="pc">
+        <li class="p">Ноль новой машинерии — это просто чтение существующих сигнатур.</li>
+        <li class="p">Сохраняет полную явность из A.</li>
+        <li class="c">Не уменьшает многословность — это лишь лоск документации, не решение «шума».</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="opinion">
+    <b>Склоняюсь к A</b>, и это редкий случай, где подсвечиваю уверенно: ambient (B) — это буквально implicit allocator, который вы уже отвергли как противоречащий якорю. C — не фича, а просто верное наблюдение про чтение сигнатур (его можно записать в стиль-гайд бесплатно). Многословность <code>r</code> реальна, но цена честная и совпадает с «жертвуем скоростью компиляции/многословностью, не семантикой». Если многословность правда болит на практике — это аргумент за #1 (<code>?</code>) и #3 (<code>inout</code>), а не за скрытие региона.
+  </div>
+  <div class="decision"><strong>Решение Francois</strong><div class="answer"></div></div>
+</section>
+
+<!-- ============================ Q3 ============================ -->
+<section class="q" id="q3">
+  <div class="qhead">
+    <span class="qnum">#3</span>
+    <h2><code>inout</code>-параметры</h2>
+    <span class="badge lean">чистый сахар, низкий приоритет</span>
+  </div>
+  <p class="prim"><b>Примитив:</b> функция меняет значение вызывающего без алиасинга и без сырых указателей.</p>
+  <p class="ctx">Чистый desugar в «верни новое значение + перепривяжи». Никакого скрытого алиасинга. Для copyable-типов. С линейными не дружит (copy-in копирует — запрещено), так что <code>inout</code> только для нелинейных.</p>
+
+  <div class="variants">
+    <div class="variant">
+      <div class="vh"><span class="vname">A. Возврат + перепривязка (как сейчас)</span><span class="vtag now">сейчас</span></div>
+<pre>fn bump(c: Counter) -&gt; Counter {
+    Counter { n: c.n + 1 }
+}
+let mut c = Counter { n: 0 };
+c := bump(c);     // явная перепривязка
+c := bump(c);</pre>
+      <ul class="pc">
+        <li class="p">Полностью явно: видно, что <code>c</code> пере-присвоен.</li>
+        <li class="p">Ноль новой семантики.</li>
+        <li class="c">Шум <code>x := f(x)</code> повторяется; для многополевых out — возврат кортежа.</li>
+      </ul>
+    </div>
+
+    <div class="variant">
+      <div class="vh"><span class="vname">B. <code>inout</code> (copy-in / copy-out)</span></div>
+<pre>fn bump(inout c: Counter) {
+    c.n := c.n + 1;
+}
+let mut c = Counter { n: 0 };
+bump(c);          // desugar: c := bump_ret(c)
+bump(c);          // ноль алиасинга, value-семантика</pre>
+      <ul class="pc">
+        <li class="p">Убирает <code>x := f(x)</code>-шум, особенно для out-параметров.</li>
+        <li class="p">Honest desugar — это та же модель, просто короче. Нет указателей/алиасинга.</li>
+        <li class="c">Маленькая неявность: мутация у вызывающего не видна как присваивание на call-site.</li>
+        <li class="c">Не работает с линейными — ещё одно «нельзя для этого вида» (но оно следует из закона копируемости, не спец-правило).</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="opinion">
+    <b>Склоняюсь отложить, оставить A.</b> <code>inout</code> — приятный Messi-сахар, но чистый: его можно добавить в любой момент позже без перестройки, потому что это буквально desugar в то, что уже есть. Сейчас он не на крит-пути и не разблокирует ничего. Добавим, если протаскивание out-значений реально заболит в stdlib/HTTP. Не трачу на него решение сейчас, если ты не видишь иначе.
+  </div>
+  <div class="decision"><strong>Решение Francois</strong><div class="answer"></div></div>
+</section>
+
+<!-- ============================ Q4 ============================ -->
+<section class="q" id="q4">
+  <div class="qhead">
+    <span class="qnum">#4</span>
+    <h2>Generic Option/Result над linear-типами</h2>
+    <span class="badge lean">есть чистый прецедент → склонение</span>
+  </div>
+  <p class="prim"><b>Примитив:</b> завернуть линейный ресурс (<code>Fd</code>, <code>Socket</code>) в <code>Option</code>/<code>Result</code>, не теряя линейности.</p>
+  <p class="ctx">Сейчас <code>Option[Fd]</code> запрещён (Fd линеен, Option — нет). Workaround: возвращать сырой <code>int</code> и <code>fd_wrap</code> вручную — некрасиво. Но: вы <b>уже</b> делаете ровно это для <code>Handle[linear]</code> — компилятор сам генерит каскадный drop. Вопрос: распространить тот же закон на агрегаты.</p>
+
+  <div class="variants">
+    <div class="variant">
+      <div class="vh"><span class="vname">A. Запрет (как сейчас)</span><span class="vtag now">сейчас</span></div>
+<pre>// Option[Fd] нельзя. Возвращаем сырьё:
+fn try_open(p: Handle[byte]) -&gt; int {
+    open_raw(p)        // -1 при ошибке
+}
+let raw = try_open(path);
+let r = if raw &gt;= 0 {
+    // вручную оборачиваем в линейный Fd
+    use_fd(fd_wrap(raw))
+} else { handle_err() };</pre>
+      <ul class="pc">
+        <li class="p">Ноль работы в системе типов.</li>
+        <li class="c">Сырой <code>int</code> + ручной wrap — обходит линейность ровно там, где она нужна.</li>
+        <li class="c">«-1 как ошибка» — это lying-category (taste §6): <code>int</code> прикидывается и fd, и ошибкой.</li>
+      </ul>
+    </div>
+
+    <div class="variant rec">
+      <div class="vh"><span class="vname">B. Linear-aware: агрегат над linear ⇒ linear</span><span class="vtag rec">склоняюсь</span></div>
+<pre>// закон: агрегат, содержащий linear-поле,
+// сам линеен, и компилятор ГЕНЕРИТ его drop —
+// match по вариантам, drop каждого linear-поля.
+fn try_open(p: Handle[byte]) -&gt; Option[Fd] {
+    let raw = open_raw(p);
+    if raw &gt;= 0 { Some(fd_wrap(raw)) } else { None }
+}
+match try_open(path) {
+    Some(fd) =&gt; use_fd(fd),   // fd потреблён
+    None     =&gt; handle_err(),
+}   // drop_Option[Fd] сгенерён: Some -&gt; drop(fd)</pre>
+      <ul class="pc">
+        <li class="p">Тот же механизм, что уже есть для <code>Handle[linear]</code> — это <b>обобщение закона</b>, не новое спец-правило (taste §13, закон-природы #3).</li>
+        <li class="p">Убирает lying-category «-1»: исход назван (<code>None</code>/<code>Some(Fd)</code>).</li>
+        <li class="p">Компилятор знает структуру Option/Result ⇒ генерит drop без всякого typeclass.</li>
+        <li class="c">Нужно решить охват: только встроенные Option/Result, или ЛЮБОЙ enum/struct с linear-полем.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="opinion">
+    <b>Склоняюсь к B</b>, потому что у него есть чистый прецедент: вы уже генерите каскадный drop для <code>Handle[linear]</code>. «Агрегат над linear сам линеен, drop генерится из структуры» — это та самая природа-закон, из которой и <code>Handle[linear]</code>, и <code>Option[Fd]</code> следуют автоматически, а не два спец-случая.<br><br>
+    <b>Настоящий вопрос для тебя — охват:</b> делаем это только для встроенных <code>Option</code>/<code>Result</code> (тогда чуть пахнет спец-случаем) <i>или</i> формулируем общий закон «любой агрегат с линейным полем → линейный агрегат с генерированным каскадным drop» (тогда он заодно поглощает <code>Handle[linear]</code> и нынешний запрет «linear в data-position обычной структуры» становится не запретом, а «структура становится линейной»)? Второе — глубже и ортогональнее, но это уже не мелочь: меняет правило про linear-в-структурах. Твой звонок, какой охват берём.
+  </div>
+  <div class="decision"><strong>Решение Francois</strong><div class="answer"></div></div>
+</section>
+
+<!-- ============================ Q5 ============================ -->
+<section class="q" id="q5">
+  <div class="qhead">
+    <span class="qnum">#5</span>
+    <h2>Variadic <code>format</code></h2>
+    <span class="badge lean">AK-47 сейчас / Messi потом</span>
+  </div>
+  <p class="prim"><b>Примитив:</b> собрать строку из шаблона и разнородных типизированных аргументов.</p>
+  <p class="ctx">Болит на практике (netlink/debug). Ловушка: «настоящий» runtime-variadic с разнородными типами требует диспатча «render по типу аргумента» — а это typeclass, который мы отвергаем. Поэтому развилка не «variadic да/нет», а «как рендерить разнородное без классов типов».</p>
+
+  <div class="variants">
+    <div class="variant">
+      <div class="vh"><span class="vname">A. Без variadic — concat-цепочки (как сейчас)</span><span class="vtag now">сейчас</span></div>
+<pre>let msg = concat_all(r, ref(r, [
+    str_of(r, "x="),
+    int_to_bytes(r, x),
+    str_of(r, " y="),
+    int_to_bytes(r, y),
+]));</pre>
+      <ul class="pc">
+        <li class="p">Работает сегодня, ноль новой машинерии.</li>
+        <li class="p">Каждое преобразование явно и типизировано.</li>
+        <li class="c">Многословно и шумно — болит ровно как сказано.</li>
+      </ul>
+    </div>
+
+    <div class="variant rec">
+      <div class="vh"><span class="vname">B. Builder-цепочка (stdlib, без variadic)</span><span class="vtag rec">сейчас</span></div>
+<pre>let msg = fmt(r)
+    .s("x=").i(x)
+    .s(" y=").i(y)
+    .done();
+// каждый метод типизирован: .i(int), .s(str),
+// .f(float). Поведение впрыснуто per-use,
+// никакого диспатча по типу.</pre>
+      <ul class="pc">
+        <li class="p">AK-47: чистая stdlib, ноль изменений компилятора (закон «простой компилятор»).</li>
+        <li class="p">Полностью явно и total — нет lying-category, каждый <code>.i/.s/.f</code> знает свой тип.</li>
+        <li class="p">Это orto-способ: поведение как значение, поздно, per-use.</li>
+        <li class="c">Чуть длиннее идеального <code>format("x={} y={}", x, y)</code>.</li>
+      </ul>
+    </div>
+
+    <div class="variant">
+      <div class="vh"><span class="vname">C. Comptime-format (раскрытие на этапе компиляции)</span><span class="vtag lean" style="background:var(--open-bg);color:var(--open)">Messi, потом</span></div>
+<pre>// типы аргументов известны на call-site ⇒
+// компилятор парсит строку и РАСКРЫВАЕТ:
+let msg = format(r, "x={} y={}", x, y);
+//  -&gt; concat_all(r, [int_to_bytes(x),
+//                     int_to_bytes(y)])
+// для своих типов — передать render явно.</pre>
+      <ul class="pc">
+        <li class="p">Самый эргономичный, выглядит как Zig comptime.</li>
+        <li class="p">Без runtime-variadic и без typeclass: чистый compile-time desugar по известным типам.</li>
+        <li class="c">Требует comptime-парсинга формат-строки в компиляторе — реальная сложность против закона «~4k строк».</li>
+        <li class="c">Для пользовательских типов всё равно нужна явная render-функция (впрыск) — иначе скрытый класс типов.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="opinion">
+    <b>Склоняюсь: B сейчас, C — кандидат на потом.</b> Builder (B) даёт 90% эргономики ценой нуля строк компилятора и идеально ложится на «поведение впрыском, поздно, per-use» из вашей же доктрины дженериков. Comptime-format (C) красивее на вид, но покупает это сложностью в компиляторе и всё равно упирается в «render пользовательского типа» — там опять явный впрыск. Поэтому: строим B как stdlib (это вообще один из параллельных агентов), а C держим как опциональный Messi, если <code>{}</code>-синтаксис реально захочется. Если хочешь сразу целиться в C — скажи, это меняет, кого из агентов запускать.
+  </div>
+  <div class="decision"><strong>Решение Francois</strong><div class="answer"></div></div>
+</section>
+
+<!-- ============================ Q6 ============================ -->
+<section class="q" id="q6">
+  <div class="qhead">
+    <span class="qnum">#6</span>
+    <h2>Nested patterns в match</h2>
+    <span class="badge lean">guards уже есть → отложить</span>
+  </div>
+  <p class="prim"><b>Примитив:</b> сопоставлять вложенные конструкторы/литералы: <code>Some(0)</code>, <code>Node(0, Leaf)</code>.</p>
+  <p class="ctx">Сейчас <code>Some(x)</code> биндит <code>x</code>, но литерал на месте (<code>Some(0)</code>) не матчится. Guards в arm’ах <b>уже есть</b> и закрывают ~80%. Полный nested — «big refactor» emit’а. Это вопрос бюджета сложности компилятора, не философии.</p>
+
+  <div class="variants">
+    <div class="variant">
+      <div class="vh"><span class="vname">A. Только guards (как сейчас)</span><span class="vtag now">сейчас</span></div>
+<pre>match o {
+    Some(x) if x == 0 =&gt; zero_case(),
+    Some(x)           =&gt; nonzero(x),
+    None              =&gt; empty(),
+}</pre>
+      <ul class="pc">
+        <li class="p">Уже работает. Ноль работы.</li>
+        <li class="p">Покрывает большинство реальных кейсов.</li>
+        <li class="c">Чуть многословнее, чем <code>Some(0) =&gt;</code>; глубокая вложенность неудобна.</li>
+      </ul>
+    </div>
+
+    <div class="variant">
+      <div class="vh"><span class="vname">B. Литералы во вложении</span></div>
+<pre>match o {
+    Some(0) =&gt; zero_case(),
+    Some(x) =&gt; nonzero(x),
+    None    =&gt; empty(),
+}</pre>
+      <ul class="pc">
+        <li class="p">Чище для частого «совпасть с конкретным значением».</li>
+        <li class="c">Требует goto-based fallthrough в ADT-switch emit — заметная работа.</li>
+        <li class="c">Маржинальный выигрыш над guards, которые уже есть.</li>
+      </ul>
+    </div>
+
+    <div class="variant">
+      <div class="vh"><span class="vname">C. Полный nested</span></div>
+<pre>match t {
+    Node(0, Leaf) =&gt; ...,
+    Node(v, kids) =&gt; ...,
+    Leaf          =&gt; ...,
+}</pre>
+      <ul class="pc">
+        <li class="p">Самый выразительный, классический паттерн-матчинг.</li>
+        <li class="c">Самый дорогой по компилятору (рекурсивная декомпозиция + полнота).</li>
+        <li class="c">Против закона «простой компилятор» при текущем приоритете.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="opinion">
+    <b>Склоняюсь отложить (A).</b> Guards уже закрывают 80%, а B/C — это бюджет сложности компилятора, который сейчас лучше потратить на крит-путь (growable + HTTP). Ваш же закон: «никаких фич ради фич — каждая ось закрывает реальную боль из практики». Вернёмся, когда практика HTTP/stdlib покажет, что guards правда жмут. Если у тебя уже есть конкретная боль — назови, пересмотрю.
+  </div>
+  <div class="decision"><strong>Решение Francois</strong><div class="answer"></div></div>
+</section>
+
+<!-- ============================ Q7 ============================ -->
+<section class="q" id="q7">
+  <div class="qhead">
+    <span class="qnum">#7</span>
+    <h2>Escape-анализ и судьба <code>stack_region</code></h2>
+    <span class="badge lean">направление задано философией, открыта реализация</span>
+  </div>
+  <p class="prim"><b>Примитив:</b> молча класть не-убегающий регион/env на стек; убрать user-facing <code>stack_region</code> как ярус.</p>
+  <p class="ctx">Это прямо ваш якорный пример: «ноль-стоимость должен давать escape-анализ как <b>оптимизация</b>, а не <code>@escaping</code>-ярус как в Swift». Значит конечное состояние философией уже выбрано — стек выбирается доказательством, молча. Открыто <b>не «делать ли»</b>, а <b>как</b>: точность анализа и что с <code>stack_region</code> в переходный период.</p>
+
+  <div class="variants">
+    <div class="variant">
+      <div class="vh"><span class="vname">A. Оставить <code>stack_region</code> явным (как сейчас)</span><span class="vtag now">сейчас</span></div>
+<pre>arena stk = stack_region(1024);  // пользователь
+arena hp  = region(4096);        // выбирает ярус</pre>
+      <ul class="pc">
+        <li class="p">Работает, предсказуемо.</li>
+        <li class="c">Это user-facing ярус «быстрый/удобный вариант одного и того же» — ровно та грязь Swift, которую вы критикуете.</li>
+        <li class="c">Пользователь должен знать про escape вручную — утечка внутренней заботы наружу.</li>
+      </ul>
+    </div>
+
+    <div class="variant rec">
+      <div class="vh"><span class="vname">B. Молчаливый escape-анализ (конечная цель)</span><span class="vtag rec">направление</span></div>
+<pre>arena r = region(4096);   // ОДИН способ.
+// компилятор доказал, что r не убегает
+// из scope -&gt; разместил на стеке молча.
+// stack_region исчезает как понятие.</pre>
+      <ul class="pc">
+        <li class="p">Ортогонально: один способ для пользователя, перформанс прячется в оптимизацию (якорь).</li>
+        <li class="p">Убирает user-facing ярус — снимает грязь.</li>
+        <li class="c">Реальный статический анализ: точность vs консервативность, цепляет замыкания и возврат <code>Handle</code>. Серьёзная работа.</li>
+        <li class="c"><b>Нельзя выкидывать <code>stack_region</code>, пока анализ не построен</b> — иначе регресс без замены.</li>
+      </ul>
+    </div>
+
+    <div class="variant">
+      <div class="vh"><span class="vname">C. Гибрид: анализ молчит + <code>stack_region</code> как override</span></div>
+<pre>arena r = region(4096);          // анализ решает
+arena s = stack_region(1024);    // ручной форс,
+                                 // если анализ консервативен</pre>
+      <ul class="pc">
+        <li class="p">Безопасный переходный режим: анализ строится, override остаётся как страховка.</li>
+        <li class="c">Если оставить override навсегда — это снова ярус, грязь возвращается.</li>
+        <li class="p">Хорош как <b>стадия</b>: C сейчас → B когда анализ созреет.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="opinion open">
+    Это не «выбери колонку», а roadmap-пункт. <b>Конечная цель — B</b> (она следует из вашего якоря, тут сомнений нет). Открытое и глубокое — <b>сам анализ</b>: где провести границу точность/консервативность, как обращаться с замыканиями (env в регионе) и с функциями, возвращающими <code>Handle</code> (это и есть escape). И тактический звонок: идём через переходный C (анализ молчит, <code>stack_region</code> временно остаётся override и выпиливается, когда анализ докажет, что не нужен), или строим B сразу и держим <code>stack_region</code> до самого включения. Я бы шёл <b>через C как стадию</b>, с явной целью схлопнуть в B. Но это большая работа не на крит-пути — вопрос приоритета: когда.
+  </div>
+  <div class="decision"><strong>Решение Francois</strong><div class="answer"></div></div>
+</section>
+
+<!-- ============================ Q8 ============================ -->
+<section class="q" id="q8">
+  <div class="qhead">
+    <span class="qnum">#8</span>
+    <h2>Кросс-ядерная конкурентность</h2>
+    <span class="badge open">самое глубокое — не подсвечиваю</span>
+  </div>
+  <p class="prim"><b>Примитив:</b> исполнять на нескольких ядрах (thread-per-core), не нарушив модель «регион — один владелец, память не пересекает ядро».</p>
+  <p class="ctx">seastar-уровня. При thread-per-core аллокатор по-ядерный ⇒ владение памятью не пересекает ядро. Тут я <b>реально не подсвечиваю</b> — это открытый дизайн, где можно ошибиться, и его надо думать вместе. Ниже — четыре подвопроса, каждый с пространством решений. Рисую геометрию, формулирую вопрос; ответы — за тобой/совместно.</p>
+
+  <div class="subq">
+    <h4>8a. Память между ядрами</h4>
+    <div class="variants">
+      <div class="variant">
+        <div class="vh"><span class="vname">i. Shared-nothing + копия</span></div>
+<pre>// данные на ядро B = глубокая копия,
+// отправленная по каналу. Владелец-регион
+// никогда не пересекает границу.</pre>
+        <ul class="pc">
+          <li class="p">Простейшая модель владения: ничего не шарится, ноль гонок.</li>
+          <li class="p">Идеально для мелких сообщений.</li>
+          <li class="c">Дорого для крупных данных (копия по объёму).</li>
+        </ul>
+      </div>
+      <div class="variant">
+        <div class="vh"><span class="vname">ii. Process-global shared-аллокатор + free-back</span></div>
+<pre>// крупные буферы — в общем аллокаторе;
+// ядро B читает, по завершении шлёт
+// free-back-сообщение ядру-владельцу A.</pre>
+        <ul class="pc">
+          <li class="p">Без копий крупных данных.</li>
+          <li class="c">Второй аллокатор рядом с регионом — новая ось памяти (риск против N+M).</li>
+          <li class="c">free-back-протокол = ручная дисциплина времени жизни через ядра.</li>
+        </ul>
+      </div>
+      <div class="variant">
+        <div class="vh"><span class="vname">iii. Seastar-шард: передача владения</span></div>
+<pre>// регион/буфер мигрирует на ядро B
+// (move владения), A больше не трогает.
+// нужен «Send»-вывод (см. 8d).</pre>
+        <ul class="pc">
+          <li class="p">Без копий, единая модель владения (move, как линейность).</li>
+          <li class="p">Ложится на уже существующую линейность.</li>
+          <li class="c">Per-core аллокатор: освобождать на чужом ядре нельзя — нужен free-back или возврат владения.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="subq">
+    <h4>8b. Распределение соединений</h4>
+    <div class="variants">
+      <div class="variant">
+        <div class="vh"><span class="vname">i. <code>SO_REUSEPORT</code>, accept на каждом ядре</span></div>
+<pre>// каждое ядро держит свой listen-сокет,
+// ядро &amp; соединение совпадают, данные
+// не пересекают границу.</pre>
+        <ul class="pc">
+          <li class="p">Соединение живёт целиком на одном ядре — нет пересечения границы.</li>
+          <li class="p">Линейно масштабируется, ядро шарит nothing.</li>
+          <li class="c">Балансировка на усмотрение ядра (хэш), возможен перекос.</li>
+        </ul>
+      </div>
+      <div class="variant">
+        <div class="vh"><span class="vname">ii. Один accept + handoff</span></div>
+<pre>// одно ядро принимает, раздаёт fd
+// другим ядрам -&gt; снова пересечение
+// границы (fd + начальное состояние).</pre>
+        <ul class="pc">
+          <li class="p">Точная балансировка нагрузки.</li>
+          <li class="c">Handoff = пересечение границы на каждое соединение (ровно то, чего избегаем).</li>
+          <li class="c">Accept-ядро — потенциальное горлышко.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="subq">
+    <h4>8c. Каналы и backpressure</h4>
+    <div class="variants">
+      <div class="variant">
+        <div class="vh"><span class="vname">i. SPSC на пару ядер</span></div>
+<pre>// по одному lock-free кольцу на
+// направление пары ядер. N*(N-1) колец.</pre>
+        <ul class="pc">
+          <li class="p">Простейший lock-free, максимально быстрый.</li>
+          <li class="c">N² колец при росте числа ядер.</li>
+        </ul>
+      </div>
+      <div class="variant">
+        <div class="vh"><span class="vname">ii. MPSC на ядро-приёмник</span></div>
+<pre>// одно кольцо на ядро-приёмник,
+// много отправителей.</pre>
+        <ul class="pc">
+          <li class="p">N колец вместо N², проще топология.</li>
+          <li class="c">Contention на стороне отправителей.</li>
+        </ul>
+      </div>
+      <div class="variant">
+        <div class="vh"><span class="vname">backpressure / select</span></div>
+<pre>// общий вопрос для обоих: что когда
+// кольцо полно (блок/дроп/await),
+// и нужен ли select по нескольким.</pre>
+        <ul class="pc">
+          <li class="p">Нужно решить семантику «полно»: await на месте ложится на async-модель.</li>
+          <li class="c"><code>select</code> по нескольким источникам — отдельная конструкция.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="subq">
+    <h4>8d. «Send»-ность — что можно пересылать через ядро</h4>
+    <div class="variants">
+      <div class="variant">
+        <div class="vh"><span class="vname">i. Структурный вывод (без аннотаций)</span></div>
+<pre>// тип «Send», если внутри нет
+// локального Handle/Region этого ядра.
+// Выводится из структуры, не объявляется.</pre>
+        <ul class="pc">
+          <li class="p">Ноль аннотаций — ложится на «без классов типов», выводится сам.</li>
+          <li class="p">В духе orto: свойство — тень структуры, не объявление способности.</li>
+          <li class="c">Точное правило — открыто (что именно делает тип не-Send: только локальные хендлы? сырые указатели? linear-ресурсы конкретного ядра?).</li>
+        </ul>
+      </div>
+      <div class="variant">
+        <div class="vh"><span class="vname">ii. Явный маркер (как Rust Send)</span></div>
+<pre>// тип объявляет Send-способность.</pre>
+        <ul class="pc">
+          <li class="p">Явно и предсказуемо.</li>
+          <li class="c">Пахнет классом типов / способностью — против вашей доктрины (вид, не способность).</li>
+          <li class="c">Ручная аннотация там, где структура и так всё знает.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="opinion open">
+    Не подсвечиваю — это <b>тот самый</b> глубокий узел, где надо думать вместе и можно ошибиться. Что я <b>вижу</b> как тяготение (но не утверждаю): 8a-iii + 8b-i + 8d-i образуют связную геометрию — «соединение целиком на одном ядре (shared-nothing), владение мигрирует move’ом только когда надо, Send выводится структурно как тень линейности». Это переиспользует уже имеющуюся линейность вместо новой оси. Но: per-core аллокатор + free-back (8a) — реально нерешённая часть, и она тащит за собой 8c. <b>Это единственный вопрос, который я бы предложил не закрывать на бумаге сейчас, а вынести в отдельную глубокую сессию</b> — он не на крит-пути к первому числу (одноядерный HTTP его не требует) и заслуживает того же уровня разбора, что и память/линейность. Твой звонок: думаем сейчас или паркуем до после первого бенча.
+  </div>
+  <div class="decision"><strong>Решение Francois</strong><div class="answer"></div></div>
+</section>
+
+<!-- ============================ Q9 ============================ -->
+<section class="q" id="q9">
+  <div class="qhead">
+    <span class="qnum">#9</span>
+    <h2>Threading (один хост, до кросс-ядра)</h2>
+    <span class="badge lean">выразимо как есть → stdlib</span>
+  </div>
+  <p class="prim"><b>Примитив:</b> ОС-потоки + каналы как линейные типы + атомики через extern.</p>
+  <p class="ctx">Уже выразимо существующей линейностью — не требует новой концепции, только работа в stdlib + extern-обёртки. Вопрос здесь почти исполнительский (форма API), не дизайнерский. Привожу для полноты и чтобы зафиксировать, что новой оси языка не нужно.</p>
+
+  <div class="variants">
+    <div class="variant rec">
+      <div class="vh"><span class="vname">A. Чистая stdlib на линейных типах</span><span class="vtag rec">склоняюсь</span></div>
+<pre>linear struct Thread { id: int }
+fn drop_Thread(t: Thread) -&gt; int { pthread_join(t.id) }
+
+linear struct Sender   { ... }
+linear struct Receiver { ... }
+// atomics: extern fn atomic_add(...) -&gt; int
+// барьеры памяти — из C.
+let t = spawn_thread(fn() -&gt; int { work() });
+// drop_Thread = join в конце scope</pre>
+      <ul class="pc">
+        <li class="p">Ноль новой семантики языка — линейность + extern, как <code>Ring</code>/<code>Socket</code>.</li>
+        <li class="p">join-at-scope автоматически из <code>drop_Thread</code> — паттерн уже работает.</li>
+        <li class="c">Большая stdlib-работа (channels, atomics-обёртки).</li>
+        <li class="c">Пересекается с кросс-ядром (#8): не строить так, чтобы потом конфликтовать с thread-per-core.</li>
+      </ul>
+    </div>
+
+    <div class="variant">
+      <div class="vh"><span class="vname">B. Расширить языковой <code>spawn</code> на потоки</span></div>
+<pre>// сейчас spawn = async-task на одном ядре.
+// Распространить на ОС-потоки на уровне языка.</pre>
+      <ul class="pc">
+        <li class="p">Единый <code>spawn</code> для async и потоков.</li>
+        <li class="c">Смешивает две разные модели (кооперативный task vs ОС-поток) под одним именем — lying-category (taste §6).</li>
+        <li class="c">Новая семантика языка там, где stdlib достаточно.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="opinion">
+    <b>Склоняюсь к A</b> — и это согласуется с вашей же записью в ROADMAP: «не требует новой концепции, большая работа в stdlib». Единственная оговорка: форму каналов стоит проектировать <b>с оглядкой на #8</b> (кросс-ядро), чтобы threading-API и cross-core-API не оказались двумя разными словами для одного. Поэтому: либо строим A после того, как у #8 хотя бы определена модель каналов, либо сознательно помечаем threading-каналы как временный single-host вариант. Низкий приоритет относительно крит-пути.
+  </div>
+  <div class="decision"><strong>Решение Francois</strong><div class="answer"></div></div>
+</section>
+
+<!-- ============================ Q10 ============================ -->
+<section class="q" id="q10">
+  <div class="qhead">
+    <span class="qnum">#10</span>
+    <h2>Type-level alignment</h2>
+    <span class="badge lean">мелочь → оставить как есть</span>
+  </div>
+  <p class="prim"><b>Примитив:</b> кодировать выравнивание региона в типе vs рантайм-аргументом.</p>
+  <p class="ctx">Сейчас alignment — рантайм-keyword: <code>aligned_region(N, A)</code>. Альтернатива — затащить его в тип (<code>Region[Page]</code>). Маленький вопрос, привожу для полноты.</p>
+
+  <div class="variants">
+    <div class="variant rec">
+      <div class="vh"><span class="vname">A. Рантайм-аргумент (как сейчас)</span><span class="vtag now">сейчас</span></div>
+<pre>arena aln = aligned_region(4096, 4096);
+// один тип Region, выравнивание — параметр.</pre>
+      <ul class="pc">
+        <li class="p">Один тип <code>Region</code> — функции не плодят варианты по выравниванию.</li>
+        <li class="p">Просто, явно, уже работает.</li>
+        <li class="c">Выравнивание не отражено в типе (нельзя статически требовать page-aligned).</li>
+      </ul>
+    </div>
+
+    <div class="variant">
+      <div class="vh"><span class="vname">B. Type-level <code>Region[Page]</code></span></div>
+<pre>fn dma(r: Region[Page]) -&gt; ... { ... }
+// тип гарантирует выравнивание статически.</pre>
+      <ul class="pc">
+        <li class="p">Статическая гарантия выравнивания на границе функции.</li>
+        <li class="c">Расщепляет <code>Region</code> на семейство типов — против «один тип Region, один способ».</li>
+        <li class="c">Сложность системы типов ради редкого кейса (DMA/mmap).</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="opinion">
+    <b>Склоняюсь оставить A.</b> <code>Region[Page]</code> расщепляет единый <code>Region</code> на семейство ради статической гарантии, нужной в узких кейсах (DMA/GPU/mmap) — цена «один тип, один способ» выше выигрыша. Рантайм-keyword честен и прост. Пересмотрим, только если статическое требование выравнивания реально заболит. Низкий приоритет.
+  </div>
+  <div class="decision"><strong>Решение Francois</strong><div class="answer"></div></div>
+</section>
+
+<footer>
+  <p><b>Как пользоваться:</b> заполни блоки «Решение Francois» (хоть кратко). Где я подсветил склонение — можешь просто написать «ок» / «беру» / «нет, вариант X». Где <i>открыто</i> (#8, частично #0, #4, #7) — там нужен твой содержательный звонок или пометка «обсудить вживую».</p>
+  <p><b>После заполнения</b> верни файл — и я либо строю решённое, либо запускаю параллельных агентов (#0 growable + stdlib-веер), как договаривались: A один на компиляторе, остальные по своему новому файлу.</p>
+  <p style="margin-top:14px;color:#999">Все примеры кода — на проверенном синтаксисе orto из <code>examples/</code> и <code>std/</code>. Факт про косвенность хендла (основание #0) проверен по <code>lib/emit.ml</code>.</p>
+</footer>
+
+</div>
+</body>
+</html>

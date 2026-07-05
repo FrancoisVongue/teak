@@ -65,14 +65,24 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
       Queue.add (name, ts) fn_queue
     end
   in
-  (* For a linear ADT/record instantiation, force-include its drop fn
-     in the mono'd output. The drop fn is non-generic and named by the
-     `drop_fn_name_for` convention applied to the mono'd type name. *)
+  (* Set of every function actually defined in the program (includes the
+     auto-cascade drops synthesised during type-checking). *)
+  let defined_fns : (string, unit) Hashtbl.t = Hashtbl.create 64 in
+  List.iter (fun (f : Check.T.func) ->
+    Hashtbl.replace defined_fns f.name ()) prog.funcs;
+  let fn_is_defined name = Hashtbl.mem defined_fns name in
+  (* For a linear ADT/record instantiation, force-include its drop fn in the
+     mono'd output — BUT only if a drop actually exists. A managed type with
+     no `on_exit`/drop (a forced-choice obligation) has no drop to request;
+     its discharge is an explicit terminal, checked at compile time. *)
   let request_drop_for_linear (orig_name : string) (ts : ty list) (is_linear : bool) =
-    if is_linear then
+    if is_linear then begin
       let mono_name = mangle_name orig_name ts in
       let drop_name = Check.drop_fn_name_for mono_name in
-      request_fn drop_name []
+      let generic_drop = Check.drop_fn_name_for orig_name in
+      if fn_is_defined drop_name || fn_is_defined generic_drop then
+        request_fn drop_name []
+    end
   in
   let request_adt name ts =
     if not (Hashtbl.mem adt_seen (name, ts)) then begin
@@ -283,6 +293,8 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         Check.T.TETryAt (rewrite_expr subst a, rewrite_expr subst i, rt t)
     | Check.T.TEDrop (e, t) ->
         Check.T.TEDrop (rewrite_expr subst e, rt t)
+    | Check.T.TEMove (e, t) ->
+        Check.T.TEMove (rewrite_expr subst e, rt t)
     | Check.T.TEReset e ->
         Check.T.TEReset (rewrite_expr subst e)
     | Check.T.TEAwait (e, t, p) ->

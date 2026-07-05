@@ -80,6 +80,7 @@ let rec free_vars (e : expr) : SS.t =
   | ENullPtr _ -> SS.empty
   | ETryAt (a, i) -> SS.union (free_vars a) (free_vars i)
   | EDrop e -> free_vars e
+  | EMove e -> free_vars e
   | EReset e -> free_vars e
   | EAwait e | EAwaitAllDyn e | ESpawn e -> free_vars e
   | EAwaitAll branches -> u (List.map free_vars branches)
@@ -177,6 +178,7 @@ let lift (prog : program) : program =
     | EPtrCast (t, e) -> EPtrCast (t, xform e)
     | ETryAt (a, i) -> ETryAt (xform a, xform i)
     | EDrop e -> EDrop (xform e)
+    | EMove e -> EMove (xform e)
     | EReset e -> EReset (xform e)
     | EDeref p -> EDeref (xform p)
     | EAwait e -> EAwait (xform e)

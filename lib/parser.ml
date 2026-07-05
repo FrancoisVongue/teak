@@ -425,7 +425,7 @@ and parse_atom st =
   | TIf | TMatch | TWhile | TBreak | TContinue | TFor | TReturn
   | TLen | TSlice
   | TToInt | TToByte | TToFloat
-  | TCAlloc | TCFree | TNullPtr | TIsNull | TAsPtr | TPtrCast | TTryAt | TDrop | TReset
+  | TCAlloc | TCFree | TNullPtr | TIsNull | TAsPtr | TPtrCast | TTryAt | TDrop | TMove | TReset
   | TRegion | TStackRegion | TAlignedRegion
   | TPrint | TPrintln -> parse_atom_consume st
   | t -> raise (Parse_error
@@ -748,6 +748,11 @@ and parse_atom_consume st =
       let e = parse_expr st in
       expect st TRParen;
       EDrop e
+  | TMove ->
+      expect st TLParen;
+      let e = parse_expr st in
+      expect st TRParen;
+      EMove e
   | TReset ->
       expect st TLParen;
       let e = parse_expr st in
@@ -1090,7 +1095,18 @@ let parse_extern st =
 
 (* ---------- type declarations ---------- *)
 
-let parse_struct st ~is_linear : top_decl =
+(* Returns the record decl plus any top-level functions synthesised from
+   inline terminals. A struct body holds fields (`name : ty`) and — for the
+   managed/Owner model — inline terminals:
+
+     on_exit close(s) { ... }   -> fn drop_<Name>(s: <Name>) -> int { ... }
+     commit(t) -> int { ... }   -> fn commit(t: <Name>) -> int { ... }
+
+   `on_exit` is the terminal run automatically at scope exit (desugars to the
+   type's drop fn, reusing the existing drop machinery). A bare terminal keeps
+   its own name and is an explicit consuming operation. Both take the value by
+   an explicit `self` parameter — no hidden receiver. *)
+let parse_struct st ~is_linear : top_decl list =
   expect st TStruct;
   let name = match eat st with
     | TCtorIdent s -> s
@@ -1099,33 +1115,69 @@ let parse_struct st ~is_linear : top_decl =
          (Token.show t)))
   in
   let type_params = parse_type_params st in
+  let self_ty = TyApp (name, List.map (fun p -> TyVar p) type_params) in
   expect st TLBrace;
-  let rec collect_fields () =
-    if peek st = TRBrace then []
-    else
-      let fname = match eat st with
-        | TIdent s -> s
-        | t -> raise (Parse_error
-          (Printf.sprintf "expected field name, got %s" (Token.show t)))
-      in
-      expect st TColon;
-      let fty = parse_ty st in
-      let rest =
-        if peek st = TComma then begin
-          advance st;
-          collect_fields ()
-        end else []
-      in
-      (fname, fty) :: rest
+  let fields = ref [] in
+  let funcs  = ref [] in
+  let parse_terminal ~is_on_exit fname =
+    expect st TLParen;
+    let pname = match eat st with
+      | TIdent s -> s
+      | t -> raise (Parse_error
+        (Printf.sprintf "expected self-parameter name in terminal, got %s"
+           (Token.show t)))
+    in
+    expect st TRParen;
+    let return_ty =
+      if peek st = TArrow then (advance st; parse_ty st) else TyInt
+    in
+    let body = parse_block st in
+    let synth_name = if is_on_exit then "drop_" ^ name else fname in
+    funcs := { name = synth_name; type_params;
+               params = [(pname, self_ty)]; return_ty; body } :: !funcs
   in
-  let fields = collect_fields () in
+  let rec collect () =
+    if peek st = TRBrace then ()
+    else begin
+      (match peek st with
+       | TOnExit ->
+           advance st;
+           let fname = match eat st with
+             | TIdent s -> s
+             | t -> raise (Parse_error
+               (Printf.sprintf "expected terminal name after `on_exit`, got %s"
+                  (Token.show t)))
+           in
+           parse_terminal ~is_on_exit:true fname
+       | TIdent fname ->
+           advance st;
+           (match peek st with
+            | TColon ->
+                advance st;
+                let fty = parse_ty st in
+                fields := (fname, fty) :: !fields
+            | TLParen ->
+                parse_terminal ~is_on_exit:false fname
+            | t -> raise (Parse_error
+              (Printf.sprintf
+                 "in struct body, expected `:` (field) or `(` (terminal) after `%s`, got %s"
+                 fname (Token.show t))))
+       | t -> raise (Parse_error
+         (Printf.sprintf "expected field name, terminal, or `}`, got %s"
+            (Token.show t))));
+      if peek st = TComma then advance st;
+      collect ()
+    end
+  in
+  collect ();
   expect st TRBrace;
-  TopRecord {
+  let record = TopRecord {
     rec_name = name;
     rec_type_params = type_params;
-    rec_fields = fields;
+    rec_fields = List.rev !fields;
     rec_is_linear = is_linear;
-  }
+  } in
+  record :: List.rev_map (fun f -> TopFunc f) !funcs
 
 let parse_enum st ~is_linear : top_decl =
   expect st TEnum;
@@ -1291,22 +1343,27 @@ let parse (toks : token list) : program =
         let f = parse_func st in
         loop terminator (TopFunc f :: acc)
     | TStruct ->
-        let td = parse_struct st ~is_linear:false in
-        loop terminator (td :: acc)
+        let tds = parse_struct st ~is_linear:false in
+        loop terminator (List.rev_append tds acc)
     | TEnum ->
         let td = parse_enum st ~is_linear:false in
         loop terminator (td :: acc)
-    | TLinear ->
+    | TLinear | TManaged ->
+        (* `managed` is the surface keyword of the Owner/terminal model;
+           `linear` is its legacy spelling. Same move-only discipline.
+           Stage 1: treated identically. *)
+        let kw = peek st in
         advance st;
         (match peek st with
          | TStruct ->
-             let td = parse_struct st ~is_linear:true in
-             loop terminator (td :: acc)
+             let tds = parse_struct st ~is_linear:true in
+             loop terminator (List.rev_append tds acc)
          | TEnum ->
              let td = parse_enum st ~is_linear:true in
              loop terminator (td :: acc)
          | t -> raise (Parse_error
-           (Printf.sprintf "expected `struct` or `enum` after `linear`, got %s"
+           (Printf.sprintf "expected `struct` or `enum` after `%s`, got %s"
+              (match kw with TManaged -> "managed" | _ -> "linear")
               (Token.show t))))
     | TType ->
         advance st;
@@ -1353,7 +1410,7 @@ let parse (toks : token list) : program =
         let body = parse_block st in
         loop terminator (TopTest { test_name = name; test_body = body } :: acc)
     | t -> raise (Parse_error
-      (Printf.sprintf "expected `use`, `fn`, `struct`, `enum`, `linear`, `type`, `extern`, `test`, or `namespace`, got %s"
+      (Printf.sprintf "expected `use`, `fn`, `struct`, `enum`, `linear`, `managed`, `type`, `extern`, `test`, or `namespace`, got %s"
          (Token.show t)))
   in
   loop TEOF []

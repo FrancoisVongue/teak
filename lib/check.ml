@@ -87,6 +87,9 @@ module T = struct
                   (* try_at(a, i) — third field is result Option[T] *)
     | TEDrop  of expr * ty
                   (* drop(x) — second field is x's (linear) type *)
+    | TEMove  of expr * ty
+                  (* move x — explicit handover; transparent at runtime,
+                     consumes its operand in the move-checker *)
     | TEReset of expr
                   (* reset(r) — rewind region r (operand is a region var) *)
     | TEDeref  of expr * ty
@@ -453,6 +456,32 @@ type env = {
   fns     : (string * (string list * (ty list * ty))) list;
 }
 
+(* Stage 3 (optional drop / forced-choice): true iff `t` is a USER-declared
+   linear record/enum that has NO `drop_<Type>` (no `on_exit`). Such a value
+   has no auto-discharge and must be explicitly consumed via one of its
+   terminals before its scope ends. Region/Task/Stream are builtins (absent
+   from `records`/`types`) and `Handle[..]`/tuples are induced-linear
+   containers — all return false, preserving their existing behaviour. *)
+let needs_user_drop_but_missing (env : env) (t : ty) : bool =
+  match prune t with
+  | TyApp (n, _) ->
+      let has_user_drop = List.mem_assoc (drop_fn_name_for n) env.fns in
+      (match List.assoc_opt n env.records with
+       | Some rd when rd.rec_is_linear ->
+           (* Stage 4: a managed record that owns at least one linear field
+              gets an auto-generated cascade drop (emit), so it is NOT
+              missing — it auto-discharges. Only a managed record with no
+              linear fields and no user drop is a pure obligation that must
+              be consumed via an explicit terminal. *)
+           let has_linear_field =
+             List.exists (fun (_, ft) -> is_linear_ty ft) rd.rec_fields in
+           not (has_user_drop || has_linear_field)
+       | _ ->
+         (match List.assoc_opt n env.types with
+          | Some td when td.is_linear -> not has_user_drop
+          | _ -> false))
+  | _ -> false
+
 let split_program (prog : program)
   : type_decl list * record_decl list * func list * extern_decl list * test_decl list =
   let rec loop ts rs fs es ks = function
@@ -783,13 +812,22 @@ let build_env
       in
       let ret_ty =
         validate_ty type_env record_env in_scope f.return_ty in
+      (* A Region may NOT be returned. Unlike Socket/File/Tx (which hold an fd
+         or a Handle — no stack memory, always sound to move up), a Region can
+         be STACK-backed (`stack_region`), and returning that would hand the
+         caller a pointer into a dead stack frame. There is one `Region` type,
+         so the compiler can't tell stack from heap without analysis — and we
+         want no escape analysis. So the trivial, explicit rule: regions are
+         pinned to their creating scope; if a callee needs to allocate, pass a
+         region DOWN and return Handles. (This is the only owner that holds
+         stack memory, so it's the only one pinned.) *)
       (match prune ret_ty with
        | TyApp ("Region", _) ->
            raise (Type_error
              (Printf.sprintf
-                "function %S cannot return Region — \
-                 each Region must be created in the scope that frees it; \
-                 caller should call region(...) and pass it in"
+                "function %S cannot return Region — a region is pinned to the \
+                 scope that creates and frees it (it may be stack-backed). \
+                 Pass a region in and return Handles instead."
                 f.name))
        | _ -> ());
       (f.name, (f.type_params, (param_tys, ret_ty)))) funcs
@@ -819,21 +857,15 @@ let build_env
               records = record_env;
               ctors = ctor_env;
               fns = user_sigs @ extern_sigs } in
-  (* For every user-declared linear type, require a matching drop fn
-     in the same module. The fn is found by name convention. *)
-  let check_drop_fn type_name =
-    let fn_name = drop_fn_name_for type_name in
-    if not (List.mem_assoc fn_name env.fns) then
-      raise (Type_error
-        (Printf.sprintf
-           "linear type %S requires a drop function %S in the same module \
-            (signature: fn %s(<param>: %s) -> int)"
-           type_name fn_name fn_name type_name))
-  in
-  List.iter (fun (td : type_decl) ->
-    if td.is_linear then check_drop_fn td.type_name) types;
-  List.iter (fun (rd : record_decl) ->
-    if rd.rec_is_linear then check_drop_fn rd.rec_name) records;
+  (* Stage 3: a `drop_<Type>` (a.k.a. `on_exit`) is now OPTIONAL.
+       - present  -> auto-discharge at scope exit (RAII, single-terminal).
+       - absent   -> no default; the move-checker FORCES an explicit
+                     terminal on every exit path (forced-choice, e.g.
+                     commit/abort). See `needs_user_drop_but_missing` and the
+                     forced-consume check in the move analysis.
+     Region/Task/Stream are builtins with their own discharge and are not in
+     `records`/`types`, so they are unaffected. *)
+  ignore types; ignore records;
   env
 
 (* ---------- recursive type detection ---------- *)
@@ -1515,7 +1547,9 @@ let rec infer (env : env) (tparams : string list)
       let (tb, tb_ty) = infer env tparams body_vars body in
       let auto_drop =
         if x_actual = "_" then false
-        else is_linear_ty tv_ty
+        (* No `drop_<Type>`/`on_exit` -> nothing to auto-run at scope exit;
+           the move-checker forces explicit consumption instead. *)
+        else is_linear_ty tv_ty && not (needs_user_drop_but_missing env tv_ty)
       in
       (T.TELet (x_actual, tv_ty, tv, tb, tb_ty, auto_drop), tb_ty)
 
@@ -2189,7 +2223,37 @@ let rec infer (env : env) (tparams : string list)
              "drop() requires a linear value (Region or a user `linear` \
               type), got %s"
              (show_ty (zonk tx_ty))));
+      (* A managed type with no `on_exit`/drop has nothing for drop() to run;
+         it must be discharged through one of its explicit terminals. *)
+      if needs_user_drop_but_missing env tx_ty then
+        raise (Type_error
+          (Printf.sprintf
+             "drop() needs an `on_exit` terminal to run, but %s has none — \
+              consume it via one of its terminals instead"
+             (show_ty (zonk tx_ty))));
       (T.TEDrop (tx, tx_ty), TyTuple [])
+
+  | EMove x_e ->
+      (* `move x` is an explicit ownership handover at a call site: it consumes
+         x in the caller (the move-checker does this), making the transfer
+         visible. It is restricted to managed types with no auto-cleanup
+         (forced-choice terminals like commit/abort): there is nothing to free,
+         so handing the value to a borrowing callee is sound, and the terminal
+         discharges the obligation. Auto-discharge owners (with on_exit/cascade)
+         don't need move — they clean up at their own scope. *)
+      let (tx, tx_ty) = infer env tparams vars x_e in
+      if not (is_linear_ty tx_ty) then
+        raise (Type_error
+          (Printf.sprintf
+             "move requires a managed (linear) value, got %s"
+             (show_ty (zonk tx_ty))));
+      if not (needs_user_drop_but_missing env tx_ty) then
+        raise (Type_error
+          (Printf.sprintf
+             "move is only for managed types discharged by explicit terminals \
+              (no on_exit/cascade); %s auto-discharges and does not need move"
+             (show_ty (zonk tx_ty))));
+      (T.TEMove (tx, tx_ty), tx_ty)
 
   | EReset r_e ->
       (* reset(r) rewinds the region in place: it must write back the
@@ -2571,6 +2635,8 @@ let rec zonk_expr (e : T.expr) : T.expr =
       T.TETryAt (zonk_expr a, zonk_expr i, zonk_expect t)
   | T.TEDrop (e, t) ->
       T.TEDrop (zonk_expr e, zonk_expect t)
+  | T.TEMove (e, t) ->
+      T.TEMove (zonk_expr e, zonk_expect t)
   | T.TEReset e ->
       T.TEReset (zonk_expr e)
   | T.TEAwait (e, t, p) ->
@@ -2717,6 +2783,16 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
         let outer_had = SM.find_opt x live in
         let live_inner = SM.add x vt live in
         let (b', live_after) = check_moves_expr env live_inner in_tail b in
+        (* Forced-choice: a managed value whose type has no `on_exit`/drop has
+           no auto-discharge. If it is still live when its scope ends, it was
+           never consumed — that is the forgotten-terminal bug, caught here. *)
+        if SM.mem x live_after && needs_user_drop_but_missing env vt then
+          raise (Type_error
+            (Printf.sprintf
+               "managed value %S has no `on_exit` terminal and was not \
+                consumed on this path — call one of its terminals (e.g. \
+                commit/abort) before the scope ends"
+               x));
         (* If x was consumed somewhere in the body (drop, tail-return),
            it's no longer in live_after — skip the scope-end auto-drop
            to avoid double-free. *)
@@ -2937,6 +3013,16 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       in
       (T.TEDrop (sub', t), live)
 
+  | T.TEMove (sub, t) ->
+      (* `move x` consumes x: after the handover the name is no longer live,
+         so any later use is a use-after-move compile error. *)
+      let (sub', live) = check_moves_expr env live false sub in
+      let live = match sub' with
+        | T.TEVar (x, _) when is_linear_ty t -> SM.remove x live
+        | _ -> live
+      in
+      (T.TEMove (sub', t), live)
+
   | T.TEReset sub ->
       (* reset borrows the region (does not consume it) — like ref(r, _). *)
       let (sub', live) = check_moves_expr env live false sub in
@@ -3120,6 +3206,7 @@ let rec body_has_suspension (e : T.expr) : bool =
   | TETryAt (a, i, _) ->
       body_has_suspension a || body_has_suspension i
   | TEDrop (e, _) -> body_has_suspension e
+  | TEMove (e, _) -> body_has_suspension e
   | TEReset e -> body_has_suspension e
   | TETuple (es, _) -> List.exists body_has_suspension es
   | TETupleIdx (e, _, _) -> body_has_suspension e
@@ -3292,6 +3379,40 @@ let check (prog : program) : T.program =
   let externs = builtin_orto_nop_decl :: externs in
   let env = build_env types records funcs externs in
   check_no_recursive_types env.types env.records;
+  (* Stage 4: synthesise an auto-cascade drop for every managed record that
+     owns linear fields but has no user-written drop. The body drops each
+     linear field in order; it is type-checked and monomorphised like any
+     ordinary function, so the discharge of an owner stored in a struct field
+     needs no hand-written cascade. (mark_linear has already run in build_env,
+     so is_linear_ty is accurate here.) *)
+  let synth_cascade_drops =
+    List.filter_map (fun (rd : record_decl) ->
+      let drop_nm = drop_fn_name_for rd.rec_name in
+      let already = List.exists (fun (f : func) -> f.name = drop_nm) funcs in
+      let linear_fields =
+        List.filter (fun (_, ft) -> is_linear_ty ft) rd.rec_fields in
+      if rd.rec_is_linear && linear_fields <> [] && not already then
+        let self_ty =
+          TyApp (rd.rec_name, List.map (fun p -> TyVar p) rd.rec_type_params) in
+        let body =
+          List.fold_right
+            (fun (fname, _) acc ->
+               ELet ("_", false, None,
+                     EDrop (EField (EVar "self", fname)), acc))
+            linear_fields (EInt 0L)
+        in
+        Some { name = drop_nm; type_params = rd.rec_type_params;
+               params = [("self", self_ty)]; return_ty = TyInt; body }
+      else None) records
+  in
+  (* Register the synthesised drops in env.fns so check_func finds their
+     signatures, then append them to the funcs to be checked/lowered. *)
+  let synth_sigs =
+    List.map (fun (f : func) ->
+      (f.name, (f.type_params, (List.map snd f.params, f.return_ty))))
+      synth_cascade_drops in
+  let env = { env with fns = env.fns @ synth_sigs } in
+  let funcs = funcs @ synth_cascade_drops in
   let typed_funcs = List.map (check_func env) funcs in
   (* Closures lifted out of function bodies during check_func. *)
   let typed_funcs = typed_funcs @ List.rev !lifted_funcs in

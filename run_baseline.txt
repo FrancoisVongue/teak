@@ -9,6 +9,7 @@ composite RUN 196
 constants RUN 2
 db NOMAIN_OR_ERR
 db_driver NOMAIN_OR_ERR
+demo_connection RUN 0
 fact RUN 176
 file_handle GCCFAIL
 file_io GCCFAIL
@@ -28,6 +29,10 @@ linear_basic RUN 0
 list RUN 6
 log_format RUN 29
 loops_basic RUN 55
+managed_basic RUN 0
+managed_cascade RUN 0
+managed_move RUN 0
+managed_terminal RUN 0
 netlink_msg RUN 0
 ops RUN 100
 option_result RUN 11
