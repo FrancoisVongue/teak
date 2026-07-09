@@ -694,21 +694,24 @@ and parse_atom_consume st =
       let hi = parse_expr st in
       expect st TRParen;
       ESlice (a, lo, hi)
+  (* to_int / to_byte / to_float are just the uniform `to_<T>` cast (ECast) for
+     the three named types — no dedicated AST nodes. `int` is special only in
+     that its result type is TyInt (handled in the checker), not TyApp. *)
   | TToInt ->
       expect st TLParen;
       let e = parse_expr st in
       expect st TRParen;
-      EToInt e
+      ECast ("int", e)
   | TToByte ->
       expect st TLParen;
       let e = parse_expr st in
       expect st TRParen;
-      EToByte e
+      ECast ("byte", e)
   | TToFloat ->
       expect st TLParen;
       let e = parse_expr st in
       expect st TRParen;
-      EToFloat e
+      ECast ("float", e)
   | TCAlloc ->
       expect st TLBracket;
       let t = parse_ty st in

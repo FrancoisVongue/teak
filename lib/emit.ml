@@ -91,8 +91,6 @@ let rec collect_unsafe (e : Check.T.expr) : unit =
   | TEAssignIdx (a, i, v, _) -> go a; go i; go v
   | TELen (a, _) -> go a
   | TESlice (a, lo, hi, _) -> go a; go lo; go hi
-  | TEToInt a | TEToByte a
-  | TEToFloat a | TEToIntFromFloat a -> go a
   | TECast (_, a) -> go a
   | TECAlloc (_, n, _) -> go n
   | TECFree a | TEIsNull a -> go a
@@ -408,11 +406,7 @@ let rec collect_expr (e : Check.T.expr) : unit =
   | Check.T.TELen (e, t) -> collect_expr e; collect_ty t
   | Check.T.TESlice (a, lo, hi, t) ->
       collect_expr a; collect_expr lo; collect_expr hi; collect_ty t
-  | Check.T.TEToInt e  -> collect_expr e
-  | Check.T.TEToByte e -> collect_expr e
-  | Check.T.TEToFloat e -> collect_expr e
   | Check.T.TECast (_, e) -> collect_expr e
-  | Check.T.TEToIntFromFloat e -> collect_expr e
   | Check.T.TECAlloc (et, n, t) -> collect_ty et; collect_expr n; collect_ty t
   | Check.T.TECFree p -> collect_expr p
   | Check.T.TENullPtr t -> collect_ty t
@@ -479,8 +473,6 @@ let rec scan_fnvals (e : Check.T.expr) : unit =
   | TEAssignIdx (a, i, v, _) -> scan_fnvals a; scan_fnvals i; scan_fnvals v
   | TELen (e, _) -> scan_fnvals e
   | TESlice (a, lo, hi, _) -> scan_fnvals a; scan_fnvals lo; scan_fnvals hi
-  | TEToInt e | TEToByte e
-  | TEToFloat e | TEToIntFromFloat e -> scan_fnvals e
   | TECast (_, e) -> scan_fnvals e
   | TECAlloc (_, n, _) -> scan_fnvals n
   | TECFree p | TEIsNull p -> scan_fnvals p
@@ -938,11 +930,7 @@ let alpha_rename_func (f : Check.T.func) : Check.T.func =
     | TELen (e, t) -> TELen (rn env e, t)
     | TESlice (a, lo, hi, t) ->
         TESlice (rn env a, rn env lo, rn env hi, t)
-    | TEToInt e  -> TEToInt (rn env e)
-    | TEToByte e -> TEToByte (rn env e)
-    | TEToFloat e -> TEToFloat (rn env e)
     | TECast (t, e) -> TECast (t, rn env e)
-    | TEToIntFromFloat e -> TEToIntFromFloat (rn env e)
     | TECAlloc (et, n, t) -> TECAlloc (et, rn env n, t)
     | TECFree p -> TECFree (rn env p)
     | TENullPtr t -> TENullPtr t
@@ -1138,11 +1126,8 @@ let ty_of_expr : Check.T.expr -> ty = function
   | Check.T.TEAssignIdx (_, _, _, t) -> t
   | Check.T.TELen (_, t) -> t
   | Check.T.TESlice (_, _, _, t) -> t
-  | Check.T.TEToInt _  -> TyInt
-  | Check.T.TEToByte _ -> TyApp ("byte", [])
-  | Check.T.TEToFloat _ -> TyApp ("float", [])
+  | Check.T.TECast ("int", _) -> TyInt
   | Check.T.TECast (t, _) -> TyApp (t, [])
-  | Check.T.TEToIntFromFloat _ -> TyInt
   | Check.T.TECAlloc (_, _, t) -> t
   | Check.T.TECFree _ -> TyInt
   | Check.T.TENullPtr t -> t
@@ -1901,36 +1886,20 @@ let rec emit_expr
       ] in
       { stmts; value = res_var }
 
-  | Check.T.TEToInt sub ->
-      let cs = emit_expr ctor_map sub in
-      let value = match ty_of_expr sub with
-        | TyPtr _ ->
-            (* address of a raw pointer as an integer *)
-            Printf.sprintf "((long long)(intptr_t)(%s))" cs.value
-        | _ -> Printf.sprintf "((long long)(%s))" cs.value
-      in
-      { stmts = cs.stmts; value }
-
-  | Check.T.TEToByte sub ->
-      let cs = emit_expr ctor_map sub in
-      { stmts = cs.stmts;
-        value = Printf.sprintf "((uint8_t)(%s))" cs.value }
-
-  | Check.T.TEToFloat sub ->
-      let cs = emit_expr ctor_map sub in
-      { stmts = cs.stmts;
-        value = Printf.sprintf "((double)(%s))" cs.value }
-
   | Check.T.TECast (target, sub) ->
       let cs = emit_expr ctor_map sub in
-      { stmts = cs.stmts;
-        value = Printf.sprintf "((%s)(%s))" (c_type (TyApp (target, []))) cs.value }
-
-  | Check.T.TEToIntFromFloat sub ->
-      let cs = emit_expr ctor_map sub in
-      (* C cast double->int truncates toward zero. *)
-      { stmts = cs.stmts;
-        value = Printf.sprintf "((long long)(%s))" cs.value }
+      (* `int` casts to the word-size signed (long long); a pointer goes through
+         intptr_t for its address. Everything else is a plain C cast to the
+         target's c_type (byte->uint8_t, float->double, matrix types, ...). *)
+      let value =
+        if target = "int" then
+          (match ty_of_expr sub with
+           | TyPtr _ -> Printf.sprintf "((long long)(intptr_t)(%s))" cs.value
+           | _       -> Printf.sprintf "((long long)(%s))" cs.value)
+        else
+          Printf.sprintf "((%s)(%s))" (c_type (TyApp (target, []))) cs.value
+      in
+      { stmts = cs.stmts; value }
 
   | Check.T.TECAlloc (et, n_e, _result_ty) ->
       let cn = emit_expr ctor_map n_e in
@@ -2641,8 +2610,7 @@ let async_collect_locals (body : Check.T.expr) : (string * ty) list =
     | TEAssignIdx (a, i, v, _) -> go a; go i; go v
     | TELen (e, _) -> go e
     | TESlice (a, lo, hi, _) -> go a; go lo; go hi
-    | TECast (_, e)
-    | TEToInt e | TEToByte e | TEToFloat e | TEToIntFromFloat e -> go e
+    | TECast (_, e) -> go e
     | TECAlloc (_, n, _) -> go n
     | TECFree e -> go e
     | TEIsNull e -> go e
@@ -2727,11 +2695,7 @@ let async_rewrite_to_frame
     | TEAssignIdx (a, i, v, t) -> TEAssignIdx (go a, go i, go v, t)
     | TELen (e, t) -> TELen (go e, t)
     | TESlice (a, lo, hi, t) -> TESlice (go a, go lo, go hi, t)
-    | TEToInt e -> TEToInt (go e)
-    | TEToByte e -> TEToByte (go e)
-    | TEToFloat e -> TEToFloat (go e)
     | TECast (t, e) -> TECast (t, go e)
-    | TEToIntFromFloat e -> TEToIntFromFloat (go e)
     | TECAlloc (et, n, rt) -> TECAlloc (et, go n, rt)
     | TECFree e -> TECFree (go e)
     | TEIsNull e -> TEIsNull (go e)
@@ -2811,8 +2775,7 @@ let rec emit_has_suspension (e : Check.T.expr) : bool =
   | TELen (e, _) -> emit_has_suspension e
   | TESlice (a, lo, hi, _) ->
       emit_has_suspension a || emit_has_suspension lo || emit_has_suspension hi
-  | TECast (_, e)
-  | TEToInt e | TEToByte e | TEToFloat e | TEToIntFromFloat e ->
+  | TECast (_, e) ->
       emit_has_suspension e
   | TECAlloc (_, n, _) -> emit_has_suspension n
   | TECFree e -> emit_has_suspension e
@@ -2881,11 +2844,7 @@ let allocate_await_all_locals_in_body (body : Check.T.expr) : Check.T.expr =
     | TEAssignIdx (a, i, v, t) -> TEAssignIdx (go a, go i, go v, t)
     | TELen (e, t) -> TELen (go e, t)
     | TESlice (a, lo, hi, t) -> TESlice (go a, go lo, go hi, t)
-    | TEToInt e -> TEToInt (go e)
-    | TEToByte e -> TEToByte (go e)
-    | TEToFloat e -> TEToFloat (go e)
     | TECast (t, e) -> TECast (t, go e)
-    | TEToIntFromFloat e -> TEToIntFromFloat (go e)
     | TECAlloc (et, n, t) -> TECAlloc (et, go n, t)
     | TECFree e -> TECFree (go e)
     | TEIsNull e -> TEIsNull (go e)
@@ -2994,11 +2953,7 @@ let rec desugar_let_tuples (e : Check.T.expr) : Check.T.expr =
   | TEAssignIdx (a, i, v, t) -> TEAssignIdx (r a, r i, r v, t)
   | TELen (e, t) -> TELen (r e, t)
   | TESlice (a, lo, hi, t) -> TESlice (r a, r lo, r hi, t)
-  | TEToInt e -> TEToInt (r e)
-  | TEToByte e -> TEToByte (r e)
-  | TEToFloat e -> TEToFloat (r e)
   | TECast (t, e) -> TECast (t, r e)
-  | TEToIntFromFloat e -> TEToIntFromFloat (r e)
   | TECAlloc (et, n, t) -> TECAlloc (et, r n, t)
   | TECFree e -> TECFree (r e)
   | TEIsNull e -> TEIsNull (r e)

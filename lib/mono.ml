@@ -260,16 +260,8 @@ let monomorphize (prog : Check.T.program) : Check.T.program =
         Check.T.TESlice (rewrite_expr subst a,
                          rewrite_expr subst lo,
                          rewrite_expr subst hi, rt t)
-    | Check.T.TEToInt e ->
-        Check.T.TEToInt (rewrite_expr subst e)
-    | Check.T.TEToByte e ->
-        Check.T.TEToByte (rewrite_expr subst e)
-    | Check.T.TEToFloat e ->
-        Check.T.TEToFloat (rewrite_expr subst e)
     | Check.T.TECast (t, e) ->
         Check.T.TECast (t, rewrite_expr subst e)
-    | Check.T.TEToIntFromFloat e ->
-        Check.T.TEToIntFromFloat (rewrite_expr subst e)
     | Check.T.TECAlloc (et, n, rt_) ->
         Check.T.TECAlloc (rt et, rewrite_expr subst n, rt rt_)
     | Check.T.TECFree p ->

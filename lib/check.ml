@@ -59,18 +59,11 @@ module T = struct
                   (* len(a) — result is int *)
     | TESlice  of expr * expr * expr * ty
                   (* slice(a, lo, hi) — sub-handle into the same region *)
-    | TEToInt  of expr
-                  (* to_int(b) — widen byte to int *)
-    | TEToByte of expr
-                  (* to_byte(n) — truncate int to byte (u8) *)
-    | TEToFloat of expr
-                  (* to_float(n) — int → float *)
     | TECast   of string * expr
-                  (* to_<T>(e) — convert e to numeric type T (a C cast) *)
+                  (* to_<T>(e) — convert e to a numeric type T (a C cast).
+                     Covers int/byte/float too; `int` casts to TyInt. *)
     | TEFloat  of float
                   (* float literal *)
-    | TEToIntFromFloat of expr
-                  (* to_int(f) when f : float — truncate-toward-zero *)
     | TECAlloc of ty * expr * ty
                   (* c_alloc[T](n) — elem type T, count, result type TyPtr T *)
     | TECFree  of expr
@@ -2080,47 +2073,12 @@ let rec infer (env : env) (tparams : string list)
       let result_ty = TyApp ("Handle", [elem]) in
       (T.TESlice (ta, tlo, thi, result_ty), result_ty)
 
-  | EToInt sub_e ->
-      let (ts, ts_ty) = infer env tparams vars sub_e in
-      (match prune ts_ty with
-       | TyApp (n, []) when is_float_type n -> (T.TEToIntFromFloat ts, TyInt)
-       | TyInt -> (T.TEToInt ts, TyInt)            (* no-op / identity *)
-       | TyPtr _ -> (T.TEToInt ts, TyInt)          (* raw pointer address as int *)
-       | TyApp (n, []) when is_numeric_type n -> (T.TEToInt ts, TyInt)
-       | TyMeta _ ->
-           unify ts_ty (TyApp ("byte", []));
-           (T.TEToInt ts, TyInt)
-       | t ->
-           raise (Type_error
-             (Printf.sprintf
-                "to_int expects a numeric source, got %s"
-                (show_ty (zonk t)))))
-
-  | EToByte sub_e ->
-      let (ts, ts_ty) = infer env tparams vars sub_e in
-      (try unify ts_ty TyInt
-       with Type_error _ ->
-         raise (Type_error
-           (Printf.sprintf
-              "to_byte expects int, got %s"
-              (show_ty (zonk ts_ty)))));
-      (T.TEToByte ts, TyApp ("byte", []))
-
-  | EToFloat sub_e ->
-      let (ts, ts_ty) = infer env tparams vars sub_e in
-      (try unify ts_ty TyInt
-       with Type_error _ ->
-         raise (Type_error
-           (Printf.sprintf
-              "to_float expects int, got %s"
-              (show_ty (zonk ts_ty)))));
-      (T.TEToFloat ts, TyApp ("float", []))
-
   | ECast (target, sub_e) ->
       let (ts, ts_ty) = infer env tparams vars sub_e in
       let src_ok = match prune ts_ty with
         | TyInt -> true
         | TyApp (n, []) when is_numeric_type n -> true
+        | TyPtr _ when target = "int" -> true   (* raw pointer address as int *)
         | TyMeta _ -> unify ts_ty TyInt; true
         | _ -> false
       in
@@ -2128,7 +2086,10 @@ let rec infer (env : env) (tparams : string list)
         raise (Type_error
           (Printf.sprintf "to_%s expects a numeric source, got %s"
              target (show_ty (zonk ts_ty))));
-      (T.TECast (target, ts), TyApp (target, []))
+      (* `int` is the native word-size signed type (TyInt), not a matrix entry;
+         every other target names a numeric-matrix type (TyApp). *)
+      let result_ty = if target = "int" then TyInt else TyApp (target, []) in
+      (T.TECast (target, ts), result_ty)
 
   | ECAlloc (elem_t, n_e) ->
       let elem_t = validate_ty_for_ascription env tparams elem_t in
@@ -2624,11 +2585,7 @@ let rec zonk_expr (e : T.expr) : T.expr =
       T.TELen (zonk_expr e, zonk_expect t)
   | T.TESlice (a, lo, hi, t) ->
       T.TESlice (zonk_expr a, zonk_expr lo, zonk_expr hi, zonk_expect t)
-  | T.TEToInt e  -> T.TEToInt (zonk_expr e)
-  | T.TEToByte e -> T.TEToByte (zonk_expr e)
-  | T.TEToFloat e -> T.TEToFloat (zonk_expr e)
   | T.TECast (t, e) -> T.TECast (t, zonk_expr e)
-  | T.TEToIntFromFloat e -> T.TEToIntFromFloat (zonk_expr e)
   | T.TECAlloc (et, n, rt) ->
       T.TECAlloc (zonk_expect et, zonk_expr n, zonk_expect rt)
   | T.TECFree e -> T.TECFree (zonk_expr e)
@@ -2986,26 +2943,9 @@ let rec check_moves_expr (env : env) (live : ty SM.t) (in_tail : bool) (e : T.ex
       let (hi', live) = check_moves_expr env live false hi in
       (T.TESlice (a', lo', hi', ty), live)
 
-  | T.TEToInt sub ->
-      let (sub', live) = check_moves_expr env live false sub in
-      (T.TEToInt sub', live)
-
-  | T.TEToByte sub ->
-      let (sub', live) = check_moves_expr env live false sub in
-      (T.TEToByte sub', live)
-
-
-  | T.TEToFloat sub ->
-      let (sub', live) = check_moves_expr env live false sub in
-      (T.TEToFloat sub', live)
-
   | T.TECast (t, sub) ->
       let (sub', live) = check_moves_expr env live false sub in
       (T.TECast (t, sub'), live)
-
-  | T.TEToIntFromFloat sub ->
-      let (sub', live) = check_moves_expr env live false sub in
-      (T.TEToIntFromFloat sub', live)
 
   | T.TECAlloc (et, n, rt) ->
       let (n', live) = check_moves_expr env live false n in
@@ -3239,7 +3179,6 @@ let rec body_has_suspension (e : T.expr) : bool =
   | TESlice (a, lo, hi, _) ->
       body_has_suspension a
       || body_has_suspension lo || body_has_suspension hi
-  | TEToInt e | TEToByte e | TEToFloat e | TEToIntFromFloat e
   | TECast (_, e) ->
       body_has_suspension e
   | TECAlloc (_, n, _) -> body_has_suspension n

@@ -164,10 +164,8 @@ let ty_of (e : expr) : A.ty =
   | TEUnop (_, _, t) -> t
   | TEIf (_, _, _, t) -> t
   | TELet (_, _, _, _, t, _) -> t
+  | TECast ("int", _) -> A.TyInt
   | TECast (n, _) -> A.TyApp (n, [])
-  | TEToInt _ | TEToIntFromFloat _ -> A.TyInt
-  | TEToByte _ -> A.TyApp ("byte", [])
-  | TEToFloat _ -> A.TyApp ("float", [])
   | TECall (_, _, t) -> t
   | TEFnRef (_, _, t) -> t
   | TEStringLit _ -> A.TyApp ("Handle", [A.TyApp ("byte", [])])
@@ -229,7 +227,6 @@ let subexprs (e : expr) : expr list =
   | TEAssignIdx (a, b, c, _) -> [a; b; c]
   | TELen (a, _) -> [a]
   | TESlice (a, b, c, _) -> [a; b; c]
-  | TEToInt a | TEToByte a | TEToFloat a | TEToIntFromFloat a -> [a]
   | TECast (_, a) -> [a]
   | TECAlloc (_, a, _) -> [a]
   | TECFree a -> [a]
@@ -542,10 +539,9 @@ let rec lower (e : expr) : string =
        | None   -> let vv = lower v in term "ret %s" vv);
       "0"
 
-  | TEToInt e          -> convert (qty (ty_of e)) "l" (lower e)
-  | TEToIntFromFloat e -> convert (qty (ty_of e)) "l" (lower e)
-  | TEToFloat e        -> convert (qty (ty_of e)) "d" (lower e)
-  | TEToByte e ->
+  | TECast ("int", e)   -> convert (qty (ty_of e)) "l" (lower e)
+  | TECast ("float", e) -> convert (qty (ty_of e)) "d" (lower e)
+  | TECast ("byte", e) ->
       let v = lower e in let r = fresh () in ins "%s =w and %s, 255" r v; r
   | TECast (target, e) ->
       convert (qty (ty_of e)) (qty (A.TyApp (target, []))) (lower e)

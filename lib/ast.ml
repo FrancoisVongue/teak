@@ -115,10 +115,8 @@ type expr =
   | EAssignIdx of expr * expr * expr      (* a[i] := v — write element, returns int *)
   | ELen    of expr                       (* len(a) — array length *)
   | ESlice  of expr * expr * expr         (* slice(a, lo, hi) — sub-handle in same region *)
-  | EToInt  of expr                       (* to_int(b|f) — byte→int or float→int truncate *)
-  | EToByte of expr                       (* to_byte(n) — truncate int to byte (u8) *)
-  | EToFloat of expr                      (* to_float(n) — int → float *)
-  | ECast   of string * expr              (* to_<T>(e) — convert e to numeric type T *)
+  | ECast   of string * expr              (* to_<T>(e) — convert e to a numeric type T.
+                                             Covers int/byte/float too (no special nodes). *)
   | ECAlloc of ty * expr                  (* c_alloc[T](n) — malloc n*sizeof(T), returns *T *)
   | ECFree  of expr                       (* c_free(p) — free raw pointer *)
   | ENullPtr of ty                        (* null_ptr[T]() — typed NULL *)
@@ -386,9 +384,6 @@ let rec show_expr = function
   | ESlice (a, lo, hi) ->
       Printf.sprintf "slice(%s, %s, %s)"
         (show_expr a) (show_expr lo) (show_expr hi)
-  | EToInt e  -> Printf.sprintf "to_int(%s)"  (show_expr e)
-  | EToByte e -> Printf.sprintf "to_byte(%s)" (show_expr e)
-  | EToFloat e -> Printf.sprintf "to_float(%s)" (show_expr e)
   | ECast (t, e) -> Printf.sprintf "to_%s(%s)" t (show_expr e)
   | ECAlloc (t, n) ->
       Printf.sprintf "c_alloc[%s](%s)" (show_ty t) (show_expr n)
